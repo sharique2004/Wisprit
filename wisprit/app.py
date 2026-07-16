@@ -229,6 +229,20 @@ def main() -> int:
                   runtime.VENV_PYTHON)
         # Keep running so the menu bar can show and the user can open doctor.
 
+    # Even when the tap "installs", it stays inert until Input Monitoring is
+    # granted, and paste needs Accessibility. Surface that on first launch
+    # instead of failing silently.
+    from wisprit import permissions
+    if not permissions.check_accessibility() or permissions.check_input_monitoring() != "granted":
+        log.warning("Permissions incomplete — dictation won't work until you "
+                    "grant Accessibility AND Input Monitoring to %s. Opening the "
+                    "Accessibility prompt; also run `wisprit doctor` for the full "
+                    "checklist.", runtime.VENV_PYTHON)
+        try:
+            permissions.request_accessibility_prompt()
+        except Exception:
+            log.exception("could not raise the accessibility prompt")
+
     session.start()
     log.info("Wisprit ready — hold %s to dictate.", cfg.get("hotkey"))
     app.run()

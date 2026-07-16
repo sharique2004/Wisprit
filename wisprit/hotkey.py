@@ -194,19 +194,30 @@ class HotkeyListener:
 
     def _watchdog_loop(self) -> None:
         is_enabled = getattr(Quartz, "CGEventTapIsEnabled", None)
+        was_ok = True  # edge-trigger so a persistently-inert tap logs once, not every cycle
         while not self._watchdog_stop.wait(3.0):
             try:
-                if self._tap and is_enabled and not is_enabled(self._tap):
-                    log.warning("event tap found disabled; re-enabling")
-                    Quartz.CGEventTapEnable(self._tap, True)
-                    # The tap died silently (no DisabledBy… callback), so a
-                    # release edge may have been missed. Reset the gesture the
-                    # same way the in-callback handler does, or we get stuck in
-                    # a permanent "recording" state with a dead hotkey.
+                if not (self._tap and is_enabled):
+                    continue
+                if is_enabled(self._tap):
+                    was_ok = True
+                    continue
+                Quartz.CGEventTapEnable(self._tap, True)
+                if was_ok:
+                    # First disable in this streak. A tap that keeps needing
+                    # re-enabling is almost always a "ghost tap" — created but
+                    # inert because Input Monitoring isn't granted.
+                    log.warning("event tap disabled; re-enabling. If this "
+                                "repeats, grant Input Monitoring to this python "
+                                "binary (run `wisprit doctor`).")
+                    # A silent disable may have dropped a release edge — reset
+                    # the gesture like the in-callback handler, or we get stuck
+                    # in a permanent "recording" state.
                     if self._trigger_down and self._armed:
                         self._emit("cancel")
                     self._trigger_down = False
                     self._armed = False
+                was_ok = False
             except Exception:
                 log.exception("watchdog error")
 
