@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Wisprit launchd agent TEMPLATE — start Wisprit automatically at login.
+
+  This file does NOTHING while it sits here in packaging/. It only takes
+  effect if you deliberately install it (below). Recommended order: run
+  Wisprit manually first (./run.command), grant every permission it asks
+  for, and confirm `python -m wisprit doctor` is green — launchd cannot
+  answer TCC prompts for you, and the log paths below require ~/.wisprit
+  to already exist (the first manual run creates it).
+
+  INSTALL (from the repo root):
+      cp packaging/com.wisprit.app.plist ~/Library/LaunchAgents/
+      launchctl bootstrap gui/$UID ~/Library/LaunchAgents/com.wisprit.app.plist
+
+  CHECK STATUS:
+      launchctl print gui/$UID/com.wisprit.app
+
+  UNINSTALL:
+      launchctl bootout gui/$UID/com.wisprit.app
+      rm ~/Library/LaunchAgents/com.wisprit.app.plist
+
+  Paths are absolute (launchd requires it) and written for this machine's
+  user. If your username is not "shariquekhatri", fix every /Users/... path
+  before installing.
+
+  KeepAlive is scoped to crashes only: launchd restarts Wisprit if it dies
+  with a non-zero exit, but respects Quit from the menu bar (exit 0) until
+  the next login.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.wisprit.app</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/shariquekhatri/.meetingscribe/venv/bin/python</string>
+        <string>-m</string>
+        <string>wisprit</string>
+    </array>
+
+    <!-- Repo root, so `python -m wisprit` resolves the package. -->
+    <key>WorkingDirectory</key>
+    <string>/Users/shariquekhatri/Wisprit</string>
+
+    <!-- Belt and suspenders alongside WorkingDirectory. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONPATH</key>
+        <string>/Users/shariquekhatri/Wisprit</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+
+    <!-- GUI app with an event tap: must run in the user's Aqua session. -->
+    <key>LimitLoadToSessionType</key>
+    <string>Aqua</string>
+
+    <key>ProcessType</key>
+    <string>Interactive</string>
+
+    <key>StandardOutPath</key>
+    <string>/Users/shariquekhatri/.wisprit/launchd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/shariquekhatri/.wisprit/launchd.err.log</string>
+</dict>
+</plist>

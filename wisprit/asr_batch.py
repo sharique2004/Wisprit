@@ -1,0 +1,78 @@
+"""Batch ASR fallbacks: mlx-whisper (GPU) then faster-whisper (CPU).
+
+Used by :class:`wisprit.asr.AsrManager` when the streaming ``apple_live`` helper
+is unavailable or yields nothing — so dictation survives a helper crash or an OS
+update that breaks SpeechAnalyzer. Both accept the retained full-utterance PCM
+(int16 mono 16 kHz bytes) and return plain text.
+
+Heavy imports (mlx_whisper / faster_whisper) are deferred into the functions so
+importing this module — and the app — stays cheap when the fallbacks are never
+needed.
+"""
+
+from __future__ import annotations
+
+import logging
+
+import numpy as np
+
+log = logging.getLogger("wisprit.asr_batch")
+
+_DEFAULT_MLX_MODEL = "mlx-community/whisper-large-v3-turbo"
+
+
+def _pcm_to_float32(pcm: bytes) -> np.ndarray:
+    """int16 mono bytes → float32 [-1, 1] array at 16 kHz."""
+    audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+    return audio
+
+
+def transcribe_mlx(pcm: bytes, settings=None) -> str:
+    """Transcribe with mlx-whisper (Apple GPU). Returns '' on any failure."""
+    if not pcm:
+        return ""
+    model = _DEFAULT_MLX_MODEL
+    if settings is not None:
+        configured = settings.get("mlx_model")
+        if configured:
+            model = configured
+    try:
+        import mlx_whisper
+    except Exception:
+        log.exception("mlx_whisper unavailable")
+        return ""
+    try:
+        audio = _pcm_to_float32(pcm)
+        result = mlx_whisper.transcribe(
+            audio,
+            path_or_hf_repo=model,
+            language=(settings.get("locale").split("-")[0] if settings and settings.get("locale") else "en"),
+            fp16=True,
+        )
+        return (result.get("text") or "").strip()
+    except Exception:
+        log.exception("mlx-whisper transcription failed")
+        return ""
+
+
+def transcribe_faster(pcm: bytes, settings=None) -> str:
+    """Transcribe with faster-whisper (CPU tertiary). Returns '' on failure."""
+    if not pcm:
+        return ""
+    try:
+        from faster_whisper import WhisperModel
+    except Exception:
+        log.exception("faster_whisper unavailable")
+        return ""
+    try:
+        audio = _pcm_to_float32(pcm)
+        # small model keeps CPU latency tolerable; this is an emergency path.
+        model = WhisperModel("small", device="cpu", compute_type="int8")
+        lang = "en"
+        if settings and settings.get("locale"):
+            lang = settings.get("locale").split("-")[0]
+        segments, _ = model.transcribe(audio, language=lang)
+        return " ".join(seg.text.strip() for seg in segments).strip()
+    except Exception:
+        log.exception("faster-whisper transcription failed")
+        return ""
