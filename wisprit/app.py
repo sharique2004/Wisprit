@@ -330,14 +330,31 @@ def main() -> int:
         # Keep running so the menu bar can show and the user can open doctor.
 
     # Even when the tap "installs", it stays inert until Input Monitoring is
-    # granted, and paste needs Accessibility. Surface that on first launch
-    # instead of failing silently.
+    # granted, and paste needs Accessibility, and capture needs Microphone —
+    # all three are per-identity, so a new launcher (e.g. Wisprit.app) must be
+    # granted them even if the python binary already was. Surface that on first
+    # launch and proactively raise the mic prompt.
     from wisprit import permissions
-    if not permissions.check_accessibility() or permissions.check_input_monitoring() != "granted":
-        log.warning("Permissions incomplete — dictation won't work until you "
-                    "grant Accessibility AND Input Monitoring to %s. Opening the "
-                    "Accessibility prompt; also run `wisprit doctor` for the full "
-                    "checklist.", runtime.VENV_PYTHON)
+    try:
+        # Triggers the microphone prompt for THIS identity if undetermined.
+        from AVFoundation import AVCaptureDevice, AVMediaTypeAudio
+        AVCaptureDevice.requestAccessForMediaType_completionHandler_(
+            AVMediaTypeAudio, lambda granted: None)
+    except Exception:
+        log.exception("could not request microphone access")
+
+    missing = []
+    if not permissions.check_accessibility():
+        missing.append("Accessibility")
+    if permissions.check_input_monitoring() != "granted":
+        missing.append("Input Monitoring")
+    if permissions.check_microphone() == "denied":
+        missing.append("Microphone")
+    if missing:
+        log.warning("Permissions incomplete (%s) — dictation won't work until "
+                    "these are granted to this app in System Settings ▸ Privacy "
+                    "& Security. Run `wisprit doctor` for the checklist.",
+                    ", ".join(missing))
         try:
             permissions.request_accessibility_prompt()
         except Exception:

@@ -17,7 +17,9 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
+import signal
 import subprocess
 import threading
 import time
@@ -33,6 +35,37 @@ log = logging.getLogger("wisprit.asr")
 # callback that calls feed() can never block; a dropped chunk only costs a few
 # ms of captions, never the on-disk-equivalent transcript.
 _FEED_QUEUE_CHUNKS = 100
+
+
+def reap_orphaned_helpers() -> int:
+    """Kill any orphaned ``apple_live`` processes (reparented to launchd, ppid==1).
+
+    A Wisprit or MeetingScribe that crashed can leave a helper behind; a pile of
+    these can hold the on-device transcriber and hang new helpers. Orphans
+    (ppid==1) are always safe to kill — a *live* owner's helper has that owner
+    as its parent, so this never touches an actively-recording MeetingScribe.
+    Returns the number reaped.
+    """
+    reaped = 0
+    try:
+        out = subprocess.run(
+            ["pgrep", "-f", str(runtime.APPLE_LIVE_BIN)],
+            capture_output=True, text=True, timeout=2.0).stdout.split()
+    except Exception:
+        return 0
+    for pid in out:
+        try:
+            ppid = subprocess.run(
+                ["ps", "-o", "ppid=", "-p", pid],
+                capture_output=True, text=True, timeout=2.0).stdout.strip()
+            if ppid == "1":
+                os.kill(int(pid), signal.SIGKILL)
+                reaped += 1
+        except (ValueError, ProcessLookupError, PermissionError, OSError):
+            continue
+    if reaped:
+        log.info("reaped %d orphaned apple_live process(es)", reaped)
+    return reaped
 
 
 @dataclass
@@ -270,23 +303,35 @@ class AppleLiveEngine:
         if proc is None:
             return
         try:
+            # 1. Close stdin → EOF → the helper finalizes and exits cleanly,
+            #    releasing the on-device transcriber. Always do this first, even
+            #    when cancelling, so we never abandon a helper mid-stream.
             if proc.stdin and not proc.stdin.closed:
                 try:
                     proc.stdin.close()
                 except OSError:
                     pass
-            if kill and proc.poll() is None:
-                proc.terminate()
-                try:
-                    proc.wait(timeout=1.0)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
-                    proc.wait(timeout=1.0)
-            else:
-                try:
-                    proc.wait(timeout=2.0)
-                except subprocess.TimeoutExpired:
-                    proc.kill()
+            # 2. Short grace period for the clean exit (covers the normal case
+            #    and a cancelled quick tap — the helper exits in ~150 ms).
+            grace = 0.4 if kill else 2.0
+            try:
+                proc.wait(timeout=grace)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+            # 3. Didn't exit — escalate to SIGTERM, then SIGKILL, and ALWAYS
+            #    reap so it can never orphan.
+            proc.terminate()
+            try:
+                proc.wait(timeout=0.5)
+                return
+            except subprocess.TimeoutExpired:
+                pass
+            proc.kill()
+            try:
+                proc.wait(timeout=1.0)
+            except subprocess.TimeoutExpired:
+                log.error("apple_live pid %s would not die", proc.pid)
         except Exception:
             log.exception("apple_live teardown error")
 
@@ -299,6 +344,9 @@ class AsrManager:
         self._dictionary = dictionary
         self._apple = AppleLiveEngine(settings, dictionary)
         self._primary_started = False
+        # Clean up any helpers a previous crash/kill left behind, so a fresh
+        # launch never starts contending with orphans.
+        reap_orphaned_helpers()
 
     def primary_available(self) -> bool:
         return self._apple.healthy()
