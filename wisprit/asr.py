@@ -373,10 +373,13 @@ class AsrManager:
 
         if self._primary_started:
             result = self._apple.finalize(timeout_s)
-            # A clean finish OR a plain timeout that still produced partials is
-            # returned as-is (fast, documented last-partial path). Only a helper
-            # crash or a genuinely empty result triggers batch re-transcription.
-            if result.text and not result.crashed:
+            # Any streaming result with text (clean or timeout-with-partials) is
+            # returned as-is. The batch engines (mlx/faster-whisper) are the
+            # recovery path for a genuine helper CRASH only — never for an empty
+            # result. On silence the helper legitimately returns nothing, and
+            # running Whisper on that silence is slow AND hallucinates stock
+            # phrases like "Thank you." A silent push-to-talk must insert nothing.
+            if result.text or not result.crashed:
                 return result
             fallback = self._batch(full_pcm)
             if fallback is not None:
