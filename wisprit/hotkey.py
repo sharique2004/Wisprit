@@ -199,6 +199,14 @@ class HotkeyListener:
                 if self._tap and is_enabled and not is_enabled(self._tap):
                     log.warning("event tap found disabled; re-enabling")
                     Quartz.CGEventTapEnable(self._tap, True)
+                    # The tap died silently (no DisabledBy… callback), so a
+                    # release edge may have been missed. Reset the gesture the
+                    # same way the in-callback handler does, or we get stuck in
+                    # a permanent "recording" state with a dead hotkey.
+                    if self._trigger_down and self._armed:
+                        self._emit("cancel")
+                    self._trigger_down = False
+                    self._armed = False
             except Exception:
                 log.exception("watchdog error")
 

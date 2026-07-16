@@ -15,7 +15,6 @@ from __future__ import annotations
 import logging
 import queue
 import subprocess
-import threading
 
 from AppKit import (
     NSApplication, NSApplicationActivationPolicyAccessory, NSMenu, NSMenuItem,
@@ -139,7 +138,9 @@ class WispritApp(NSObject):
             pb.setString_forType_(text, NSPasteboardTypeString)
 
     def pasteLast_(self, sender):
-        threading.Thread(target=self._session.paste_last, daemon=True).start()
+        # Enqueue onto the session thread so the clipboard swap stays serialized
+        # with any in-flight dictation (never two paste transactions at once).
+        self._session.request_paste_last()
 
     def openDictionary_(self, sender):
         subprocess.Popen(["open", str(runtime.DICTIONARY_PATH)])

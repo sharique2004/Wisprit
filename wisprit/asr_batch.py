@@ -20,6 +20,10 @@ log = logging.getLogger("wisprit.asr_batch")
 
 _DEFAULT_MLX_MODEL = "mlx-community/whisper-large-v3-turbo"
 
+# Cache the faster-whisper model across calls so the CPU tertiary path doesn't
+# reload (and possibly re-download) the model on every fallback.
+_faster_model = None
+
 
 def _pcm_to_float32(pcm: bytes) -> np.ndarray:
     """int16 mono bytes → float32 [-1, 1] array at 16 kHz."""
@@ -59,6 +63,7 @@ def transcribe_faster(pcm: bytes, settings=None) -> str:
     """Transcribe with faster-whisper (CPU tertiary). Returns '' on failure."""
     if not pcm:
         return ""
+    global _faster_model
     try:
         from faster_whisper import WhisperModel
     except Exception:
@@ -66,8 +71,10 @@ def transcribe_faster(pcm: bytes, settings=None) -> str:
         return ""
     try:
         audio = _pcm_to_float32(pcm)
-        # small model keeps CPU latency tolerable; this is an emergency path.
-        model = WhisperModel("small", device="cpu", compute_type="int8")
+        if _faster_model is None:
+            # small model keeps CPU latency tolerable; this is an emergency path.
+            _faster_model = WhisperModel("small", device="cpu", compute_type="int8")
+        model = _faster_model
         lang = "en"
         if settings and settings.get("locale"):
             lang = settings.get("locale").split("-")[0]

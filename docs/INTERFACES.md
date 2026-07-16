@@ -62,7 +62,7 @@ DEFAULTS = {
   "history_limit": 1000,
   "engine": "auto",                    # "auto"|"apple_live"|"mlx_whisper"|"faster_whisper"
   "mlx_model": "mlx-community/whisper-large-v3-turbo",
-  "paste_restore_delay_ms": 120,
+  "paste_restore_delay_ms": 500,       # restore too early = paste of stale clipboard
   "enabled": True,                     # master toggle from menu
 }
 

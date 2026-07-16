@@ -5,17 +5,19 @@ database stays tiny and there is nothing sensitive to leak beyond what was
 already typed into some app. WAL journal mode keeps single-writer inserts
 fast and readers non-blocking.
 
-Threading: this class is thread-confined to the session thread by design.
-The connection is created with ``check_same_thread=False`` only so the
-owning thread may differ from the constructing (main) thread; concurrent
-access from multiple threads is NOT supported and must be serialized by the
-caller (the session state machine already does).
+Threading: reads happen on the main thread (the status menu rebuilds recents
+when it opens) while writes happen on the session thread, so every public
+method takes an internal lock. The connection uses ``check_same_thread=False``
+because those callers are different threads; the lock serializes them. A
+``SystemError`` from a raced connection is not a ``sqlite3.Error`` subclass, so
+methods catch ``Exception`` where a failure must never propagate.
 """
 
 from __future__ import annotations
 
 import logging
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -48,6 +50,7 @@ class History:
         self._path = Path(path)
         self._settings = settings
         self._conn: sqlite3.Connection | None = None
+        self._lock = threading.Lock()
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(str(self._path), check_same_thread=False)
@@ -77,18 +80,19 @@ class History:
         (history disabled, empty text, or database unavailable)."""
         if not text or self._conn is None or not self._enabled():
             return -1
-        try:
-            cur = self._conn.execute(
-                "INSERT INTO transcripts (ts, text, engine, duration_ms) VALUES (?, ?, ?, ?)",
-                (time.time(), text, engine or "", duration_ms),
-            )
-            row_id = int(cur.lastrowid)
-            self._trim()
-            self._conn.commit()
-            return row_id
-        except sqlite3.Error:
-            log.exception("failed to add history entry")
-            return -1
+        with self._lock:
+            try:
+                cur = self._conn.execute(
+                    "INSERT INTO transcripts (ts, text, engine, duration_ms) VALUES (?, ?, ?, ?)",
+                    (time.time(), text, engine or "", duration_ms),
+                )
+                row_id = int(cur.lastrowid)
+                self._trim()
+                self._conn.commit()
+                return row_id
+            except Exception:  # incl. SystemError from a raced NULL return
+                log.exception("failed to add history entry")
+                return -1
 
     def _trim(self):
         """Keep only the newest history_limit rows (called inside add's txn)."""
@@ -104,49 +108,53 @@ class History:
         disabled — the paste-last recovery path must always function."""
         if self._conn is None or n <= 0:
             return []
-        try:
-            rows = self._conn.execute(
-                "SELECT id, ts, text, engine, duration_ms FROM transcripts "
-                "ORDER BY id DESC LIMIT ?",
-                (n,),
-            ).fetchall()
-            return [
-                {"id": r[0], "ts": r[1], "text": r[2], "engine": r[3], "duration_ms": r[4]}
-                for r in rows
-            ]
-        except sqlite3.Error:
-            log.exception("failed to read history")
-            return []
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT id, ts, text, engine, duration_ms FROM transcripts "
+                    "ORDER BY id DESC LIMIT ?",
+                    (n,),
+                ).fetchall()
+                return [
+                    {"id": r[0], "ts": r[1], "text": r[2], "engine": r[3], "duration_ms": r[4]}
+                    for r in rows
+                ]
+            except Exception:
+                log.exception("failed to read history")
+                return []
 
     def last_text(self) -> str | None:
         """Text of the most recent transcript, or None if history is empty."""
         if self._conn is None:
             return None
-        try:
-            row = self._conn.execute(
-                "SELECT text FROM transcripts ORDER BY id DESC LIMIT 1"
-            ).fetchone()
-            return row[0] if row else None
-        except sqlite3.Error:
-            log.exception("failed to read last transcript")
-            return None
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT text FROM transcripts ORDER BY id DESC LIMIT 1"
+                ).fetchone()
+                return row[0] if row else None
+            except Exception:
+                log.exception("failed to read last transcript")
+                return None
 
     def purge(self):
         """Delete every stored transcript and reclaim file space."""
         if self._conn is None:
             return
-        try:
-            self._conn.execute("DELETE FROM transcripts")
-            self._conn.commit()
-            self._conn.execute("VACUUM")
-        except sqlite3.Error:
-            log.exception("failed to purge history")
+        with self._lock:
+            try:
+                self._conn.execute("DELETE FROM transcripts")
+                self._conn.commit()
+                self._conn.execute("VACUUM")
+            except Exception:
+                log.exception("failed to purge history")
 
     def close(self):
         """Close the underlying connection (idempotent)."""
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except sqlite3.Error:
-                log.exception("error closing history db")
-            self._conn = None
+        with self._lock:
+            if self._conn is not None:
+                try:
+                    self._conn.close()
+                except Exception:
+                    log.exception("error closing history db")
+                self._conn = None

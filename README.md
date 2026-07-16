@@ -15,7 +15,7 @@ release ────────┴──▶ finalize ──▶ rule cleanup (<2
 
 - **Streaming during the hold.** ASR runs on the Neural Engine *while you speak*, so at release only the tail needs finalizing. Target: **<400 ms p90 release-to-text** — vs Wispr's <700 ms p99 engineering target and its 1–2 s user-perceived reality.
 - **Verbatim-first.** Default output is the transcript plus deterministic rules only (filler removal, dictionary corrections, "new line" commands, spoken email/URL joining). No LLM ever rewrites your words unless you explicitly ask (opt-in "Polish with Claude" via the local `claude` CLI).
-- **Privacy is structural.** No network sockets anywhere in the pipeline. No audio retention. History is transcript text only, in a local SQLite file you can purge from the menu.
+- **Privacy is structural.** The dictation path makes no network calls — audio is transcribed on the Neural Engine and never leaves the Mac. No audio retention; history is transcript text only, in a local SQLite file you can purge from the menu. (The one caveat: the mlx-whisper / faster-whisper *fallback* engines download their model from Hugging Face on first use if it isn't already cached — mlx-whisper large-v3-turbo is provisioned by MeetingScribe, but run once online to warm the caches if you want the fallback available offline.)
 - **Fallback chain.** If the SpeechAnalyzer helper dies, Wisprit transparently falls back to mlx-whisper `large-v3-turbo`, then faster-whisper, so dictation never fully dies.
 
 Full design rationale lives in [docs/SPEC.md](docs/SPEC.md); module contracts in [docs/INTERFACES.md](docs/INTERFACES.md).
@@ -99,7 +99,7 @@ Created with defaults on first run; edit and it's picked up (some keys need a re
 
 ## Custom dictionary — `~/.wisprit/dictionary.json`
 
-Your vocabulary, applied twice: terms are fed to the ASR engine for recognition biasing (`apple_live --context`), *and* enforced as post-ASR corrections. The file hot-reloads on save — no restart.
+Your vocabulary, enforced as **post-ASR corrections**. (Terms are also passed to `apple_live --context`, but the helper's `SpeechTranscriber` currently ignores that biasing — Apple-confirmed; see [docs/research/local-tech.md](docs/research/local-tech.md) §4 — so correctness comes entirely from the substitutions below. The `--context` hook is kept for a future `DictationTranscriber`-based helper that would honor it.) The file hot-reloads on save — no restart.
 
 ```json
 {
@@ -113,7 +113,7 @@ Your vocabulary, applied twice: terms are fed to the ASR engine for recognition 
 - `term` — the canonical spelling you want in your text.
 - `hear` — misrecognitions to correct (case-insensitive, whole words only). Every `term` also self-corrects casing automatically (`"insforge"` → `"InsForge"`), so `hear` is only for genuinely different-sounding output.
 
-First run seeds it with this machine's known vocabulary (InsForge, MeetingScribe, Wispr Flow, Claude, Anthropic, MLX, Sharique, Khatri, …). Add terms from the menu bar or edit the file directly.
+First run seeds it with this machine's known vocabulary (InsForge, MeetingScribe, Wispr Flow, Claude, Anthropic, MLX, Sharique, Khatri, …). Edit it directly — the menu bar's **Open Dictionary…** opens this file in your editor, and it hot-reloads on save.
 
 Other files in `~/.wisprit/`: `history.sqlite` (transcript text only), `metrics.log` (per-utterance stage latencies, one JSON line each), `wisprit.log` (app log).
 

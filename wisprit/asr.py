@@ -41,6 +41,7 @@ class UtteranceResult:
     engine: str
     finalize_ms: float
     timed_out: bool = False
+    crashed: bool = False   # helper exited without emitting {"t":"done"}
 
 
 @dataclass
@@ -48,6 +49,7 @@ class _StreamState:
     finals: list[str] = field(default_factory=list)
     last_partial: str = ""
     done: threading.Event = field(default_factory=threading.Event)
+    clean: bool = False     # set True only when the helper emits {"t":"done"}
 
 
 class AppleLiveEngine:
@@ -101,9 +103,16 @@ class AppleLiveEngine:
             log.error("apple_live helper missing at %s", runtime.APPLE_LIVE_BIN)
             return False
 
-        self._state = _StreamState()
+        # Defensive: if a previous utterance somehow left a live process (it
+        # shouldn't — the session is IDLE-only), kill it before spawning.
+        if self._proc is not None:
+            self._teardown(kill=True)
+
+        state = _StreamState()
+        feed_q: queue.Queue = queue.Queue(maxsize=_FEED_QUEUE_CHUNKS)
+        self._state = state
+        self._feed_q = feed_q
         self._closing = False
-        self._feed_q = queue.Queue(maxsize=_FEED_QUEUE_CHUNKS)
         self._context_path = self._write_context()
 
         locale = (self._settings.get("locale") if self._settings else None) or "en-US"
@@ -115,7 +124,7 @@ class AppleLiveEngine:
             cmd += ["--context", self._context_path]
 
         try:
-            self._proc = subprocess.Popen(
+            proc = subprocess.Popen(
                 cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL, bufsize=0,
             )
@@ -123,12 +132,16 @@ class AppleLiveEngine:
             log.exception("failed to spawn apple_live")
             self._proc = None
             return False
+        self._proc = proc
 
+        # Threads capture proc/state/feed_q as locals, so a stale thread from a
+        # prior utterance can never touch the next utterance's state.
         self._reader = threading.Thread(
-            target=self._read_loop, args=(on_partial,), daemon=True, name="asr-read")
+            target=self._read_loop, args=(on_partial, proc, state),
+            daemon=True, name="asr-read")
         self._reader.start()
         self._feeder = threading.Thread(
-            target=self._feed_loop, daemon=True, name="asr-feed")
+            target=self._feed_loop, args=(proc, feed_q), daemon=True, name="asr-feed")
         self._feeder.start()
         return True
 
@@ -162,22 +175,27 @@ class AppleLiveEngine:
             except (queue.Empty, queue.Full):
                 pass
 
-        got_done = self._state.done.wait(timeout=timeout_s)
+        state = self._state
+        got_done = state.done.wait(timeout=timeout_s)
         finalize_ms = (time.monotonic() - t0) * 1000.0
 
-        finals = [f.strip() for f in self._state.finals if f.strip()]
+        finals = [f.strip() for f in state.finals if f.strip()]
         text = " ".join(finals)
         timed_out = not got_done
-        if timed_out:
-            # Helper didn't emit {"t":"done"} in time — best effort: append the
-            # last volatile partial if it adds anything.
-            tail = self._state.last_partial.strip()
+        # done was set but not via a clean {"t":"done"} event → the helper
+        # exited early (crash / EOF). The caller re-transcribes from full PCM.
+        crashed = got_done and not state.clean
+        if timed_out or crashed:
+            # Best effort: append the last volatile partial if it adds anything.
+            tail = state.last_partial.strip()
             if tail and tail not in text:
                 text = (text + " " + tail).strip()
-            log.warning("apple_live finalize timed out after %.0f ms", finalize_ms)
+            log.warning("apple_live finalize %s after %.0f ms",
+                        "timed out" if timed_out else "helper exited early", finalize_ms)
 
         self._teardown(kill=timed_out)
-        return UtteranceResult(text.strip(), "apple_live", finalize_ms, timed_out)
+        return UtteranceResult(text.strip(), "apple_live", finalize_ms,
+                               timed_out=timed_out, crashed=crashed)
 
     def cancel(self) -> None:
         """Discard the current utterance and kill the helper."""
@@ -186,16 +204,15 @@ class AppleLiveEngine:
 
     # --- internals ------------------------------------------------------------
 
-    def _feed_loop(self) -> None:
-        proc = self._proc
+    def _feed_loop(self, proc, feed_q) -> None:
         if proc is None or proc.stdin is None:
             return
         try:
             while True:
-                if self._closing and self._feed_q.empty():
+                if self._closing and feed_q.empty():
                     break
                 try:
-                    chunk = self._feed_q.get(timeout=0.2)
+                    chunk = feed_q.get(timeout=0.2)
                 except queue.Empty:
                     continue
                 if chunk is None:  # sentinel: end of utterance
@@ -212,9 +229,11 @@ class AppleLiveEngine:
             except OSError:
                 pass
 
-    def _read_loop(self, on_partial: Callable[[str], None]) -> None:
-        proc = self._proc
+    def _read_loop(self, on_partial: Callable[[str], None], proc, state) -> None:
         if proc is None or proc.stdout is None:
+            # Nothing to read — unblock finalize() so it doesn't wait the full
+            # timeout, and mark it as a non-clean exit so the caller falls back.
+            state.done.set()
             return
         try:
             for line in proc.stdout:
@@ -228,21 +247,22 @@ class AppleLiveEngine:
                 if kind == "final":
                     txt = ev.get("text", "")
                     if txt:
-                        self._state.finals.append(txt)
+                        state.finals.append(txt)
                 elif kind == "partial":
                     txt = ev.get("text", "")
                     if txt:
-                        self._state.last_partial = txt
+                        state.last_partial = txt
                         try:
                             on_partial(txt)
                         except Exception:
                             log.exception("on_partial callback raised")
                 elif kind == "done":
+                    state.clean = True   # clean finalize, not a crash/EOF
                     break
         except (ValueError, OSError):
             log.exception("apple_live read loop error")
         finally:
-            self._state.done.set()
+            state.done.set()
 
     def _teardown(self, kill: bool) -> None:
         proc = self._proc
@@ -305,10 +325,11 @@ class AsrManager:
 
         if self._primary_started:
             result = self._apple.finalize(timeout_s)
-            if result.text and not result.timed_out:
+            # A clean finish OR a plain timeout that still produced partials is
+            # returned as-is (fast, documented last-partial path). Only a helper
+            # crash or a genuinely empty result triggers batch re-transcription.
+            if result.text and not result.crashed:
                 return result
-            # Empty or timed-out streaming result: try the batch fallback if we
-            # have the audio, else return whatever we got.
             fallback = self._batch(full_pcm)
             if fallback is not None:
                 return fallback

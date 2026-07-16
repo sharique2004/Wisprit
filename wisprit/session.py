@@ -83,7 +83,7 @@ class Session:
             if self._state in (RECORDING, FINALIZING):
                 self._abort("cancelled" if kind == "cancel" else "esc")
         elif kind == "paste_last":
-            if self._state == IDLE:
+            if self._state == IDLE and self._enabled():
                 self.paste_last()
 
     # --- transitions ----------------------------------------------------------
@@ -108,13 +108,13 @@ class Session:
         self._start_level_ticker()
 
     def _finish(self, ts: float) -> None:
-        self._hotkey.set_recording(False)
         self._stop_level_ticker()
         debounce_ms = self._num("hold_debounce_ms", 150)
         held_ms = (ts - self._press_ts) * 1000.0
 
         if held_ms < debounce_ms:
             # Accidental brush — discard.
+            self._hotkey.set_recording(False)
             self._audio.stop()
             self._asr.cancel()
             self._set_state(IDLE)
@@ -128,9 +128,18 @@ class Session:
         full_pcm = self._audio.stop()
         result = self._asr.finalize(full_pcm)
         t_asr = time.monotonic()
+        # Recording is truly over now; stop the hotkey emitting further Esc.
+        self._hotkey.set_recording(False)
 
         text = postprocess.process(result.text, self._settings, self._dictionary)
         t_post = time.monotonic()
+
+        # An Esc pressed WHILE we were finalizing (a slow/timed-out finalize)
+        # means the user wants to abort — honor it before inserting.
+        if self._drain_cancel():
+            self._set_state(IDLE)
+            self._pill_call("hide")
+            return
 
         if not text:
             self._set_state(IDLE)
@@ -164,6 +173,28 @@ class Session:
         )
         self._set_state(IDLE)
 
+    def _drain_cancel(self) -> bool:
+        """Non-blocking: True (consuming them) if any esc/cancel events are
+        queued. Other events are re-queued in order so a press arriving during
+        finalize still starts the next utterance."""
+        cancelled = False
+        others = []
+        while True:
+            try:
+                ev = self._events.get_nowait()
+            except queue.Empty:
+                break
+            if ev.kind in ("esc", "cancel"):
+                cancelled = True
+            else:
+                others.append(ev)
+        for ev in others:
+            try:
+                self._events.put_nowait(ev)
+            except queue.Full:
+                pass
+        return cancelled
+
     def _abort(self, reason: str) -> None:
         self._hotkey.set_recording(False)
         self._stop_level_ticker()
@@ -182,6 +213,15 @@ class Session:
             self._flash_error(reason)
 
     # --- paste-last recovery --------------------------------------------------
+
+    def request_paste_last(self) -> None:
+        """Thread-safe entry point (used by the menu): enqueue a paste-last so
+        it runs serialized on the session thread, not concurrently."""
+        from wisprit.hotkey import HotkeyEvent
+        try:
+            self._events.put_nowait(HotkeyEvent("paste_last", time.monotonic()))
+        except queue.Full:
+            log.warning("event queue full; paste-last dropped")
 
     def paste_last(self) -> None:
         """Re-insert the most recent transcript (⌘⌃V / menu). The recovery path

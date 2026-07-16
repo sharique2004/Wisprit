@@ -30,8 +30,9 @@ import re
 log = logging.getLogger("wisprit.postprocess")
 
 # Fillers removed only as isolated, word-bounded tokens. Deliberately excludes
-# "like", "so", "well", "you know" — removing those context-free mangles meaning.
-_FILLER_WORDS = ["um", "umm", "uh", "uhh", "uhm", "erm", "err"]
+# "like", "so", "well", "you know" (context-free removal mangles meaning) and
+# "err" (a real verb — "err on the side of caution").
+_FILLER_WORDS = ["um", "umm", "uh", "uhh", "uhm", "erm"]
 _FILLER_RE = re.compile(
     r"(?<!\w)(?:" + "|".join(_FILLER_WORDS) + r")(?!\w)[,]?",
     re.IGNORECASE,

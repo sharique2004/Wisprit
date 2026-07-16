@@ -72,6 +72,8 @@ UNTOUCHED = [
     "meet at the dot matrix printer",
     "he said hello",
     "let's talk about the comma splice problem",
+    "err on the side of caution",   # "err" is a verb, not a filler
+    "to err is human",
 ]
 
 
