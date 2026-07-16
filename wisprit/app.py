@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 import queue
 import subprocess
+import threading
 
 from AppKit import (
     NSApplication, NSApplicationActivationPolicyAccessory, NSMenu, NSMenuItem,
@@ -23,7 +24,7 @@ from AppKit import (
 from Foundation import NSObject
 import objc
 
-from wisprit import bootstrap, doctor, runtime
+from wisprit import bootstrap, doctor, polish, runtime
 from wisprit.audio import AudioCapture
 from wisprit.dictionary import Dictionary
 from wisprit.history import History
@@ -97,6 +98,7 @@ class WispritApp(NSObject):
 
         menu.addItem_(NSMenuItem.separatorItem())
         self._add(menu, "Paste Last Transcript  (⌘⌃V)", b"pasteLast:")
+        self._add_polish_submenu(menu)
         self._add(menu, "Open Dictionary…", b"openDictionary:")
         self._add(menu, "Open Config…", b"openConfig:")
         self._add(menu, "Run Doctor…", b"runDoctor:")
@@ -112,6 +114,23 @@ class WispritApp(NSObject):
             item.setTarget_(self)
         menu.addItem_(item)
         return item
+
+    @objc.python_method
+    def _add_polish_submenu(self, menu):
+        parent = self._add(menu, "Polish Last with Claude", None)
+        if not polish.available():
+            parent.setEnabled_(False)
+            parent.setTitle_("Polish Last (claude CLI not found)")
+            return
+        submenu = NSMenu.alloc().init()
+        submenu.setAutoenablesItems_(False)
+        for mode in ("clean", "formal", "casual", "prompt"):
+            item = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+                polish.MODE_LABELS[mode], b"polishLast:", "")
+            item.setTarget_(self)
+            item.setRepresentedObject_(mode)
+            submenu.addItem_(item)
+        parent.setSubmenu_(submenu)
 
     # NSMenuDelegate — refresh recents/enabled state each time the menu opens.
     def menuNeedsUpdate_(self, menu):
@@ -141,6 +160,53 @@ class WispritApp(NSObject):
         # Enqueue onto the session thread so the clipboard swap stays serialized
         # with any in-flight dictation (never two paste transactions at once).
         self._session.request_paste_last()
+
+    def polishLast_(self, sender):
+        mode = sender.representedObject() or "clean"
+        # The claude call takes seconds — run it off the main thread, then land
+        # the result on the clipboard from the main thread.
+        threading.Thread(target=self._do_polish, args=(mode,), daemon=True,
+                         name="polish").start()
+
+    @objc.python_method
+    def _do_polish(self, mode):
+        text = None
+        try:
+            text = self._history.last_text()
+        except Exception:
+            log.exception("polish: could not read last transcript")
+        if not text:
+            self._notify("Wisprit", "No transcript to polish yet.")
+            return
+        ok, result = polish.polish(text, mode)
+        if not ok:
+            self._notify("Wisprit — polish failed", result)
+            return
+
+        def land():
+            pb = NSPasteboard.generalPasteboard()
+            pb.clearContents()
+            pb.setString_forType_(result, NSPasteboardTypeString)
+        from wisprit import ui
+        ui.call_on_main(land)
+        preview = result.replace("\n", " ")
+        if len(preview) > 60:
+            preview = preview[:59] + "…"
+        self._notify(f"Polished ({polish.MODE_LABELS.get(mode, mode)}) — ⌘V to paste",
+                     preview)
+
+    @objc.python_method
+    def _notify(self, title, message):
+        # Best-effort user notification; never let it break the caller.
+        try:
+            safe_t = title.replace('"', "'")
+            safe_m = (message or "").replace('"', "'")
+            subprocess.Popen([
+                "osascript", "-e",
+                f'display notification "{safe_m}" with title "{safe_t}"',
+            ])
+        except Exception:
+            log.exception("notification failed")
 
     def openDictionary_(self, sender):
         subprocess.Popen(["open", str(runtime.DICTIONARY_PATH)])

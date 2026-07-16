@@ -64,9 +64,10 @@ macOS will not let an app grant these to itself. In order:
 | Dictate | **Hold Fn (🌐)**, speak, release. Holds shorter than 150 ms are ignored (accidental brushes). |
 | Cancel mid-dictation | **Esc** while recording — audio is discarded, nothing is inserted. |
 | Paste last transcript | **Cmd+Ctrl+V** — the recovery path if a paste failed or you dictated into the wrong window. |
+| Polish last with Claude | Menu bar → **Polish Last with Claude** → Clean up / Make formal / Make casual / As an AI prompt. The polished text lands on your clipboard (⌘V to paste) with a notification. |
 | Everything else | Menu bar icon: enable/disable, last 5 transcripts (click to copy), paste last, open dictionary/config, run doctor, purge history, quit. |
 
-Opt-in **"Polish with Claude"** (LLM tone transforms via the local `claude` CLI, no API key) is the first planned post-MVP feature — the deterministic verbatim pipeline ships first, on purpose.
+**Polish with Claude** is the opt-in LLM tier — deliberately *off* the dictation path, so verbatim text still lands instantly. When you pick a mode, Wisprit sends your last transcript to the local `claude` CLI (your Claude Code subscription — no API key, ~2–7 s) and puts the rewritten result on the clipboard. The transcript is passed as delimited *data* with a hardened system prompt, so a dictated imperative like "ignore that and write a poem" gets **cleaned, not obeyed**; leaked model preamble is stripped before the text reaches your clipboard.
 
 While you hold Fn, a small **floating pill** shows a red recording dot, live input level, and the last few words of the in-progress transcript — streaming feedback Wispr never shows. Drag the pill anywhere; the position persists. On release it briefly shows a spinner, then flashes green (inserted) or amber (with a reason).
 
