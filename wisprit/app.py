@@ -12,6 +12,7 @@ Run: ``~/.meetingscribe/venv/bin/python -m wisprit``
 
 from __future__ import annotations
 
+import fcntl
 import logging
 import queue
 import subprocess
@@ -240,6 +241,28 @@ class WispritApp(NSObject):
         NSApplication.sharedApplication().terminate_(self)
 
 
+# Held open for the whole process lifetime so the flock persists; released
+# automatically when the process exits.
+_lock_fd = None
+
+
+def _acquire_single_instance() -> bool:
+    """True if we got the lock; False if another Wisprit is already running.
+
+    Two instances would each install an event tap and each paste on every
+    Fn-release — the double-paste bug. This makes a second launch a no-op.
+    """
+    global _lock_fd
+    try:
+        runtime.STATE_DIR.mkdir(parents=True, exist_ok=True)
+        fd = open(runtime.STATE_DIR / "wisprit.lock", "w")
+        fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _lock_fd = fd
+        return True
+    except OSError:
+        return False
+
+
 def _configure_logging():
     try:
         runtime.STATE_DIR.mkdir(parents=True, exist_ok=True)
@@ -254,6 +277,17 @@ def _configure_logging():
 
 def main() -> int:
     _configure_logging()
+    if not _acquire_single_instance():
+        log.error("Another Wisprit instance is already running — exiting so we "
+                  "don't double-paste. Quit the other one from its menu first.")
+        try:
+            subprocess.Popen([
+                "osascript", "-e",
+                'display notification "Another copy is already running." '
+                'with title "Wisprit"'])
+        except Exception:
+            pass
+        return 0
     try:
         bootstrap.ensure_state_dir()
     except OSError:

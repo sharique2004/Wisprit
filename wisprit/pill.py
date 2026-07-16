@@ -1,9 +1,10 @@
-"""The floating status pill.
+"""The floating status indicator.
 
-A borderless, non-activating ``NSPanel`` that floats above every app (and full-
-screen spaces), shows recording state + a live input meter + a rolling preview
-of the streaming transcript, and is draggable with its position persisted.
-Unlike Wispr Flow's fixed pill, this one can be moved anywhere.
+A tiny, borderless, non-activating ``NSPanel`` that floats above every app (and
+full-screen spaces) as a minimal "Wisprit is listening" dot — it does NOT show
+the transcript (the text goes straight to your cursor). It just pulses with your
+voice while recording and flashes a colour on finish. Draggable; position
+persists.
 
 Every public method is expected to be called on the main thread (the session
 routes through :func:`wisprit.ui.call_on_main`).
@@ -14,21 +15,21 @@ from __future__ import annotations
 import logging
 
 from AppKit import (
-    NSBezierPath, NSColor, NSFont, NSFontAttributeName,
-    NSForegroundColorAttributeName, NSMakeRect, NSPanel, NSScreen,
+    NSBezierPath, NSColor, NSMakeRect, NSPanel, NSScreen,
     NSStatusWindowLevel, NSView, NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorFullScreenAuxiliary,
     NSWindowStyleMaskNonactivatingPanel, NSTimer,
 )
-from Foundation import NSMakePoint, NSMakeSize, NSObject, NSString
+from Foundation import NSMakePoint, NSObject
 import objc
 
 from wisprit import runtime
 
 log = logging.getLogger("wisprit.pill")
 
-PILL_W, PILL_H = 240.0, 56.0
-_BOTTOM_MARGIN = 120.0
+# A small circular indicator — just big enough to notice, never a text window.
+PILL_W, PILL_H = 26.0, 26.0
+_BOTTOM_MARGIN = 90.0
 
 _COLORS = {
     "recording": (0.93, 0.26, 0.28),   # red
@@ -45,7 +46,6 @@ class _PillView(NSView):
             return None
         self._dot = (0.6, 0.6, 0.6)
         self._level = 0.0
-        self._text = ""
         return self
 
     def setDot_(self, rgb):
@@ -54,44 +54,24 @@ class _PillView(NSView):
     def setLevel_(self, level):
         self._level = max(0.0, min(1.0, float(level)))
 
-    def setText_(self, text):
-        self._text = text or ""
-
     def drawRect_(self, rect):
-        bounds = self.bounds()
-        # Rounded translucent background.
-        bg = NSColor.colorWithCalibratedRed_green_blue_alpha_(0.11, 0.12, 0.14, 0.92)
-        bg.set()
-        path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            bounds, PILL_H / 2.0, PILL_H / 2.0)
-        path.fill()
+        b = self.bounds()
+        cx, cy = b.size.width / 2.0, b.size.height / 2.0
+        r, g, bl = self._dot
 
-        # State dot (left).
-        r, g, b = self._dot
-        NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, 1.0).set()
-        dot = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(18, PILL_H / 2 - 5, 10, 10))
+        # Faint translucent halo so the dot reads on any background.
+        NSColor.colorWithCalibratedWhite_alpha_(0.0, 0.28).set()
+        halo = NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(1, 1, b.size.width - 2, b.size.height - 2))
+        halo.fill()
+
+        # The dot itself grows subtly with input level while recording.
+        base = 6.0
+        radius = base + self._level * 5.0
+        NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, bl, 0.95).set()
+        dot = NSBezierPath.bezierPathWithOvalInRect_(
+            NSMakeRect(cx - radius, cy - radius, radius * 2, radius * 2))
         dot.fill()
-
-        # Level meter: five bars scaled by the current input level.
-        base_x = 40.0
-        for i in range(5):
-            frac = self._level * (0.5 + i * 0.14)
-            h = 6.0 + frac * 22.0
-            y = PILL_H / 2 - h / 2
-            NSColor.colorWithCalibratedRed_green_blue_alpha_(r, g, b, 0.85).set()
-            bar = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                NSMakeRect(base_x + i * 7.0, y, 4.0, h), 2.0, 2.0)
-            bar.fill()
-
-        # Rolling transcript / status text (right of the meter).
-        if self._text:
-            attrs = {
-                NSFontAttributeName: NSFont.systemFontOfSize_(12.0),
-                NSForegroundColorAttributeName: NSColor.colorWithCalibratedWhite_alpha_(0.92, 1.0),
-            }
-            ns = NSString.stringWithString_(self._text)
-            text_rect = NSMakeRect(84, PILL_H / 2 - 9, PILL_W - 96, 18)
-            ns.drawInRect_withAttributes_(text_rect, attrs)
 
 
 class Pill(NSObject):
@@ -176,18 +156,18 @@ class Pill(NSObject):
             return False
 
     @objc.python_method
-    def _show(self, state: str, text: str = ""):
+    def _show(self, state: str):
         if self._panel is None or self._hidden():
             return
         self._cancel_hide_timer()
         self._view.setDot_(_COLORS.get(state, (0.6, 0.6, 0.6)))
-        self._view.setText_(text)
         self._view.setNeedsDisplay_(True)
         self._panel.orderFrontRegardless()
 
     @objc.python_method
     def show_recording(self):
-        self._show("recording", "Listening…")
+        self._view.setLevel_(0.0)
+        self._show("recording")
 
     @objc.python_method
     def update_level(self, level):
@@ -198,24 +178,25 @@ class Pill(NSObject):
 
     @objc.python_method
     def update_partial(self, text):
-        if self._panel is None or self._view is None or self._hidden():
-            return
-        self._view.setText_(text or "Listening…")
-        self._view.setNeedsDisplay_(True)
+        # The indicator intentionally does not display the transcript — the text
+        # goes straight to the cursor. Kept for API compatibility; no-op.
+        return
 
     @objc.python_method
     def show_finalizing(self):
-        self._show("finalizing", "…")
+        self._view.setLevel_(0.0)
+        self._show("finalizing")
 
     @objc.python_method
     def flash_success(self):
-        self._show("success", "✓")
-        self._schedule_hide(1.0)
+        self._show("success")
+        self._schedule_hide(0.6)
 
     @objc.python_method
     def flash_error(self, msg=""):
-        self._show("error", msg or "error")
-        self._schedule_hide(2.6)
+        # No text on the tiny indicator; the reason is logged by the session.
+        self._show("error")
+        self._schedule_hide(1.6)
 
     @objc.python_method
     def hide(self):

@@ -37,6 +37,9 @@ _SEED_TERMS = [
     {"term": "MLX", "hear": ["m l x", "em el ex"]},
     {"term": "Sharique", "hear": ["shariq", "sharik", "shreek"]},
     {"term": "Khatri", "hear": ["katri", "kathri"]},
+    {"term": "hackathon", "hear": ["hacker thought", "hacker thoughts",
+                                    "hack a thon", "hackerthon", "hacker thon"]},
+    {"term": "Penn State", "hear": ["pen state", "penn state university"]},
 ]
 
 
