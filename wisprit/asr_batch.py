@@ -31,6 +31,29 @@ def _pcm_to_float32(pcm: bytes) -> np.ndarray:
     return audio
 
 
+# Whisper models hallucinate these stock phrases on silence / near-silence
+# (learned from YouTube captions). If the WHOLE output is one of these, it's
+# almost certainly a hallucination on a silent clip, so we drop it — a silent
+# push-to-talk must insert nothing, never a phantom "Thank you." Matched only
+# against the entire trimmed output, so a real sentence containing "thank you"
+# is untouched.
+_HALLUCINATIONS = {
+    "thank you", "thank you.", "thanks for watching", "thanks for watching.",
+    "thanks for watching!", "thank you for watching", "thank you for watching.",
+    "thank you very much", "thank you very much.", "you", "you.", ".", "bye",
+    "bye.", "bye!", "please subscribe", "so", "so.", "okay", "okay.",
+    "i'm sorry", "i'm sorry.", "subtitles by the amara.org community",
+    "thanks", "thanks.", "thank you.thank you.", "уou",
+}
+
+
+def _drop_if_hallucinated(text: str) -> str:
+    if text and text.strip().lower() in _HALLUCINATIONS:
+        log.info("dropped likely silence-hallucination: %r", text)
+        return ""
+    return text
+
+
 def transcribe_mlx(pcm: bytes, settings=None) -> str:
     """Transcribe with mlx-whisper (Apple GPU). Returns '' on any failure."""
     if not pcm:
@@ -53,7 +76,7 @@ def transcribe_mlx(pcm: bytes, settings=None) -> str:
             language=(settings.get("locale").split("-")[0] if settings and settings.get("locale") else "en"),
             fp16=True,
         )
-        return (result.get("text") or "").strip()
+        return _drop_if_hallucinated((result.get("text") or "").strip())
     except Exception:
         log.exception("mlx-whisper transcription failed")
         return ""
@@ -79,7 +102,8 @@ def transcribe_faster(pcm: bytes, settings=None) -> str:
         if settings and settings.get("locale"):
             lang = settings.get("locale").split("-")[0]
         segments, _ = model.transcribe(audio, language=lang)
-        return " ".join(seg.text.strip() for seg in segments).strip()
+        return _drop_if_hallucinated(
+            " ".join(seg.text.strip() for seg in segments).strip())
     except Exception:
         log.exception("faster-whisper transcription failed")
         return ""
