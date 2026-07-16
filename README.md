@@ -118,6 +118,21 @@ First run seeds it with this machine's known vocabulary (InsForge, MeetingScribe
 
 Other files in `~/.wisprit/`: `history.sqlite` (transcript text only), `metrics.log` (per-utterance stage latencies, one JSON line each), `wisprit.log` (app log).
 
+## Double-click app icon
+
+Build a `Wisprit.app` you can keep in the Dock / Applications:
+
+```sh
+./packaging/make_app.sh            # installs /Applications/Wisprit.app (ad-hoc signed, mic icon)
+```
+
+It's a thin bundle that runs the same venv python, so the engine is unchanged.
+**One-time:** because the app is a new code identity, macOS asks you to grant
+Accessibility and Input Monitoring to **Wisprit** (not the python binary) the
+first time — System Settings ▸ Privacy & Security ▸ Accessibility and ▸ Input
+Monitoring, add `/Applications/Wisprit.app`, toggle on, then relaunch. The
+ad-hoc signature keeps that grant stable across future launches.
+
 ## Autostart (launchd)
 
 A launchd agent template ships at [`packaging/com.wisprit.app.plist`](packaging/com.wisprit.app.plist). It is inert until you install it, and the file's header comments contain the exact install/status/uninstall commands. Run Wisprit manually at least once first — launchd can't answer TCC permission prompts for you.
