@@ -28,7 +28,8 @@ IDLE, RECORDING, FINALIZING, INSERTING = "idle", "recording", "finalizing", "ins
 
 class Session:
     def __init__(self, events, settings, dictionary, history, asr_manager,
-                 hotkey_listener, audio_capture, pill=None, on_state=None):
+                 hotkey_listener, audio_capture, pill=None, on_state=None,
+                 refiner=None):
         self._events = events
         self._settings = settings
         self._dictionary = dictionary
@@ -38,6 +39,7 @@ class Session:
         self._audio = audio_capture
         self._pill = pill
         self._on_state = on_state
+        self._refiner = refiner
 
         self._state = IDLE
         self._press_ts = 0.0
@@ -102,6 +104,13 @@ class Session:
             self._flash_error("microphone unavailable")
             return
         self._asr.begin(self._on_partial)
+        # Spawn the Apple Intelligence helper now so the model prewarms while
+        # the user is still speaking (refine itself runs at finalize).
+        if self._refiner is not None:
+            try:
+                self._refiner.begin()
+            except Exception:
+                log.exception("refiner begin failed")
         self._set_state(RECORDING)
         self._hotkey.set_recording(True)
         self._pill_call("show_recording")
@@ -117,6 +126,7 @@ class Session:
             self._hotkey.set_recording(False)
             self._audio.stop()
             self._asr.cancel()
+            self._cancel_refiner()
             self._set_state(IDLE)
             self._pill_call("hide")
             return
@@ -128,15 +138,36 @@ class Session:
         full_pcm = self._audio.stop()
         result = self._asr.finalize(full_pcm)
         t_asr = time.monotonic()
-        # Recording is truly over now; stop the hotkey emitting further Esc.
+
+        # An Esc during a slow finalize aborts — check before paying for AI
+        # cleanup. The hotkey keeps emitting Esc until after the refine stage:
+        # it is the longest window in the pipeline and must stay cancellable.
+        if self._drain_cancel():
+            self._hotkey.set_recording(False)
+            self._cancel_refiner()
+            self._set_state(IDLE)
+            self._pill_call("hide")
+            return
+
+        # Apple Intelligence refinement (prewarmed at record start). Any
+        # failure/skip returns the verbatim text — never blocks insertion.
+        # The interrupt hook lets Esc abort mid-generation (~100 ms) and lets
+        # a queued fn-press finish the stage instantly with verbatim text.
+        ai_outcome = "off"
+        refined = result.text
+        if self._refiner is not None:
+            refined, ai_outcome = self._refiner.refine(
+                result.text, interrupt=self._refine_interrupt)
+        t_ai = time.monotonic()
+        # Refine was the last cancellable stage; stop emitting Esc now.
         self._hotkey.set_recording(False)
 
-        text = postprocess.process(result.text, self._settings, self._dictionary)
+        text = postprocess.process(refined, self._settings, self._dictionary)
         t_post = time.monotonic()
 
-        # An Esc pressed WHILE we were finalizing (a slow/timed-out finalize)
-        # means the user wants to abort — honor it before inserting.
-        if self._drain_cancel():
+        # An Esc pressed WHILE we were finalizing/refining means the user
+        # wants to abort — honor it before inserting.
+        if ai_outcome == "cancelled" or self._drain_cancel():
             self._set_state(IDLE)
             self._pill_call("hide")
             return
@@ -144,7 +175,9 @@ class Session:
         if not text:
             self._set_state(IDLE)
             self._flash_error("nothing recognized")
-            self._log_metrics(held_ms, result, 0.0, 0.0, "empty")
+            self._log_metrics(held_ms, result, 0.0, 0.0, "empty",
+                              ai_ms=(t_ai - t_asr) * 1000.0,
+                              ai_outcome=ai_outcome)
             return
 
         # History first — a failed insert must never lose words.
@@ -166,10 +199,12 @@ class Session:
 
         self._log_metrics(
             held_ms, result,
-            post_ms=(t_post - t_asr) * 1000.0,
+            post_ms=(t_post - t_ai) * 1000.0,
             insert_ms=(t_ins - t_post) * 1000.0,
             outcome=ins.method,
             release_to_text_ms=(t_ins - t_rel) * 1000.0,
+            ai_ms=(t_ai - t_asr) * 1000.0,
+            ai_outcome=ai_outcome,
         )
         self._set_state(IDLE)
 
@@ -206,6 +241,7 @@ class Session:
             self._asr.cancel()
         except Exception:
             log.exception("asr cancel during abort failed")
+        self._cancel_refiner()
         self._set_state(IDLE)
         if reason == "esc" or reason == "cancelled":
             self._pill_call("hide")
@@ -243,6 +279,47 @@ class Session:
             self._flash_error(ins.detail or "paste failed")
 
     # --- helpers --------------------------------------------------------------
+
+    def _refine_interrupt(self) -> str | None:
+        """Polled ~20×/s by the refiner while the model runs.
+
+        Peeks the event queue without disturbing it: Esc/cancel events are
+        consumed (→ ``"cancel"``, the utterance is being aborted anyway);
+        anything else is re-queued in order, and a queued press additionally
+        returns ``"hurry"`` so the next dictation isn't stuck behind the model.
+        """
+        cancelled = False
+        press = False
+        others = []
+        while True:
+            try:
+                ev = self._events.get_nowait()
+            except queue.Empty:
+                break
+            if ev.kind in ("esc", "cancel"):
+                cancelled = True
+            else:
+                if ev.kind == "press":
+                    press = True
+                others.append(ev)
+        for ev in others:
+            try:
+                self._events.put_nowait(ev)
+            except queue.Full:
+                pass
+        if cancelled:
+            return "cancel"
+        if press:
+            return "hurry"
+        return None
+
+    def _cancel_refiner(self) -> None:
+        if self._refiner is None:
+            return
+        try:
+            self._refiner.cancel()
+        except Exception:
+            log.exception("refiner cancel failed")
 
     def _on_partial(self, text: str) -> None:
         # Show a rolling tail of the partial in the pill.
@@ -297,7 +374,7 @@ class Session:
         self._pill_call("flash_error", msg)
 
     def _log_metrics(self, held_ms, result, post_ms, insert_ms, outcome,
-                     release_to_text_ms=None) -> None:
+                     release_to_text_ms=None, ai_ms=None, ai_outcome=None) -> None:
         try:
             from wisprit import runtime
             entry = {
@@ -313,6 +390,10 @@ class Session:
             }
             if release_to_text_ms is not None:
                 entry["release_to_text_ms"] = round(release_to_text_ms, 1)
+            if ai_ms is not None:
+                entry["ai_ms"] = round(ai_ms, 1)
+            if ai_outcome is not None:
+                entry["ai"] = ai_outcome
             runtime.METRICS_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
             with open(runtime.METRICS_LOG_PATH, "a", encoding="utf-8") as fh:
                 fh.write(json.dumps(entry) + "\n")

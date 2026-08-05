@@ -61,10 +61,49 @@ DEFAULTS = {
   "history_enabled": True,
   "history_limit": 1000,
   "engine": "auto",                    # "auto"|"apple_live"|"mlx_whisper"|"faster_whisper"
+  "ai_cleanup": True,                  # on-path Apple Intelligence refinement (refine.py)
+  "ai_cleanup_max_words": 350,         # longer transcripts skip AI (latency + 4k context)
+  "ai_cleanup_timeout_ms": 12000,      # hard cap; verbatim text wins on timeout
   "mlx_model": "mlx-community/whisper-large-v3-turbo",
   "paste_restore_delay_ms": 500,       # restore too early = paste of stale clipboard
   "enabled": True,                     # master toggle from menu
 }
+
+## refine.py — Apple Intelligence on-path cleanup
+
+```python
+class Refiner:
+    def __init__(self, settings): ...        # starts a background availability probe
+    availability: bool | None                 # None until probed (menu shows toggle)
+    unavailable_reason: str
+    def enabled(self) -> bool                 # setting on + helper compiled + not known-bad
+    def begin(self) -> None                   # spawn helper at record START (prewarms model)
+    def refine(self, raw, interrupt=None)     # -> (text, outcome); text ALWAYS safe to insert
+    def cancel(self) -> None                  # kill helper (abort/cancel/skip paths)
+```
+
+``interrupt`` is polled ~20×/s during generation (the session passes
+``Session._refine_interrupt``): ``"cancel"`` aborts the utterance (Esc),
+``"hurry"`` finishes immediately with verbatim text (a new fn-press is
+queued). The hotkey keeps emitting Esc through the refine stage —
+``set_recording(False)`` happens after refine, not before.
+
+Pipeline position: ASR → `refine` → `postprocess.process` → insert. The
+deterministic stage still runs afterwards so dictionary corrections, voice
+commands, and email/URL joining keep working, and every refine failure mode
+degrades to verbatim + deterministic cleanup. Outcomes logged in metrics
+(`ai` field): applied | off | empty | too_long | has_address | timeout |
+cancelled | preempted | spawn_failed | bad_reply | helper_error |
+implausible | error. `ai_ms` is the refine stage's wall time.
+
+Helper: `packaging/wisprit_refine.swift`, compiled by
+`bootstrap.ensure_refine_helper()` into `~/.wisprit/bin/wisprit_refine`
+(background thread at app start; needs swiftc once). Protocol: raw transcript
+on stdin until EOF → one JSON line `{"ok": true, "text": …}` /
+`{"ok": false, "error": …}` on stdout; `--check` prints availability.
+Requires macOS 26+, Apple Silicon, Apple Intelligence enabled. The
+instruction prompt is eval-locked by `tests/rehearsal_refine.sh` — run it
+after any prompt edit and after every macOS point release.
 
 ## hotkey.py  (owner: agent A)
 

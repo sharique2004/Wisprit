@@ -34,6 +34,9 @@ DEFAULTS = {
     "history_enabled": True,
     "history_limit": 1000,
     "engine": "auto",                    # "auto"|"apple_live"|"mlx_whisper"|"faster_whisper"
+    "ai_cleanup": True,                  # on-path Apple Intelligence refinement
+    "ai_cleanup_max_words": 350,         # longer transcripts skip AI (latency/context)
+    "ai_cleanup_timeout_ms": 12000,      # hard cap; verbatim text wins on timeout
     "mlx_model": "mlx-community/whisper-large-v3-turbo",
     "paste_restore_delay_ms": 500,      # restore too early = paste of stale clipboard (competitors' #1 bug)
     "enabled": True,                     # master toggle from menu

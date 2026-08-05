@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -76,6 +78,9 @@ def _default_config() -> dict:
             "history_enabled": True,
             "history_limit": 1000,
             "engine": "auto",
+            "ai_cleanup": True,
+            "ai_cleanup_max_words": 350,
+            "ai_cleanup_timeout_ms": 12000,
             "mlx_model": "mlx-community/whisper-large-v3-turbo",
             "paste_restore_delay_ms": 500,
             "enabled": True,
@@ -116,6 +121,72 @@ def ensure_state_dir(state_dir: Path = runtime.STATE_DIR) -> Path:
         log.info("wrote starter dictionary (%d terms): %s", len(_SEED_TERMS), dictionary_path)
 
     return state_dir
+
+
+def ensure_refine_helper(force: bool = False) -> bool:
+    """Compile the Apple Intelligence refine helper if missing or stale.
+
+    Builds ``packaging/wisprit_refine.swift`` into ``~/.wisprit/bin`` when the
+    binary is absent or older than its source. Compiles to a temp path and
+    ``os.replace``s so an in-flight helper is never half-overwritten. Slow
+    (~5–15 s) — app.py runs this on a background thread. Returns True when a
+    usable binary exists afterwards; never raises.
+    """
+    src, dst = runtime.REFINE_SRC, runtime.REFINE_BIN
+    try:
+        if not src.exists():
+            log.warning("refine helper source missing: %s", src)
+            return dst.exists()
+        if dst.exists() and not force and dst.stat().st_mtime >= src.stat().st_mtime:
+            return True
+        swiftc = shutil.which("swiftc")
+        if swiftc is None:
+            log.warning("swiftc not found — AI cleanup unavailable (install "
+                        "Xcode or the Command Line Tools)")
+            return dst.exists()
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        # pid-unique temp so a concurrent compile (doctor + app launch) can
+        # never interleave writes into the same file before the rename.
+        tmp = dst.with_name(f"{dst.name}.build.{os.getpid()}")
+        proc = subprocess.run(
+            [swiftc, "-O", "-o", str(tmp), str(src)],
+            capture_output=True, text=True, timeout=300,
+        )
+        if proc.returncode != 0:
+            log.error("wisprit_refine compile failed: %s",
+                      (proc.stderr or "").strip()[:500])
+            tmp.unlink(missing_ok=True)
+            return dst.exists()
+        os.chmod(tmp, 0o755)
+        os.replace(tmp, dst)
+        log.info("compiled refine helper: %s", dst)
+        return True
+    except Exception:
+        log.exception("ensure_refine_helper failed")
+        return dst.exists()
+
+
+def prefetch_fallback_model() -> bool:
+    """Download the faster-whisper "small" model into the HF cache.
+
+    ``asr_batch.transcribe_faster`` loads with ``local_files_only=True`` so
+    the dictation path can never block on the network (a mid-dictation HF
+    download once hung finalize until the user killed the app). This
+    prefetch — run on a background thread at app start — is the only place
+    that model may be downloaded. Idempotent: a complete cache is a fast
+    no-op. Returns True when the model is locally available; never raises.
+    """
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download("Systran/faster-whisper-small")
+        log.info("faster-whisper fallback model present in HF cache")
+        return True
+    except Exception as exc:  # noqa: BLE001 — offline is a normal condition
+        log.warning("faster-whisper prefetch failed (%s: %s) — the CPU "
+                    "fallback engine stays unavailable until a launch with "
+                    "network succeeds", type(exc).__name__, exc)
+        return False
 
 
 def _main(argv: list[str]) -> int:

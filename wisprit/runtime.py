@@ -17,6 +17,11 @@ METRICS_LOG_PATH = STATE_DIR / "metrics.log"
 LOG_PATH = STATE_DIR / "wisprit.log"
 BIN_DIR = STATE_DIR / "bin"                   # compiled helpers owned by Wisprit
 
+# Apple Intelligence transcript-refinement helper (compiled by bootstrap).
+REPO_ROOT = Path(__file__).resolve().parent.parent
+REFINE_SRC = REPO_ROOT / "packaging" / "wisprit_refine.swift"
+REFINE_BIN = BIN_DIR / "wisprit_refine"
+
 # --- Reused MeetingScribe assets ---------------------------------------------
 # The streaming SpeechAnalyzer helper already compiled by MeetingScribe.
 MEETINGSCRIBE_BIN = HOME / ".meetingscribe" / "bin"

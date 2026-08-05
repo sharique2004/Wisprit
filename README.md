@@ -9,12 +9,15 @@ Wisprit was born from a competitive research pass on [Wispr Flow](docs/research/
 ```
 hold Fn ──▶ mic (16 kHz) ──▶ apple_live helper (SpeechAnalyzer, Neural Engine)
                 │                      │  live partial words stream to the pill
-release ────────┴──▶ finalize ──▶ rule cleanup (<20 ms) ──▶ paste at cursor
-                                                        └──▶ local history (text only)
+                │                      └  wisprit_refine helper prewarms Apple Intelligence
+release ────────┴──▶ finalize ──▶ AI cleanup (on-device LLM, ~0.4–2 s)
+                                       └──▶ rule cleanup (<20 ms) ──▶ paste at cursor
+                                                                  └──▶ local history (text only)
 ```
 
-- **Streaming during the hold.** ASR runs on the Neural Engine *while you speak*, so at release only the tail needs finalizing. Target: **<400 ms p90 release-to-text** — vs Wispr's <700 ms p99 engineering target and its 1–2 s user-perceived reality.
-- **Verbatim-first.** Default output is the transcript plus deterministic rules only (filler removal, dictionary corrections, "new line" commands, spoken email/URL joining). No LLM ever rewrites your words unless you explicitly ask (opt-in "Polish with Claude" via the local `claude` CLI).
+- **Streaming during the hold.** ASR runs on the Neural Engine *while you speak*, so at release only the tail needs finalizing — and the Apple Intelligence model prewarms in parallel, so cleanup starts hot.
+- **AI cleanup, still fully local.** The on-device Apple Intelligence foundation model (macOS 26+) fixes what the recognizer misheard — homophones ("right heavy" → "write-heavy"), split words ("data base"), broken casing ("i phone" → "iPhone") — strips fillers contextually, and punctuates, using the surrounding sentence as evidence. It runs *inside a cage*: hardened eval-locked instructions, greedy sampling, a word-count plausibility guard, an answered-instead-of-cleaned detector, wrapper/preamble stripping, and a hard timeout. Any failure inserts the verbatim transcript — AI can only ever win, never lose words. Toggle from the menu (**AI Cleanup**) or `ai_cleanup` in config.
+- **Deterministic rules still run after the AI** (dictionary corrections, "new line" commands, spoken email/URL joining) — so your personal vocabulary is guaranteed by regex, not entrusted to a 3B model, and utterances containing emails/URLs skip the AI entirely. Optional "Polish with Claude" stays available off-path for heavier rewrites.
 - **Privacy is structural.** The dictation path makes no network calls — audio is transcribed on the Neural Engine and never leaves the Mac. No audio retention; history is transcript text only, in a local SQLite file you can purge from the menu. (The one caveat: the mlx-whisper / faster-whisper *fallback* engines download their model from Hugging Face on first use if it isn't already cached — mlx-whisper large-v3-turbo is provisioned by MeetingScribe, but run once online to warm the caches if you want the fallback available offline.)
 - **Fallback chain.** If the SpeechAnalyzer helper dies, Wisprit transparently falls back to mlx-whisper `large-v3-turbo`, then faster-whisper, so dictation never fully dies.
 
@@ -28,6 +31,7 @@ Wisprit is deliberately a **single-machine app** tuned for this setup:
 - The **MeetingScribe venv** at `~/.meetingscribe/venv` (Python 3.11 with pyobjc, sounddevice, numpy, mlx-whisper, faster-whisper). Wisprit reuses it; there is no separate install step.
 - The compiled **`apple_live`** SpeechAnalyzer helper at `~/.meetingscribe/bin/apple_live` (source: `~/MeetingScribe/tools/apple_live.swift`).
 - Optional: the `claude` CLI on PATH for the opt-in polish feature (uses your Claude Code subscription — no API key).
+- Optional but recommended: **Apple Intelligence enabled** (System Settings ▸ Apple Intelligence & Siri) plus `swiftc` (Xcode or Command Line Tools) for the on-path AI cleanup — the `wisprit_refine` helper compiles itself into `~/.wisprit/bin` on first launch. Without it, dictation just runs the deterministic pipeline.
 
 ## Quick start
 
@@ -160,11 +164,11 @@ Drawn from the full research pass in [docs/research/competitors.md](docs/researc
 | Processing | 100% local (Neural Engine) | Cloud only — no offline mode | Local-first, optional cloud/BYOK | Local, optional BYOK cloud | Local only |
 | Live partial text while speaking | **Yes** (pill preview) | No — block paste after release | No | No | No |
 | Release-to-text | **<400 ms p90 target** (streaming during hold) | <700 ms p99 target; ~1–2 s perceived | Model/hardware-dependent | Model-dependent | 2–5 s reported |
-| Cleanup philosophy | Verbatim-first deterministic rules; LLM polish strictly opt-in | Best-in-class LLM cleanup, but rewrites what you said; no verbatim mode | Custom modes + BYOK prompts (config-heavy) | BYOK "AI Enhancement" | None — raw transcript |
+| Cleanup philosophy | On-device Apple Intelligence cleanup in a validation cage (verbatim always wins on any doubt); deterministic rules after; Claude polish opt-in | Best-in-class LLM cleanup, but rewrites what you said; no verbatim mode | Custom modes + BYOK prompts (config-heavy) | BYOK "AI Enhancement" | None — raw transcript |
 | Custom vocabulary | Yes — ASR biasing **and** post-ASR correction, hot-reload | Yes, plus passive learning | Via mode prompts | Limited | No |
 | Privacy posture | No network sockets, no telemetry, text-only history, mic hard-off between utterances | Screenshot/tracking controversies; 11+ cloud subprocessors; 2.7/5 Trustpilot | Good (local-first, closed source) | Good (GPLv3) | Excellent (MIT, zero telemetry) |
 | Platforms | **This one Mac** (macOS 26, Apple Silicon) | Mac, Windows, iOS, Android | Mac, iOS, Windows | Mac | Mac, Windows, Linux |
-| Where it's weaker | Single-machine by design; no mobile; manual TCC setup; hands-free mode & always-on LLM cleanup still on the roadmap; English-first for now | — | — | — | — |
+| Where it's weaker | Single-machine by design; no mobile; manual TCC setup; hands-free mode still on the roadmap; English-first for now | — | — | — | — |
 
 The honest summary: if you need cross-device sync, 100+ languages, or Wispr's zero-config prose polish, Wisprit isn't that. If you want Wispr's core interaction — hold a key, talk, get clean text — with lower latency, live feedback, a movable pill, an editable dictionary, and the structural guarantee that your voice never leaves your Mac, that's exactly what this is.
 

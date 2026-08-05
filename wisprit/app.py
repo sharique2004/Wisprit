@@ -32,6 +32,7 @@ from wisprit.history import History
 from wisprit.hotkey import HotkeyListener
 from wisprit.insert import insert_text
 from wisprit.asr import AsrManager
+from wisprit.refine import Refiner
 from wisprit.session import Session
 from wisprit import settings as settings_mod
 
@@ -48,7 +49,7 @@ class WispritApp(NSObject):
         if self is None:
             return None
         (self._settings, self._dictionary, self._history, self._session,
-         self._hotkey, self._pill) = components
+         self._hotkey, self._pill, self._refiner) = components
         self._status_item = None
         self._menu = None
         self._build_menu()
@@ -78,6 +79,18 @@ class WispritApp(NSObject):
         item = self._add(menu, f"Dictation {'On' if enabled else 'Off'}",
                          b"toggleEnabled:")
         item.setState_(1 if enabled else 0)
+
+        # Apple Intelligence on-path cleanup. availability None means the
+        # probe hasn't finished (or the helper is still compiling) — show the
+        # toggle; refinement self-disables until it is actually usable.
+        if self._refiner is not None and self._refiner.availability is False:
+            item = self._add(menu, "AI Cleanup unavailable — run Doctor", None)
+            item.setEnabled_(False)
+        else:
+            ai_on = bool(self._settings.get("ai_cleanup"))
+            item = self._add(menu, "AI Cleanup (Apple Intelligence)",
+                             b"toggleAiCleanup:")
+            item.setState_(1 if ai_on else 0)
 
         menu.addItem_(NSMenuItem.separatorItem())
 
@@ -148,6 +161,11 @@ class WispritApp(NSObject):
 
     def toggleEnabled_(self, sender):
         self._settings.set("enabled", not bool(self._settings.get("enabled")))
+        self._rebuild_menu()
+
+    def toggleAiCleanup_(self, sender):
+        self._settings.set("ai_cleanup",
+                           not bool(self._settings.get("ai_cleanup")))
         self._rebuild_menu()
 
     def copyRecent_(self, sender):
@@ -297,6 +315,17 @@ def main() -> int:
     dictionary = Dictionary()
     history = History(settings=cfg)
     asr = AsrManager(cfg, dictionary)
+    refiner = Refiner(cfg)
+
+    # Slow provisioning off the startup path: compile/refresh the Apple
+    # Intelligence helper (~5–15 s with swiftc on first run; a no-op when
+    # current) and prefetch the CPU-fallback Whisper model, which the
+    # dictation path itself is forbidden from downloading.
+    def _provision():
+        bootstrap.ensure_refine_helper()
+        bootstrap.prefetch_fallback_model()
+
+    threading.Thread(target=_provision, daemon=True, name="provision").start()
 
     events: queue.Queue = queue.Queue()
     hotkey = HotkeyListener(events, cfg)
@@ -316,10 +345,10 @@ def main() -> int:
             ctrl.update_state(state)
 
     session = Session(events, cfg, dictionary, history, asr, hotkey, audio,
-                      pill=pill, on_state=on_state)
+                      pill=pill, on_state=on_state, refiner=refiner)
 
     controller = WispritApp.alloc().initWithComponents_(
-        (cfg, dictionary, history, session, hotkey, pill))
+        (cfg, dictionary, history, session, hotkey, pill, refiner))
     controller_holder["c"] = controller
     app.setDelegate_(controller)
 

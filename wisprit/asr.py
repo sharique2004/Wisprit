@@ -344,6 +344,10 @@ class AsrManager:
         self._dictionary = dictionary
         self._apple = AppleLiveEngine(settings, dictionary)
         self._primary_started = False
+        # A crashed/hung helper usually means an orphan is holding the
+        # on-device transcriber; when finalize sees that, the next begin()
+        # reaps before spawning so the primary engine self-heals.
+        self._reap_next_begin = False
         # Clean up any helpers a previous crash/kill left behind, so a fresh
         # launch never starts contending with orphans.
         reap_orphaned_helpers()
@@ -356,6 +360,13 @@ class AsrManager:
         # In auto/apple_live mode we try the streaming helper; batch modes skip
         # straight to finalize-time transcription of the full PCM.
         if engine in (None, "auto", "apple_live"):
+            if self._reap_next_begin:
+                # Last utterance's helper died instantly — an orphan from a
+                # crashed MeetingScribe can appear MID-SESSION and hold the
+                # transcriber (observed: orphan born 14:29 broke dictations at
+                # 20:04+ despite the startup reap). ~30 ms, rare path only.
+                self._reap_next_begin = False
+                reap_orphaned_helpers()
             self._primary_started = self._apple.begin(on_partial)
         else:
             self._primary_started = False
@@ -373,6 +384,8 @@ class AsrManager:
 
         if self._primary_started:
             result = self._apple.finalize(timeout_s)
+            if result.crashed or result.timed_out:
+                self._reap_next_begin = True
             # Any streaming result with text (clean or timeout-with-partials) is
             # returned as-is. The batch engines (mlx/faster-whisper) are the
             # recovery path for a genuine helper CRASH only — never for an empty

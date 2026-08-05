@@ -95,8 +95,14 @@ def transcribe_faster(pcm: bytes, settings=None) -> str:
     try:
         audio = _pcm_to_float32(pcm)
         if _faster_model is None:
-            # small model keeps CPU latency tolerable; this is an emergency path.
-            _faster_model = WhisperModel("small", device="cpu", compute_type="int8")
+            # small model keeps CPU latency tolerable; this is an emergency
+            # path. local_files_only: NEVER download on the dictation path —
+            # a mid-dictation HF download blocked a finalize for minutes until
+            # the user ^C'd the app. bootstrap.prefetch_fallback_model()
+            # (background, at app start) is the only place this may download.
+            _faster_model = WhisperModel("small", device="cpu",
+                                         compute_type="int8",
+                                         local_files_only=True)
         model = _faster_model
         lang = "en"
         if settings and settings.get("locale"):

@@ -24,6 +24,28 @@ def _line(mark: str, label: str, detail: str = "") -> None:
     print(f"  {mark}  {label}" + (f"  — {detail}" if detail else ""))
 
 
+def _live_helper_contention() -> str:
+    """Describe any other apple_live process currently running.
+
+    Another instance — typically an orphan left by a crashed MeetingScribe —
+    holds the on-device transcriber, which makes every fresh helper exit
+    within milliseconds. Run when the probe fails so the report names the
+    cause instead of just the symptom.
+    """
+    try:
+        out = subprocess.run(
+            ["pgrep", "-fl", str(runtime.APPLE_LIVE_BIN)],
+            capture_output=True, text=True, timeout=2.0).stdout.strip()
+    except Exception:  # noqa: BLE001
+        return ""
+    if not out:
+        return ""
+    pids = ", ".join(line.split()[0] for line in out.splitlines())
+    return (f"; another apple_live is running (pid {pids}) and may be holding "
+            "the transcriber — quit MeetingScribe, or if it has crashed, "
+            f"run: kill {pids}")
+
+
 def _probe_apple_live() -> tuple[bool, str]:
     """Feed 2 s of silence through apple_live; expect a clean exit."""
     if not runtime.APPLE_LIVE_BIN.exists():
@@ -45,12 +67,55 @@ def _probe_apple_live() -> tuple[bool, str]:
         if rc == 0:
             return True, "streams and exits cleanly"
         err = (proc.stderr.read() or b"").decode(errors="replace").strip()
-        return False, f"exit {rc}: {err[:120]}"
+        return False, f"exit {rc}: {err[:120]}" + _live_helper_contention()
     except subprocess.TimeoutExpired:
         proc.kill()
-        return False, "helper did not exit (timeout)"
+        return False, "helper did not exit (timeout)" + _live_helper_contention()
     except Exception as exc:  # noqa: BLE001
         return False, f"{type(exc).__name__}: {exc}"
+
+
+def _probe_refine() -> tuple[str, str]:
+    """Check the Apple Intelligence cleanup helper. Returns (status, detail)
+    where status is 'ok' | 'warn' | 'bad'."""
+    if not runtime.REFINE_BIN.exists():
+        import shutil
+        if shutil.which("swiftc") is None:
+            return "warn", ("helper not compiled and swiftc not found — "
+                            "install Xcode or the Command Line Tools")
+        return "warn", "helper not compiled yet (compiles on next app launch)"
+    try:
+        proc = subprocess.run(
+            [str(runtime.REFINE_BIN), "--check"],
+            capture_output=True, text=True, timeout=15,
+        )
+        info = json.loads((proc.stdout or "").strip().splitlines()[-1])
+    except Exception as exc:  # noqa: BLE001
+        return "bad", f"--check failed: {type(exc).__name__}: {exc}"
+    if not info.get("available"):
+        return "warn", (f"Apple Intelligence unavailable: "
+                        f"{info.get('reason', 'unknown')} — enable it in "
+                        "System Settings ▸ Apple Intelligence & Siri")
+    # Round-trip a tiny transcript to prove end-to-end generation works.
+    try:
+        t0 = time.monotonic()
+        proc = subprocess.run(
+            [str(runtime.REFINE_BIN)],
+            input="um hello this is a uh test",
+            capture_output=True, text=True, timeout=30,
+        )
+        reply = json.loads((proc.stdout or "").strip().splitlines()[-1])
+        ms = (time.monotonic() - t0) * 1000.0
+    except subprocess.TimeoutExpired:
+        # The very first generation after enabling Apple Intelligence pages
+        # the whole model in and can exceed 30 s — transient, not broken.
+        return "warn", ("cleanup probe timed out — the first model load can "
+                        "be slow; re-run doctor")
+    except Exception as exc:  # noqa: BLE001
+        return "bad", f"cleanup probe failed: {type(exc).__name__}: {exc}"
+    if not reply.get("ok"):
+        return "warn", f"model error: {str(reply.get('error'))[:120]}"
+    return "ok", f"cleans a short transcript in {ms:.0f} ms"
 
 
 def run() -> int:
@@ -110,6 +175,11 @@ def run() -> int:
     _line(OK if mlx_ok else WARN, "mlx-whisper fallback", mlx_detail)
     if not live_ok and not mlx_ok:
         ok = False  # no working ASR at all
+
+    # Not fatal either: dictation degrades to the deterministic pipeline.
+    ai_status, ai_detail = _probe_refine()
+    _line({"ok": OK, "warn": WARN, "bad": BAD}[ai_status],
+          "AI cleanup (Apple Intelligence)", ai_detail)
 
     # --- state files ---------------------------------------------------------
     cfg_ok = _valid_json(runtime.CONFIG_PATH)
