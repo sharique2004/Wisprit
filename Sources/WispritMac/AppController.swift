@@ -185,6 +185,25 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
     // MARK: - startup
 
+    /// One-per-launch alert with a working deep link; without it a fresh
+    /// install looks completely dead (no prompt, no icon if notch-hidden).
+    private func showInputMonitoringAlert() {
+        let alert = NSAlert()
+        alert.messageText = "Wisprit needs Input Monitoring"
+        alert.informativeText = """
+        The push-to-talk key can't be seen yet. In System Settings ▸ Privacy & \
+        Security ▸ Input Monitoring, add or enable Wisprit, then relaunch it. \
+        (macOS never asks on its own for this one.)
+        """
+        alert.addButton(withTitle: "Open System Settings")
+        alert.addButton(withTitle: "Later")
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertFirstButtonReturn,
+           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
     /// Everything `app.py: main()` does between the lock and `NSApp.run()`.
     public func launch() {
         let app = NSApplication.shared
@@ -201,7 +220,10 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 System Settings > Privacy & Security > Input Monitoring, then relaunch. \
                 Run `Wisprit doctor` for the full checklist.
                 """)
-            // Keep running: the menu bar still works, so the user can reach Doctor.
+            // macOS never prompts for Input Monitoring on a listen-only tap — it
+            // silently fails, and with the menu icon possibly notch-hidden a log
+            // line is invisible. This alert is the user's only signal.
+            showInputMonitoringAlert()
         }
 
         // Grants are per-identity: a new launcher must be granted even when the
