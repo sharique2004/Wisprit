@@ -185,15 +185,19 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
     // MARK: - startup
 
+    private var inputMonitoringAlertShown = false
+
     /// One-per-launch alert with a working deep link; without it a fresh
     /// install looks completely dead (no prompt, no icon if notch-hidden).
     private func showInputMonitoringAlert() {
+        guard !inputMonitoringAlertShown else { return }
+        inputMonitoringAlertShown = true
         let alert = NSAlert()
         alert.messageText = "Wisprit needs Input Monitoring"
         alert.informativeText = """
         The push-to-talk key can't be seen yet. In System Settings ▸ Privacy & \
-        Security ▸ Input Monitoring, add or enable Wisprit, then relaunch it. \
-        (macOS never asks on its own for this one.)
+        Security ▸ Input Monitoring, enable Wisprit — then QUIT AND REOPEN \
+        Wisprit; macOS applies this permission only at launch.
         """
         alert.addButton(withTitle: "Open System Settings")
         alert.addButton(withTitle: "Later")
@@ -212,6 +216,15 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
         statusMenu.install()
 
+        // The Input Monitoring grant binds at TAP-CREATION time: a tap created
+        // before the toggle stays deaf forever while reporting enabled (found
+        // the hard way on first install). Preflight up front so the app lands
+        // in the System Settings list, prompts, and tells the user to relaunch.
+        if !CGPreflightListenEventAccess() {
+            CGRequestListenEventAccess()
+            showInputMonitoringAlert()
+        }
+
         // Tap creation must happen on the main thread — its run-loop source is
         // added to the CURRENT CFRunLoop, which has to be the one NSApp pumps.
         if !monitor.install() {
@@ -224,6 +237,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
             // silently fails, and with the menu icon possibly notch-hidden a log
             // line is invisible. This alert is the user's only signal.
             showInputMonitoringAlert()
+        }
+        // The grant can also be missing with a SUCCESSFULLY created tap that
+        // never fires ("ghost tap") — only the watchdog can see that case.
+        monitor.onGhostTap = { [weak self] in
+            WispritUI.callOnMain { self?.showInputMonitoringAlert() }
         }
 
         // Grants are per-identity: a new launcher must be granted even when the

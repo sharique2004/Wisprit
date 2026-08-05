@@ -98,6 +98,10 @@ public final class HotkeyMonitor: @unchecked Sendable {
         return true
     }
 
+    /// Fired (from the watchdog thread) once per dead-tap streak — the
+    /// missing-Input-Monitoring signature. UI hops to the main thread itself.
+    public var onGhostTap: (() -> Void)?
+
     public func uninstall() {
         watchdogStop.signal()
         if let tap {
@@ -156,11 +160,15 @@ public final class HotkeyMonitor: @unchecked Sendable {
                 CGEvent.tapEnable(tap: tap, enable: true)
             }
             if decision.logGhostWarning {
-                log.warning("""
-                    event tap disabled; re-enabling. If this repeats, grant Input \
-                    Monitoring to this binary in System Settings → Privacy & Security \
-                    → Input Monitoring (run `wisprit doctor`).
+                // error level so `log show` persists it — the ghost-tap streak is
+                // the only signature of a missing Input Monitoring grant (tap
+                // CREATION succeeds without it, so install() can't catch this).
+                log.error("""
+                    ghost tap: event tap keeps arriving disabled — Input Monitoring \
+                    is almost certainly not granted to this binary. System Settings \
+                    → Privacy & Security → Input Monitoring (run `wisprit doctor`).
                     """)
+                onGhostTap?()
             }
             let ts = MonotonicClock.now()
             for kind in decision.emits {
