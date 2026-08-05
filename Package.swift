@@ -27,6 +27,18 @@ let package = Package(
         .target(name: "WispritRefine", dependencies: ["WispritKit"], swiftSettings: v5),
         .target(name: "WispritEngine", dependencies: ["WispritKit"], swiftSettings: v5),
 
+        // macOS shell (Developer ID SKU). Not iOS-buildable by design.
+        .target(name: "WispritMacInput", dependencies: ["WispritKit"], swiftSettings: v5),
+        .target(name: "WispritMacUI", dependencies: ["WispritKit"], swiftSettings: v5),
+        .executableTarget(
+            name: "WispritMac",
+            dependencies: [
+                "WispritKit", "WispritPostProcess", "WispritDictionary", "WispritCorrections",
+                "WispritPersistence", "WispritRefine", "WispritEngine",
+                "WispritMacInput", "WispritMacUI",
+            ],
+            swiftSettings: v5),
+
         // Explicit lowercase paths: the repo's Python tests/ dir and SPM's Tests/
         // are one directory on case-insensitive APFS; git records lowercase.
         .testTarget(name: "WispritPostProcessTests", dependencies: ["WispritPostProcess", "WispritDictionary"], path: "tests/WispritPostProcessTests", swiftSettings: v5),
@@ -35,5 +47,8 @@ let package = Package(
         .testTarget(name: "WispritPersistenceTests", dependencies: ["WispritPersistence"], path: "tests/WispritPersistenceTests", swiftSettings: v5),
         .testTarget(name: "WispritRefineTests", dependencies: ["WispritRefine"], path: "tests/WispritRefineTests", swiftSettings: v5),
         .testTarget(name: "WispritEngineTests", dependencies: ["WispritEngine"], path: "tests/WispritEngineTests", swiftSettings: v5),
+        .testTarget(name: "WispritMacInputTests", dependencies: ["WispritMacInput"], path: "tests/WispritMacInputTests", swiftSettings: v5),
+        .testTarget(name: "WispritMacUITests", dependencies: ["WispritMacUI"], path: "tests/WispritMacUITests", swiftSettings: v5),
+        .testTarget(name: "WispritMacTests", dependencies: ["WispritMac"], path: "tests/WispritMacTests", swiftSettings: v5),
     ]
 )

@@ -17,3 +17,4 @@ __pycache__/
 .build*/
 *.xcodeproj
 DerivedData/
+dist/

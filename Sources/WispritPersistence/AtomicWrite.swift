@@ -1,11 +1,11 @@
 import Foundation
 
-enum AtomicWrite {
+public enum AtomicWrite {
     /// Write-to-temp + fsync + `rename(2)`, mirroring the Python
     /// `mkstemp` → `fsync` → `os.replace` sequence: a crash mid-write can never
     /// leave a truncated config.json behind. The temp file is created in the
     /// destination directory so the rename stays within one filesystem.
-    static func write(_ text: String, to url: URL, permissions: mode_t = 0o600) throws {
+    public static func write(_ text: String, to url: URL, permissions: mode_t = 0o600) throws {
         let directory = url.deletingLastPathComponent()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
 

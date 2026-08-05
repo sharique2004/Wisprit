@@ -1,0 +1,149 @@
+import Foundation
+import WispritDictionary
+import WispritEngine
+import WispritKit
+import WispritMacInput
+import WispritPersistence
+import WispritRefine
+
+/// The seams `SessionController` is written against.
+///
+/// Everything the state machine touches that involves a microphone, a neural
+/// engine, the pasteboard, a window or the disk arrives through one of these,
+/// so the machine itself is exercisable on a laptop with no TCC grants: the
+/// tests drive it with fakes, and the thin adapters below (the only code that
+/// names the real subsystems) stay uncovered by design.
+
+public protocol AsrPort: Sendable {
+    func begin(onPartial: @escaping @Sendable (String) -> Void) async
+    func finalize() async -> UtteranceResult
+    func cancel() async
+    /// Off-path reconciliation over the retained PCM. Contractually only ever
+    /// called AFTER insertion — it takes hundreds of ms to seconds.
+    func reconcileVocabulary() async -> VocabularyReconciliation?
+}
+
+public protocol AudioPort: Sendable {
+    /// false = the input could not be opened; the utterance aborts cleanly.
+    func start() -> Bool
+    func stop()
+    /// 0…1, read by the pill level ticker at 20 Hz.
+    var level: Double { get }
+}
+
+public protocol RefinePort: Sendable {
+    /// Prewarm at record start so the model loads during the hold.
+    func begin() async
+    func refine(_ raw: String,
+                interrupt: @escaping @Sendable () -> InterruptSignal) async -> RefineResult
+    func cancel() async
+    /// nil while the availability probe is still running (the menu shows the
+    /// toggle anyway; only an explicit false swaps in the disabled row).
+    func availability() async -> Bool?
+}
+
+public protocol InsertPort: Sendable {
+    /// Never throws — every failure comes back as an `InsertResult`.
+    func insert(_ text: String) -> InsertResult
+}
+
+public protocol PillPort: Sendable {
+    func showRecording()
+    func updateLevel(_ level: Double)
+    func livePartial(_ text: String)
+    func showFinalizing()
+    func flashSuccess()
+    func flashError(_ message: String)
+    func transientNotice(_ text: String)
+    func hide()
+}
+
+public protocol HistoryPort: Sendable {
+    @discardableResult
+    func add(text: String, engine: String, durationMs: Double?) -> Int64
+    func lastText() -> String?
+}
+
+public protocol MetricsPort: Sendable {
+    func write(_ record: MetricsRecord)
+}
+
+/// The dictionary, as the session uses it: hot-reload at key-down, learn +
+/// usage bookkeeping strictly off the paste path.
+public protocol VocabularyPort: Sendable {
+    @discardableResult
+    func maybeReload() -> Bool
+    func add(_ learned: LearnedTerm)
+    func recordUse(term: String)
+}
+
+/// `hotkey.set_recording(...)` — gates Esc emission. Kept true through the
+/// refine stage, which is what keeps the longest stage abortable.
+public protocol RecordingGate: Sendable {
+    func setRecording(_ recording: Bool)
+}
+
+// MARK: - System adapters
+//
+// Thin, untested by design: each one forwards to a frozen core API.
+
+extension History: HistoryPort {}
+extension MetricsWriter: MetricsPort {}
+extension HotkeyMonitor: RecordingGate {}
+extension DictionaryStore: VocabularyPort {}
+
+public struct AsrManagerPort: AsrPort {
+    let manager: AsrManager
+    public init(_ manager: AsrManager) { self.manager = manager }
+
+    public func begin(onPartial: @escaping @Sendable (String) -> Void) async {
+        await manager.begin(onPartial: onPartial)
+    }
+    public func finalize() async -> UtteranceResult { await manager.finalize() }
+    public func cancel() async { await manager.cancel() }
+    public func reconcileVocabulary() async -> VocabularyReconciliation? {
+        await manager.reconcileVocabulary()
+    }
+}
+
+public struct RefinerPort: RefinePort {
+    let refiner: Refiner
+    public init(_ refiner: Refiner) { self.refiner = refiner }
+
+    public func begin() async { await refiner.begin() }
+    public func refine(_ raw: String,
+                       interrupt: @escaping @Sendable () -> InterruptSignal) async -> RefineResult {
+        await refiner.refine(raw, interrupt: interrupt)
+    }
+    public func cancel() async { await refiner.cancel() }
+    public func availability() async -> Bool? { await refiner.availability }
+}
+
+/// Builds an `InserterConfig` from live `Settings` on every call, so a config
+/// edit takes effect on the very next utterance.
+public struct SettingsInserterPort: InsertPort {
+    let inserter: Inserter
+    let settings: Settings
+
+    public init(inserter: Inserter, settings: Settings) {
+        self.inserter = inserter
+        self.settings = settings
+    }
+
+    public func insert(_ text: String) -> InsertResult {
+        inserter.insert(text, config: InserterConfig(
+            terminalBundleIDs: settings.terminalBundleIDs,
+            pasteRestoreDelayMs: Double(settings.pasteRestoreDelayMs)))
+    }
+}
+
+#if os(macOS)
+public struct MicCapturePort: AudioPort {
+    let capture: MicCapture
+    public init(_ capture: MicCapture) { self.capture = capture }
+
+    public func start() -> Bool { capture.start() }
+    public func stop() { capture.stop() }
+    public var level: Double { Double(capture.level) }
+}
+#endif
