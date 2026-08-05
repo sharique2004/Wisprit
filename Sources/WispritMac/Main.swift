@@ -65,9 +65,18 @@ enum WispritMacMain {
         MainActor.assumeIsolated {
             let controller = AppController(instanceLock: lock)
             controller.launch()
+            // NSApplication.delegate is weak and every menu closure captures
+            // self weakly, so THIS reference is what keeps the whole app object
+            // graph (status item, pill, session) alive for the process
+            // lifetime. Dropping it deallocates the controller right here and
+            // the menu-bar icon vanishes while the run loop keeps spinning.
+            Self.controller = controller
         }
         NSApplication.shared.run()
     }
+
+    /// Process-lifetime owner of the app object graph — see comment above.
+    @MainActor private static var controller: AppController?
 
     // MARK: - subcommands
 
