@@ -43,7 +43,9 @@ enum Golden {
       "ai_cleanup_timeout_ms": 12000,
       "mlx_model": "mlx-community/whisper-large-v3-turbo",
       "paste_restore_delay_ms": 500,
-      "enabled": false
+      "enabled": false,
+      "live_typing": false,
+      "im_selection_policy": "warm"
     }
 
     """
@@ -81,6 +83,8 @@ enum Golden {
       "mlx_model": "mlx-community/whisper-large-v3-turbo",
       "paste_restore_delay_ms": 500,
       "enabled": true,
+      "live_typing": false,
+      "im_selection_policy": "warm",
       "future_key": {
         "a": [
           1,

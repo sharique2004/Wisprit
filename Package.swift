@@ -27,6 +27,13 @@ let package = Package(
         .target(name: "WispritRefine", dependencies: ["WispritKit"], swiftSettings: v5),
         .target(name: "WispritEngine", dependencies: ["WispritKit"], swiftSettings: v5),
 
+        // Apple Intelligence polish modes (replaces the Python claude-CLI polish; on-device only).
+        .target(name: "WispritPolish", dependencies: ["WispritKit", "WispritRefine"], swiftSettings: v5),
+        // XPC contract between the main app and the palette input method.
+        .target(name: "WispritIMProtocol", dependencies: ["WispritKit"], swiftSettings: v5),
+        // The palette input method (live in-field streaming tier). Own .app bundle.
+        .executableTarget(name: "WispritIM", dependencies: ["WispritKit", "WispritIMProtocol"], swiftSettings: v5),
+
         // macOS shell (Developer ID SKU). Not iOS-buildable by design.
         .target(name: "WispritMacInput", dependencies: ["WispritKit"], swiftSettings: v5),
         .target(name: "WispritMacUI", dependencies: ["WispritKit"], swiftSettings: v5),
@@ -35,7 +42,7 @@ let package = Package(
             dependencies: [
                 "WispritKit", "WispritPostProcess", "WispritDictionary", "WispritCorrections",
                 "WispritPersistence", "WispritRefine", "WispritEngine",
-                "WispritMacInput", "WispritMacUI",
+                "WispritMacInput", "WispritMacUI", "WispritPolish", "WispritIMProtocol",
             ],
             swiftSettings: v5),
 
@@ -50,5 +57,7 @@ let package = Package(
         .testTarget(name: "WispritMacInputTests", dependencies: ["WispritMacInput"], path: "tests/WispritMacInputTests", swiftSettings: v5),
         .testTarget(name: "WispritMacUITests", dependencies: ["WispritMacUI"], path: "tests/WispritMacUITests", swiftSettings: v5),
         .testTarget(name: "WispritMacTests", dependencies: ["WispritMac"], path: "tests/WispritMacTests", swiftSettings: v5),
+        .testTarget(name: "WispritPolishTests", dependencies: ["WispritPolish"], path: "tests/WispritPolishTests", swiftSettings: v5),
+        .testTarget(name: "WispritIMTests", dependencies: ["WispritIM", "WispritIMProtocol"], path: "tests/WispritIMTests", swiftSettings: v5),
     ]
 )

@@ -1,7 +1,9 @@
 #if os(macOS)
 import Foundation
 import WispritEngine
+import WispritIMProtocol
 import WispritKit
+import WispritPersistence
 import WispritRefine
 
 /// The system side of `wisprit doctor`: run every real probe, fill a
@@ -36,12 +38,42 @@ public extension Doctor {
         facts.aiAvailable = availability.available
         facts.aiReason = availability.reason
 
+        gatherLiveTyping(into: &facts)
+
         facts.configPath = WispritPaths.configPath.path
         facts.configValid = isValidJSON(WispritPaths.configPath)
         facts.dictionaryPath = WispritPaths.dictionaryPath.path
         facts.dictionaryValid = isValidJSON(WispritPaths.dictionaryPath)
 
         return facts
+    }
+
+    /// Read-only inspection of the input-source database plus one liveness ping.
+    ///
+    /// Nothing here registers, enables, selects or deselects anything: doctor is
+    /// a diagnostic, and changing the user's input configuration from a
+    /// diagnostic would be indefensible. The ping is inert by construction —
+    /// `WispritIMClient.ping` uses generation 0, which the gate can never open a
+    /// session for.
+    static func gatherLiveTyping(into facts: inout DoctorFacts) {
+        facts.liveTypingEnabled = LiveTypingSettings.isEnabled(Settings.load())
+
+        let staged = IMStagedBundle.url
+        facts.imStaged = staged != nil
+        facts.imStagedPath = staged?.path
+            ?? Bundle.main.bundleURL.appendingPathComponent(IMStagedBundle.relativePath).path
+
+        facts.imStatus = InputSourceProbe.status(
+            stagedVersion: IMStagedBundle.version(at: staged))
+
+        if let plist = InputSourceProbe.installedInfoPlist() {
+            facts.imPlistViolations = IMBundleTemplate.violations(in: plist)
+        }
+
+        guard !LiveTypingEnvironment.isDisabled, facts.imStatus.registered else { return }
+        let client = WispritIMClient(onEvent: { _ in })
+        facts.imReachable = client.ping(timeout: 1.0) != nil
+        client.invalidate()
     }
 
     /// Probe FoundationModels directly. `Refiner` would work too, but it starts

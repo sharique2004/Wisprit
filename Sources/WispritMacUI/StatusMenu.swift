@@ -18,6 +18,12 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         public var state: () -> StatusMenuState
         public var toggleDictation: () -> Void
         public var toggleAiCleanup: () -> Void
+        /// One of the four polish modes, by key (`clean`/`formal`/…).
+        public var polishLast: (String) -> Void
+        /// Run the input-method install/register/enable flow. May raise the
+        /// system activation dialog — that is why it lives behind a menu click.
+        public var enableLiveTyping: () -> Void
+        public var toggleLiveTyping: () -> Void
         /// Defaults to the general pasteboard; injectable so tests and the
         /// integration layer can route it.
         public var copyToClipboard: (String) -> Void
@@ -33,6 +39,9 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         public init(state: @escaping () -> StatusMenuState,
                     toggleDictation: @escaping () -> Void,
                     toggleAiCleanup: @escaping () -> Void,
+                    polishLast: @escaping (String) -> Void = { _ in },
+                    enableLiveTyping: @escaping () -> Void = {},
+                    toggleLiveTyping: @escaping () -> Void = {},
                     copyToClipboard: @escaping (String) -> Void = StatusMenu.copyToPasteboard,
                     pasteLast: @escaping () -> Void,
                     openDictionary: @escaping () -> Void,
@@ -43,6 +52,9 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
             self.state = state
             self.toggleDictation = toggleDictation
             self.toggleAiCleanup = toggleAiCleanup
+            self.polishLast = polishLast
+            self.enableLiveTyping = enableLiveTyping
+            self.toggleLiveTyping = toggleLiveTyping
             self.copyToClipboard = copyToClipboard
             self.pasteLast = pasteLast
             self.openDictionary = openDictionary
@@ -89,24 +101,39 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
     }
 
     /// `_rebuild_menu`: throw the menu away and rebuild it from fresh state.
+    ///
+    /// `rows` is FLAT and tag-indexed, submenu children included, so a fired item
+    /// resolves to its model with one array lookup no matter how deep it sat.
     public func rebuild() {
         guard let menu else { return }
-        rows = StatusMenuModel.build(actions.state())
+        rows = []
         menu.removeAllItems()
-        for (index, row) in rows.enumerated() {
+        append(StatusMenuModel.build(actions.state()), to: menu)
+    }
+
+    private func append(_ models: [MenuItemModel], to menu: NSMenu) {
+        for row in models {
             if row.isSeparator {
                 menu.addItem(NSMenuItem.separator())
                 continue
             }
+            let isClickable = row.action != nil
             let item = NSMenuItem(title: row.title,
-                                  action: row.action == nil ? nil : #selector(itemFired(_:)),
+                                  action: isClickable ? #selector(itemFired(_:)) : nil,
                                   keyEquivalent: "")
-            item.tag = index
-            item.isEnabled = row.isEnabled && row.action != nil
+            item.tag = rows.count
+            rows.append(row)
+            item.isEnabled = row.isEnabled && (isClickable || row.isSubmenu)
             item.state = row.isChecked ? .on : .off
-            if row.action != nil { item.target = self }
+            if isClickable { item.target = self }
             if let text = row.representedText { item.representedObject = text }
             menu.addItem(item)
+            if let children = row.submenu {
+                let sub = NSMenu(title: row.title)
+                sub.autoenablesItems = false
+                append(children, to: sub)
+                menu.setSubmenu(sub, for: item)
+            }
         }
     }
 
@@ -127,6 +154,16 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
             rebuild()
         case .toggleAiCleanup:
             actions.toggleAiCleanup()
+            rebuild()
+        case .polishLast(let mode):
+            // Prefer the represented object so an item built by an older
+            // version still names its mode the same way.
+            actions.polishLast((sender.representedObject as? String) ?? mode)
+        case .enableLiveTyping:
+            actions.enableLiveTyping()
+            rebuild()
+        case .toggleLiveTyping:
+            actions.toggleLiveTyping()
             rebuild()
         case .copyRecent:
             if let text = sender.representedObject as? String, !text.isEmpty {

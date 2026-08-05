@@ -43,12 +43,22 @@ final class StatusMenuModelTests: XCTestCase {
 
     // MARK: - full structure
 
+    private static let modes = [
+        PolishModeItem(key: "clean", label: "Clean up"),
+        PolishModeItem(key: "formal", label: "Make formal"),
+        PolishModeItem(key: "casual", label: "Make casual"),
+        PolishModeItem(key: "prompt", label: "As an AI prompt"),
+    ]
+
     func testDefaultMenuStructure() {
         let items = StatusMenuModel.build(StatusMenuState(
-            dictationEnabled: true, aiCleanupEnabled: true, aiAvailability: nil, recents: []))
+            dictationEnabled: true, aiCleanupEnabled: true, aiAvailability: nil, recents: [],
+            polishModes: StatusMenuModelTests.modes))
         XCTAssertEqual(titles(items), [
             "Dictation On",
             "AI Cleanup (Apple Intelligence)",
+            "Polish Last",
+            "Enable Live Typing…",
             "---",
             "Recent transcripts",
             "  (none yet)",
@@ -151,9 +161,14 @@ final class StatusMenuModelTests: XCTestCase {
     func testEveryActionRowIsEnabledAndEveryInertRowIsNot() {
         for availability in [nil, true, false] as [Bool?] {
             let items = StatusMenuModel.build(StatusMenuState(
-                aiAvailability: availability, recents: ["one", "two"]))
+                aiAvailability: availability, recents: ["one", "two"],
+                polishAvailability: availability,
+                polishModes: StatusMenuModelTests.modes))
             for item in items where !item.isSeparator {
-                if item.action == nil {
+                if item.isSubmenu {
+                    XCTAssertNil(item.action, "a parent row carries no action of its own")
+                    XCTAssertTrue(item.isEnabled, "submenu row '\(item.title)' must be enabled")
+                } else if item.action == nil {
                     XCTAssertFalse(item.isEnabled, "inert row '\(item.title)' must be disabled")
                 } else {
                     XCTAssertTrue(item.isEnabled, "action row '\(item.title)' must be enabled")
@@ -162,8 +177,90 @@ final class StatusMenuModelTests: XCTestCase {
         }
     }
 
+    // MARK: - Polish Last
+
+    func testPolishSubmenuCarriesTheFourPythonModeKeys() {
+        let row = StatusMenuModel.build(
+            StatusMenuState(polishModes: StatusMenuModelTests.modes))[2]
+        XCTAssertEqual(row.title, "Polish Last")
+        XCTAssertNil(row.action, "the parent row is a container")
+        XCTAssertTrue(row.isEnabled)
+        let children = row.submenu ?? []
+        XCTAssertEqual(children.map(\.title),
+                       ["Clean up", "Make formal", "Make casual", "As an AI prompt"])
+        XCTAssertEqual(children.map(\.action), [
+            .polishLast(mode: "clean"), .polishLast(mode: "formal"),
+            .polishLast(mode: "casual"), .polishLast(mode: "prompt"),
+        ])
+        XCTAssertEqual(children.map(\.representedText),
+                       ["clean", "formal", "casual", "prompt"],
+                       "the represented object stays byte-compatible with polish.py's MODES")
+    }
+
+    func testPolishShownWhileProbingJustLikeAiCleanup() {
+        let row = StatusMenuModel.build(StatusMenuState(
+            polishAvailability: nil, polishModes: StatusMenuModelTests.modes))[2]
+        XCTAssertTrue(row.isSubmenu)
+    }
+
+    func testPolishReplacedByDisabledRowWhenUnavailable() {
+        let row = StatusMenuModel.build(StatusMenuState(
+            polishAvailability: false,
+            polishUnavailableReason: "Apple Intelligence is off",
+            polishModes: StatusMenuModelTests.modes))[2]
+        XCTAssertEqual(row.title, "Polish Last unavailable — Apple Intelligence is off")
+        XCTAssertNil(row.action)
+        XCTAssertNil(row.submenu)
+        XCTAssertFalse(row.isEnabled)
+    }
+
+    func testPolishUnavailableWithoutAReasonPointsAtDoctor() {
+        let row = StatusMenuModel.build(StatusMenuState(polishAvailability: false))[2]
+        XCTAssertEqual(row.title, "Polish Last unavailable — run Doctor")
+    }
+
+    func testPolishWithNoModesIsInertRatherThanAnEmptySubmenu() {
+        let row = StatusMenuModel.build(StatusMenuState(polishModes: []))[2]
+        XCTAssertNil(row.submenu)
+        XCTAssertFalse(row.isEnabled)
+    }
+
+    // MARK: - Live typing
+
+    func testLiveTypingRowReflectsEachStageOfOnboarding() {
+        func row(_ status: LiveTypingMenuStatus) -> MenuItemModel {
+            StatusMenuModel.build(StatusMenuState(liveTyping: status))[3]
+        }
+
+        XCTAssertEqual(row(.notInstalled).title, "Enable Live Typing…")
+        XCTAssertEqual(row(.notInstalled).action, .enableLiveTyping)
+        XCTAssertEqual(row(.needsEnable).action, .enableLiveTyping)
+        XCTAssertEqual(row(.needsUpdate).title, "Update Live Typing…")
+        XCTAssertEqual(row(.needsUpdate).action, .enableLiveTyping)
+
+        XCTAssertEqual(row(.readyOff).title, "Live Typing")
+        XCTAssertEqual(row(.readyOff).action, .toggleLiveTyping)
+        XCTAssertFalse(row(.readyOff).isChecked)
+        XCTAssertTrue(row(.readyOn).isChecked)
+        XCTAssertEqual(row(.readyOn).action, .toggleLiveTyping)
+
+        XCTAssertNil(row(.probing).action)
+        XCTAssertNil(row(.unsupported).action)
+        XCTAssertEqual(row(.unsupported).title, "Live Typing unavailable — run Doctor")
+    }
+
+    func testEnablingLiveTypingIsNeverOfferedTwiceInOneMenu() {
+        for status in LiveTypingMenuStatus.allCases {
+            let actions = StatusMenuModel.build(StatusMenuState(liveTyping: status))
+                .compactMap(\.action)
+            XCTAssertLessThanOrEqual(actions.filter { $0 == .enableLiveTyping }.count, 1,
+                                     "\(status)")
+        }
+    }
+
     func testTailActionsArePresentExactlyOnce() {
-        let items = StatusMenuModel.build(StatusMenuState())
+        let items = StatusMenuModel.build(StatusMenuState(
+            polishModes: StatusMenuModelTests.modes))
         let actions = items.compactMap(\.action)
         for expected: MenuAction in [.pasteLast, .openDictionary, .openConfig,
                                      .runDoctor, .purgeHistory, .quit] {

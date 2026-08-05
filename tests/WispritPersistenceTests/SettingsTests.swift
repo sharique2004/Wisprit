@@ -25,7 +25,9 @@ final class SettingsTests: XCTestCase {
 
     // MARK: defaults
 
-    func testDefaultsHaveExactlyThePythonKeysInOrder() {
+    // The Python key set, in Python order, as a strict PREFIX — native-only
+    // keys are append-only (mid-list inserts would reorder every user's file).
+    func testDefaultsHaveThePythonKeysInOrderThenNativeAppendices() {
         XCTAssertEqual(Settings.defaults.keys, [
             "hotkey", "hold_debounce_ms", "locale", "finalize_timeout_ms",
             "filler_removal", "ensure_sentence_period", "leading_space",
@@ -33,6 +35,8 @@ final class SettingsTests: XCTestCase {
             "history_enabled", "history_limit", "engine", "ai_cleanup",
             "ai_cleanup_max_words", "ai_cleanup_timeout_ms", "mlx_model",
             "paste_restore_delay_ms", "enabled",
+            // native appendices (post-Python; keep appending, never insert)
+            "live_typing", "im_selection_policy",
         ])
     }
 

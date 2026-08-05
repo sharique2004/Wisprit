@@ -1,0 +1,286 @@
+import XCTest
+import WispritCorrections
+import WispritEngine
+import WispritIMProtocol
+import WispritKit
+import WispritMacInput
+import WispritRefine
+@testable import WispritMac
+
+/// The session state machine wired to the input-method rungs, end to end.
+///
+/// The "input method" is `FakeIMPeer` — a real generation gate and a real
+/// document string in this process. Nothing touches an input source, a text
+/// field, the pasteboard or `~/.wisprit`.
+final class SessionLiveTypingTests: XCTestCase {
+
+    struct Harness {
+        let events = HotkeyEventQueue()
+        let asr = FakeAsr()
+        let audio = FakeAudio()
+        let refiner = FakeRefiner()
+        let inserter = FakeInserter()
+        let history = FakeHistory()
+        let metrics = FakeMetrics()
+        let pill = FakePill()
+        let vocabulary = FakeVocabulary()
+        let gate = FakeGate()
+        let dictionary = FakeDictionary()
+        let peer = FakeIMPeer()
+        let cache = BundleCapabilityCache()
+        let live: LiveTypingSession
+        let session: SessionController
+
+        init(corrector: SpokenSpellingCorrector? = nil,
+             liveTypingEnabled: Bool = true) {
+            inserter.history = history
+            let peer = self.peer
+            live = LiveTypingSession(
+                peer: peer,
+                cache: cache,
+                counter: IMGenerationCounter(seed: 500),
+                configuration: LiveTypingConfiguration(
+                    isEnabled: { liveTypingEnabled },
+                    frontmostBundleID: { "com.apple.TextEdit" }))
+            live.start()
+            refiner.transform = { RefineResult(text: $0, outcome: .applied) }
+            session = SessionController(
+                events: events,
+                asr: asr,
+                audio: audio,
+                inserter: inserter,
+                history: history,
+                metrics: metrics,
+                refiner: refiner,
+                pill: pill,
+                vocabulary: vocabulary,
+                corrections: dictionary,
+                corrector: corrector,
+                gate: gate,
+                liveTyping: live,
+                configuration: SessionController.Configuration(
+                    holdDebounceMs: { 150 },
+                    levelTickInterval: nil,
+                    reconcileVocabulary: false))
+        }
+
+        func utterance(heldSeconds: Double = 1.0) {
+            session.dispatch(HotkeyEvent(.press, ts: 0))
+            session.dispatch(HotkeyEvent(.release, ts: heldSeconds))
+        }
+    }
+
+    // MARK: - rung 1: streaming into the field
+
+    func testTextGoesIntoTheFieldAndTheClipboardIsNeverTouched() {
+        let h = Harness()
+        h.asr.result = UtteranceResult(text: "hello world", engine: "apple_live", finalizeMs: 90)
+        h.asr.partials = ["hello", "hello wor"]
+
+        h.utterance()
+
+        XCTAssertEqual(h.peer.snapshot.document, "hello world",
+                       "rung 1 committed the final text through the input method")
+        XCTAssertTrue(h.inserter.inserted.isEmpty, "the paste rung was never reached")
+        XCTAssertEqual(h.metrics.last?.outcome, "im_streaming")
+        XCTAssertEqual(h.history.addedCount, 1, "history is still written before insertion")
+    }
+
+    func testPartialsAreStreamedAsMarkedTextAndTheBubbleIsSuppressed() {
+        let h = Harness()
+        h.asr.partials = ["the quick", "the quick brown"]
+
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+
+        XCTAssertEqual(h.peer.count(of: "update_volatile"), 2)
+        XCTAssertEqual(h.peer.snapshot.marked, "the quick brown")
+        XCTAssertTrue(h.pill.partials.isEmpty,
+                      "the bubble is suppressed while the words are appearing in the field")
+    }
+
+    func testThePillKeepsThePreviewWhenLiveTypingIsOff() {
+        let h = Harness(liveTypingEnabled: false)
+        h.asr.partials = ["the quick", "the quick brown"]
+
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+
+        XCTAssertEqual(h.pill.partials, ["the quick", "the quick brown"])
+        XCTAssertEqual(h.peer.commandNames, [], "no input source was touched at all")
+    }
+
+    func testTheBubbleComesBackTheInstantTheClientIsLost() {
+        let h = Harness()
+        h.asr.partials = ["first partial"]
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        XCTAssertTrue(h.pill.partials.isEmpty)
+
+        h.peer.loseClient()
+
+        // The partial routing is re-evaluated per partial, so the preview lands
+        // back on the pill without waiting for the next utterance.
+        h.asr.partials = ["second partial"]
+        h.session.dispatch(HotkeyEvent(.release, ts: 1.0))
+        h.session.dispatch(HotkeyEvent(.press, ts: 2.0))
+        XCTAssertEqual(h.pill.partials, ["second partial"])
+    }
+
+    // MARK: - falling off the ladder
+
+    func testClientLostMidUtteranceFallsBackToPasteWithoutLosingText() {
+        let h = Harness()
+        h.asr.result = UtteranceResult(text: "hello world", engine: "apple_live", finalizeMs: 90)
+        h.asr.partials = ["hello"]
+
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        h.peer.loseClient()                       // focus change while speaking
+        h.session.dispatch(HotkeyEvent(.release, ts: 1.0))
+
+        XCTAssertEqual(h.inserter.inserted, ["hello world"], "the paste rung caught it")
+        XCTAssertEqual(h.peer.snapshot.document, "", "and it was not also written to the field")
+        XCTAssertEqual(h.metrics.last?.outcome, "paste")
+        XCTAssertEqual(h.history.addedCount, 1)
+        XCTAssertEqual(h.inserter.historyDepthAtInsert, [1],
+                       "history-before-insert survives the downgrade")
+    }
+
+    func testInputMethodGoingAwayEntirelyStillDeliversTheText() {
+        let h = Harness()
+        h.asr.result = UtteranceResult(text: "hello world", engine: "apple_live", finalizeMs: 90)
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        h.peer.reachable = false                  // the process died
+
+        h.session.dispatch(HotkeyEvent(.release, ts: 1.0))
+
+        XCTAssertEqual(h.inserter.inserted, ["hello world"])
+        XCTAssertEqual(h.metrics.last?.outcome, "paste")
+    }
+
+    func testRefusedCommitDowngradesTheBundleAndPastesInstead() {
+        let h = Harness()
+        h.peer.insertWorks = false
+        h.asr.result = UtteranceResult(text: "hello world", engine: "apple_live", finalizeMs: 90)
+
+        h.utterance()
+
+        XCTAssertEqual(h.inserter.inserted, ["hello world"])
+        XCTAssertEqual(h.cache.verdict(for: "com.apple.TextEdit"), .unsupported)
+        XCTAssertEqual(h.metrics.last?.outcome, "paste")
+    }
+
+    // MARK: - the provisional tail is always cleaned up
+
+    func testEscDuringRecordingTakesTheMarkedTailBackDown() {
+        let h = Harness()
+        h.asr.partials = ["half a th"]
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        XCTAssertEqual(h.peer.snapshot.marked, "half a th")
+
+        h.session.dispatch(HotkeyEvent(.esc, ts: 0.5))
+
+        XCTAssertEqual(h.peer.snapshot.marked, "", "the field is left exactly as it was")
+        XCTAssertEqual(h.peer.snapshot.document, "")
+    }
+
+    func testASubDebounceBrushLeavesNothingBehind() {
+        let h = Harness()
+        h.asr.partials = ["oh"]
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        h.session.dispatch(HotkeyEvent(.release, ts: 0.05))
+
+        XCTAssertEqual(h.peer.snapshot.marked, "")
+        XCTAssertEqual(h.peer.snapshot.document, "")
+        XCTAssertTrue(h.metrics.records.isEmpty, "still no metrics row for a brush")
+    }
+
+    func testAnEmptyFinalClearsTheTailAndInsertsNothing() {
+        let h = Harness()
+        h.asr.partials = ["mm"]
+        h.asr.result = UtteranceResult(text: "   ", engine: "apple_live", finalizeMs: 40)
+
+        h.utterance()
+
+        XCTAssertEqual(h.peer.snapshot.marked, "")
+        XCTAssertEqual(h.peer.snapshot.document, "")
+        XCTAssertEqual(h.metrics.last?.outcome, "empty")
+    }
+
+    // MARK: - cross-utterance retro replace, for real
+
+    func testCrossUtteranceRetroReplaceRewritesTheWordInTheField() {
+        let dictionary = FakeDictionary()
+        let h = Harness(corrector: SpokenSpellingCorrector(vocabulary: dictionary))
+
+        h.asr.result = UtteranceResult(text: "Please ping Cherie about the migration.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.utterance()
+        XCTAssertEqual(h.peer.snapshot.document, "Please ping Cherie about the migration.")
+
+        h.asr.result = UtteranceResult(text: "Actually, it's S-H-A-R-I-Q-U-E.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.utterance()
+
+        XCTAssertEqual(h.peer.snapshot.document,
+                       "Please ping Sharique about the migration.",
+                       "the word already committed to the user's document was corrected in place")
+        XCTAssertEqual(h.pill.notices, ["Fixed Sharique"],
+                       "the notice says what actually happened, not just what was learned")
+        XCTAssertEqual(h.vocabulary.learned.first?.term, "Sharique",
+                       "learning still happens — it is what stops the misrecognition recurring")
+        XCTAssertEqual(h.vocabulary.learned.first?.heard, ["Cherie"])
+        XCTAssertTrue(h.inserter.inserted.isEmpty, "no paste, no clipboard, no keystroke")
+        XCTAssertEqual(h.metrics.last?.outcome, "correction")
+    }
+
+    func testRetroReplaceKeepsLearnAndNoticeWhenTheFieldCannotBeEdited() {
+        // No TSMDocumentAccess: the replacement range would be silently dropped
+        // and the correction appended. Rungs 3–5 behaviour is the honest answer.
+        let dictionary = FakeDictionary()
+        let h = Harness(corrector: SpokenSpellingCorrector(vocabulary: dictionary))
+        h.peer.capabilities = IMClientCapabilities(
+            supportsUnicode: true, bundleID: "com.example.legacy", supportsDocumentAccess: false)
+
+        h.asr.result = UtteranceResult(text: "Please ping Cherie about the migration.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.utterance()
+        h.asr.result = UtteranceResult(text: "Actually, it's S-H-A-R-I-Q-U-E.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.utterance()
+
+        XCTAssertEqual(h.peer.snapshot.document, "Please ping Cherie about the migration.",
+                       "the field is untouched rather than corrupted")
+        XCTAssertEqual(h.pill.notices, ["Learned Sharique"])
+        XCTAssertEqual(h.vocabulary.learned.count, 1)
+    }
+
+    func testRetroReplaceWithLiveTypingOffIsUnchangedFromPhaseOne() {
+        let dictionary = FakeDictionary()
+        let h = Harness(corrector: SpokenSpellingCorrector(vocabulary: dictionary),
+                        liveTypingEnabled: false)
+
+        h.asr.result = UtteranceResult(text: "Please ping Cherie about the migration.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.utterance()
+        h.asr.result = UtteranceResult(text: "Actually, it's S-H-A-R-I-Q-U-E.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.utterance()
+
+        XCTAssertEqual(h.pill.notices, ["Learned Sharique"])
+        XCTAssertEqual(h.inserter.inserted.count, 1)
+        XCTAssertEqual(h.peer.commandNames, [])
+    }
+
+    func testSameUtteranceCorrectionNeverReachesTheInputMethod() {
+        // The antecedent is in the pending text, so it is fixed before anything
+        // is committed — there is nothing retroactive to do.
+        let dictionary = FakeDictionary()
+        let h = Harness(corrector: SpokenSpellingCorrector(vocabulary: dictionary))
+        h.asr.result = UtteranceResult(text: "My name is Cherie S-H-A-R-I-Q-U-E",
+                                       engine: "apple_live", finalizeMs: 90)
+
+        h.utterance()
+
+        XCTAssertEqual(h.peer.count(of: "apply_edit"), 0)
+        XCTAssertTrue(h.peer.snapshot.document.contains("Sharique"))
+        XCTAssertFalse(h.peer.snapshot.document.contains("Cherie"))
+    }
+}

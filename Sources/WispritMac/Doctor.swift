@@ -1,4 +1,5 @@
 import Foundation
+import WispritIMProtocol
 import WispritKit
 
 /// `wisprit doctor` — diagnose the environment and permissions.
@@ -105,6 +106,21 @@ public struct DoctorFacts: Sendable {
     public var aiAvailable: Bool = false
     public var aiReason: String = ""
 
+    // Live in-field streaming (the palette input method)
+    /// The `live_typing` setting.
+    public var liveTypingEnabled: Bool = false
+    /// `Wisprit.app/Contents/Library/InputMethods/WispritIM.app` is present.
+    public var imStaged: Bool = false
+    public var imStagedPath: String = ""
+    /// Installed / registered / enabled / selected, straight from TIS.
+    public var imStatus = InputMethodStatus()
+    /// A message reached `WispritIM.app` and came back.
+    public var imReachable: Bool = false
+    /// `IMBundleTemplate.violations` against the INSTALLED bundle's Info.plist —
+    /// how a half-updated install gets caught instead of silently never
+    /// receiving a client.
+    public var imPlistViolations: [String] = []
+
     // State files
     public var configValid: Bool = false
     public var configPath: String = ""
@@ -210,6 +226,14 @@ public enum Doctor {
                 : "unavailable: \(facts.aiReason.isEmpty ? "unknown" : facts.aiReason) — "
                   + "enable it in System Settings ▸ Apple Intelligence & Siri"))
 
+        // --- live in-field streaming ------------------------------------------
+        //
+        // Never required: live typing is the Developer-ID-only rung 1 of the
+        // insertion ladder, and every machine without it still dictates by
+        // pasting at the end. A red mark here would call a perfectly healthy
+        // install broken.
+        checks.append(contentsOf: liveTypingChecks(facts))
+
         // --- state files -----------------------------------------------------
         checks.append(DoctorCheck(
             facts.configValid ? .ok : .warn, "config.json",
@@ -224,6 +248,111 @@ public enum Doctor {
                             checks: checks,
                             reminders: reminders)
     }
+
+    // MARK: - live typing
+
+    public static let liveTypingLabel = "Live Typing (input method)"
+    public static let liveTypingBridgeLabel = "Live Typing bridge (XPC)"
+    public static let liveTypingBundleLabel = "Live Typing bundle"
+
+    /// Three questions, in the order that fixing them unblocks the next:
+    /// is the input method REGISTERED, is it ENABLED, and is the bridge
+    /// REACHABLE. Each carries the exact remedy.
+    static func liveTypingChecks(_ facts: DoctorFacts) -> [DoctorCheck] {
+        var checks: [DoctorCheck] = []
+        let verdict = IMPreflight.evaluate(facts.imStatus)
+
+        // 1. registered + enabled.
+        let registrationDetail: String
+        let registrationMark: DoctorMark
+        if !facts.imStaged {
+            registrationMark = .warn
+            registrationDetail = "no WispritIM.app inside this build "
+                + "(expected at \(facts.imStagedPath.isEmpty ? IMStagedBundleLayout.relativePath : facts.imStagedPath)) "
+                + "— rebuild with scripts/build_app.sh; dictation still pastes at the end"
+        } else if verdict.isUsable {
+            registrationMark = .ok
+            registrationDetail = "registered and enabled"
+                + (facts.imStatus.selected ? ", selected now" : ", selected when you dictate")
+        } else {
+            registrationMark = .warn
+            registrationDetail = "registered: \(facts.imStatus.registered), "
+                + "enabled: \(facts.imStatus.enabled) — "
+                + remedy(for: verdict)
+        }
+        checks.append(DoctorCheck(registrationMark, liveTypingLabel, registrationDetail))
+
+        // 2. the bridge.
+        let bridgeMark: DoctorMark
+        let bridgeDetail: String
+        if !verdict.isUsable {
+            bridgeMark = .warn
+            bridgeDetail = "not checked — install and enable the input method first"
+        } else if facts.imReachable {
+            bridgeMark = .ok
+            bridgeDetail = "WispritIM.app answered on \(WispritIMNaming.machServiceName)"
+        } else if !facts.imStatus.selected {
+            bridgeMark = .warn
+            bridgeDetail = "input method is not running right now — Wisprit selects it "
+                + "when you start dictating, which is what launches it. Hold the "
+                + "dictation key once, then re-run doctor."
+        } else {
+            bridgeMark = .warn
+            bridgeDetail = "selected but not answering on \(WispritIMNaming.machServiceName) — "
+                + "choose Live Typing ▸ Enable Live Typing… from the Wisprit menu to "
+                + "reinstall, or log out and back in. Dictation keeps working by pasting."
+        }
+        checks.append(DoctorCheck(bridgeMark, liveTypingBridgeLabel, bridgeDetail))
+
+        // 3. the installed bundle's identity keys, which a half-finished update
+        //    silently breaks.
+        if facts.imStatus.bundleInstalled {
+            let violations = facts.imPlistViolations
+            checks.append(DoctorCheck(
+                violations.isEmpty ? .ok : .bad, liveTypingBundleLabel,
+                violations.isEmpty
+                    ? "Info.plist keys are correct"
+                    : violations.joined(separator: "; ")
+                      + " — choose Live Typing ▸ Enable Live Typing… to reinstall"))
+        }
+
+        return checks
+    }
+
+    // The verdicts and substance are `IMPreflight`'s; this override owns only
+    // the click-path wording so doctor copy can track the shipping menu
+    // without touching the protocol target.
+    static func remedy(for verdict: IMPreflightVerdict,
+                       layout: IMInstallLayout = .user) -> String {
+        let menuItem = "choose \"Enable Live Typing…\" from the Wisprit menu"
+        switch verdict {
+        case .ready:
+            return "Live in-field streaming is ready."
+        case .notSelected:
+            return "Installed and enabled. Wisprit selects it when you start dictating."
+        case .needsInstall:
+            return "\(menuItem) — it copies WispritIM.app into "
+                + "\(layout.inputMethodsDirectory.path) and registers it."
+        case .needsRegistration:
+            return "WispritIM.app is in place but macOS has not registered it. "
+                + "\(menuItem) to re-register, or log out and back in."
+        case .needsEnable:
+            return "macOS needs your permission to activate the Wisprit input method. "
+                + "\(menuItem); approve the dialog that says Wisprit wants to activate "
+                + "a third-party input method. (You can also do it by hand in "
+                + "System Settings ▸ Keyboard ▸ Input Sources.)"
+        case .needsUpdate(let installed, let staged):
+            return "A newer input method ships with this Wisprit "
+                + "(installed \(installed ?? "unknown"), bundled \(staged ?? "unknown")) — "
+                + "\(menuItem) to update."
+        }
+    }
+}
+
+/// Kept next to the report so the pure builder can name the staged location
+/// without importing the macOS-only bundle helpers.
+public enum IMStagedBundleLayout {
+    public static let relativePath = "Contents/Library/InputMethods/WispritIM.app"
 }
 
 /// Version reported by `doctor` and stamped into the app bundle.

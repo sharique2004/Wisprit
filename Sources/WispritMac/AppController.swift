@@ -4,10 +4,12 @@ import Foundation
 import WispritCorrections
 import WispritDictionary
 import WispritEngine
+import WispritIMProtocol
 import WispritKit
 import WispritMacInput
 import WispritMacUI
 import WispritPersistence
+import WispritPolish
 import WispritPostProcess
 import WispritRefine
 
@@ -30,10 +32,13 @@ public final class AppController: NSObject, NSApplicationDelegate {
     let history: History
     let metrics: MetricsWriter
     let refiner: Refiner
+    let polisher: Polisher
     let events: HotkeyEventQueue
     let monitor: HotkeyMonitor
     let session: SessionController
     let pill: Pill
+    let liveTyping: LiveTypingSession
+    let tierCache: BundleCapabilityCache
     private var statusMenu: StatusMenu!
     private let instanceLock: SingleInstanceLock
 
@@ -42,6 +47,13 @@ public final class AppController: NSObject, NSApplicationDelegate {
     /// slow timer. nil (still probing) and true both show the toggle; only an
     /// explicit false swaps in the "unavailable — run Doctor" row.
     private var aiAvailability: Bool?
+    /// Same tri-state, for the "Polish Last" submenu.
+    private var polishAvailability: Bool?
+    private var polishUnavailableReason: String = ""
+    /// Last input-source snapshot, sampled on the same slow timer as the model
+    /// probes and re-read whenever the menu opens.
+    private var liveTypingStatus: LiveTypingMenuStatus = .probing
+    private var liveTypingDetail: String = ""
     private var availabilityTimer: Timer?
 
     public init(instanceLock: SingleInstanceLock) {
@@ -71,6 +83,10 @@ public final class AppController: NSObject, NSApplicationDelegate {
             },
             vocabulary: dictionary)
 
+        self.polisher = Polisher(
+            generator: AppController.makePolishGenerator(),
+            configuration: { PolishConfiguration(maxWords: settings.aiCleanupMaxWords) })
+
         let events = HotkeyEventQueue()
         self.events = events
         let monitor = HotkeyMonitor(queue: events, hotkeySetting: settings.hotkey)
@@ -94,6 +110,22 @@ public final class AppController: NSObject, NSApplicationDelegate {
             }))
         self.pill = pill
 
+        // Rungs 1–2 of the insertion ladder. Nothing here touches an input
+        // source until `live_typing` is on AND onboarding has run — the setting
+        // defaults to false, so a fresh install behaves exactly like Phase 1.
+        let tierCache = BundleCapabilityCache()
+        self.tierCache = tierCache
+        let liveTyping = LiveTypingSession(
+            peer: SystemLiveTypingPeer(),
+            cache: tierCache,
+            configuration: LiveTypingConfiguration(
+                isEnabled: { LiveTypingSettings.isEnabled(settings) },
+                terminalBundleIDs: { settings.terminalBundleIDs },
+                frontmostBundleID: { AppController.frontmostBundleID() },
+                secureInputActive: { Permissions.secureInput().active },
+                selectionPolicy: LiveTypingSettings.selectionPolicy(settings)))
+        self.liveTyping = liveTyping
+
         self.session = SessionController(
             events: events,
             asr: AsrManagerPort(asr),
@@ -107,6 +139,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
             corrections: dictionary,
             corrector: SpokenSpellingCorrector(vocabulary: dictionary),
             gate: monitor,
+            liveTyping: liveTyping,
             configuration: SessionController.Configuration(
                 holdDebounceMs: { Double(settings.holdDebounceMs) },
                 isEnabled: { settings.enabled },
@@ -136,6 +169,20 @@ public final class AppController: NSObject, NSApplicationDelegate {
         #endif
     }
 
+    private static func makePolishGenerator() -> any PolishGenerating {
+        #if canImport(FoundationModels)
+        return SystemPolishGenerator()
+        #else
+        return UnavailablePolishGenerator()
+        #endif
+    }
+
+    /// Frontmost application's bundle id — the key the ladder caches tier
+    /// verdicts under before the input method has told us anything.
+    nonisolated static func frontmostBundleID() -> String? {
+        NSWorkspace.shared.frontmostApplication?.bundleIdentifier
+    }
+
     // MARK: - startup
 
     /// Everything `app.py: main()` does between the lock and `NSApp.run()`.
@@ -162,6 +209,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
         Permissions.requestMicrophone()
         auditPermissions()
         startAvailabilityRefresh()
+
+        // Listen for `clientLost` from the input method. This registers a local
+        // message port and nothing else — no input source is touched until the
+        // user has enabled live typing and holds the dictation key.
+        liveTyping.start()
 
         session.start()
         log.info("Wisprit ready — hold \(self.settings.hotkey, privacy: .public) to dictate.")
@@ -193,8 +245,38 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
     private func refreshAvailability() {
         let refiner = self.refiner
+        let polisher = self.polisher
         Task { @MainActor in
             self.aiAvailability = await refiner.availability
+            self.polishAvailability = await polisher.availability
+            self.polishUnavailableReason = await polisher.unavailableReason
+        }
+        refreshLiveTypingStatus()
+    }
+
+    /// Cheap enough to re-read on every menu open: one `TISCreateInputSourceList`
+    /// plus a file-existence check. Strictly read-only.
+    private func refreshLiveTypingStatus() {
+        let staged = IMStagedBundle.url
+        guard staged != nil, !LiveTypingEnvironment.isDisabled else {
+            liveTypingStatus = .unsupported
+            liveTypingDetail = LiveTypingEnvironment.isDisabled
+                ? "Live typing is disabled for this process (WISPRIT_NO_IM=1)."
+                : "This build ships no input method — rebuild with scripts/build_app.sh."
+            return
+        }
+        let status = InputSourceProbe.status(stagedVersion: IMStagedBundle.version(at: staged))
+        let verdict = IMPreflight.evaluate(status)
+        liveTypingDetail = IMPreflight.remedy(for: verdict)
+        switch verdict {
+        case .needsInstall:
+            liveTypingStatus = .notInstalled
+        case .needsRegistration, .needsEnable:
+            liveTypingStatus = .needsEnable
+        case .needsUpdate:
+            liveTypingStatus = .needsUpdate
+        case .ready, .notSelected:
+            liveTypingStatus = LiveTypingSettings.isEnabled(settings) ? .readyOn : .readyOff
         }
     }
 
@@ -204,12 +286,18 @@ public final class AppController: NSObject, NSApplicationDelegate {
         StatusMenu.Actions(
             state: { [weak self] in
                 guard let self else { return StatusMenuState() }
+                self.refreshLiveTypingStatus()
                 return StatusMenuState(
                     dictationEnabled: self.settings.enabled,
                     aiCleanupEnabled: self.settings.aiCleanup,
                     aiAvailability: self.aiAvailability,
                     recents: self.history.recent(limit: StatusMenuModel.recentsLimit)
-                        .map(\.text))
+                        .map(\.text),
+                    polishAvailability: self.polishAvailability,
+                    polishUnavailableReason: self.polishUnavailableReason,
+                    polishModes: PolishMenu.modeItems,
+                    liveTyping: self.liveTypingStatus,
+                    liveTypingDetail: self.liveTypingDetail)
             },
             toggleDictation: { [weak self] in
                 guard let self else { return }
@@ -219,12 +307,82 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 guard let self else { return }
                 self.settings.set(SettingsKey.aiCleanup, !self.settings.aiCleanup)
             },
+            polishLast: { [weak self] key in self?.polishLast(modeKey: key) },
+            enableLiveTyping: { [weak self] in self?.enableLiveTyping() },
+            toggleLiveTyping: { [weak self] in
+                guard let self else { return }
+                LiveTypingSettings.setEnabled(self.settings,
+                                              !LiveTypingSettings.isEnabled(self.settings))
+                self.refreshLiveTypingStatus()
+            },
             pasteLast: { [weak self] in self?.session.requestPasteLast() },
             openDictionary: { NSWorkspace.shared.open(WispritPaths.dictionaryPath) },
             openConfig: { NSWorkspace.shared.open(WispritPaths.configPath) },
             runDoctor: { AppController.openDoctorInTerminal() },
             purgeHistory: { [weak self] in self?.history.purge() },
             quit: { [weak self] in self?.terminate() })
+    }
+
+    // MARK: - Polish Last
+
+    /// `app.py::_do_polish`, unchanged in shape: read the last transcript, run it
+    /// through one mode, put the result on the clipboard, say so. On failure the
+    /// clipboard is left ALONE — the user still has whatever they copied.
+    ///
+    /// The Python spawned a `threading.Thread(name="polish")`; `Polisher` is an
+    /// actor that serializes requests itself, so two quick menu clicks chain
+    /// instead of racing and there is no thread to manage.
+    func polishLast(modeKey: String) {
+        let mode = PolishMode.named(modeKey)
+        guard let text = history.lastText(), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            pill.transientNotice(PolishFailureKind.empty.notice)
+            return
+        }
+        let polisher = self.polisher
+        Task { @MainActor [weak self] in
+            let result = await polisher.polish(text, mode: mode)
+            guard let self else { return }
+            switch result {
+            case .success(let polished):
+                StatusMenu.copyToPasteboard(polished)
+                self.pill.transientNotice(PolishMenu.successNotice(for: mode))
+            case .failure(let reason, let kind):
+                self.log.warning("polish failed: \(kind.notice, privacy: .public)")
+                self.pill.transientNotice(reason)
+            }
+        }
+    }
+
+    // MARK: - Live typing onboarding
+
+    /// The one place the user's input sources are changed, and only ever from a
+    /// menu click. `TISEnableInputSource` raises the system's "wants to activate
+    /// the third-party input method" dialog — that prompt is the point of the
+    /// item, not an accident of it.
+    func enableLiveTyping() {
+        guard let plan = InputMethodInstaller.plan() else {
+            pill.transientNotice("No input method in this build")
+            log.error("""
+                cannot enable live typing: no WispritIM.app at \
+                \(IMStagedBundle.relativePath, privacy: .public) — rebuild with scripts/build_app.sh
+                """)
+            return
+        }
+        guard !plan.isNoop else {
+            LiveTypingSettings.setEnabled(settings, true)
+            refreshLiveTypingStatus()
+            pill.transientNotice("Live Typing is ready")
+            return
+        }
+        let outcome = InputMethodInstaller.run(plan)
+        if outcome.ok {
+            LiveTypingSettings.setEnabled(settings, true)
+            pill.transientNotice("Live Typing enabled")
+        } else {
+            pill.transientNotice("Could not enable Live Typing — run Doctor")
+        }
+        refreshLiveTypingStatus()
+        statusMenu?.rebuild()
     }
 
     /// Open a Terminal window running this same binary's `doctor` subcommand so
@@ -252,6 +410,10 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
     func terminate() {
         availabilityTimer?.invalidate()
+        // Commits anything still marked, closes the session, and gives the input
+        // source back — leaving a palette source selected after we quit would
+        // strand the user's field.
+        liveTyping.shutdown()
         session.stop()
         monitor.uninstall()
         events.close()
@@ -263,6 +425,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
     // MARK: - NSApplicationDelegate
 
     public func applicationWillTerminate(_ notification: Notification) {
+        liveTyping.shutdown()
         session.stop()
         monitor.uninstall()
     }
@@ -299,6 +462,17 @@ struct UnavailableGenerator: RefineGenerating {
     func prewarm() async {}
     func generate(_ transcript: String) async throws -> String {
         throw RefineError.unavailable("FoundationModels unavailable in this build")
+    }
+    func discard() async {}
+}
+
+/// The same stand-in for the polish cage.
+struct UnavailablePolishGenerator: PolishGenerating {
+    func probe() async -> PolishAvailability {
+        PolishAvailability(available: false, reason: "FoundationModels unavailable in this build")
+    }
+    func generate(_ transcript: String, mode: PolishMode) async throws -> String {
+        throw PolishError.unavailable("FoundationModels unavailable in this build")
     }
     func discard() async {}
 }

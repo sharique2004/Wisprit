@@ -58,3 +58,16 @@ result, which is the resilience case the SPEC intended.
   leaving the trigger stuck until another clean right-Option press. Rare
   (requires holding both Option keys); the watchdog + chord-interrupt reset
   paths mitigate the worst stuck states. Fn (the default) is unaffected.
+
+## Native rewrite (2026-08-05)
+
+- **Batch-fallback chain not ported (accepted, temporary).** The Python
+  mlx-whisper → faster-whisper fallback is a stub in the native app
+  (`WispritEngine/BatchFallback.swift` returns nil; engine values still parse).
+  A crash of the in-process SpeechAnalyzer path currently falls back to the
+  last partial + history, not to a second engine. The WhisperKit
+  large-v3-turbo slot ships with Phase 3 (Background Assets). Until then the
+  README must not claim a fallback chain.
+- **"Polish Last with Claude" removed by product decision (permanent).**
+  User directive 2026-08-05: Apple Intelligence only, zero network calls.
+  Replacement is `WispritPolish` (FoundationModels, 4 modes, eval battery).

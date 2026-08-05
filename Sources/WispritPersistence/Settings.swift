@@ -32,6 +32,8 @@ public enum SettingsKey {
     public static let mlxModel = "mlx_model"
     public static let pasteRestoreDelayMs = "paste_restore_delay_ms"
     public static let enabled = "enabled"
+    public static let liveTyping = "live_typing"
+    public static let imSelectionPolicy = "im_selection_policy"
 }
 
 public final class Settings: @unchecked Sendable {
@@ -68,6 +70,9 @@ public final class Settings: @unchecked Sendable {
             (SettingsKey.mlxModel, .string("mlx-community/whisper-large-v3-turbo")),
             (SettingsKey.pasteRestoreDelayMs, .int(500)),           // restore too early = paste of stale clipboard
             (SettingsKey.enabled, .bool(true)),                     // master toggle from the menu
+            // Appended post-Python (append-only: mid-list inserts reorder every user's file).
+            (SettingsKey.liveTyping, .bool(false)),                 // IM rungs stay off until onboarding
+            (SettingsKey.imSelectionPolicy, .string("warm")),       // "warm" | "per_utterance"
         ])
     }
 

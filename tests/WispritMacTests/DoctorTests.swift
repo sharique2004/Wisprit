@@ -1,4 +1,5 @@
 import XCTest
+import WispritIMProtocol
 @testable import WispritMac
 
 /// The doctor's judgement — marks, remedies, and the exit-code rule — built
@@ -23,6 +24,14 @@ final class DoctorTests: XCTestCase {
         facts.configPath = "/tmp/config.json"
         facts.dictionaryValid = true
         facts.dictionaryPath = "/tmp/dictionary.json"
+        // Live typing is the optional Developer-ID rung 1: green means the
+        // input method is installed, registered, enabled and answering.
+        facts.imStaged = true
+        facts.imStatus = InputMethodStatus(bundleInstalled: true, registered: true,
+                                           enabled: true, selected: true,
+                                           installedVersion: "2.0.0-dev",
+                                           stagedVersion: "2.0.0-dev")
+        facts.imReachable = true
         return facts
     }
 
@@ -43,6 +52,9 @@ final class DoctorTests: XCTestCase {
             "Secure Keyboard Entry",
             "SpeechTranscriber (on-device ASR)",
             "AI cleanup (Apple Intelligence)",
+            "Live Typing (input method)",
+            "Live Typing bridge (XPC)",
+            "Live Typing bundle",
             "config.json",
             "dictionary.json",
         ])

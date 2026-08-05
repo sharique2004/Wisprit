@@ -73,6 +73,9 @@ public final class SessionController: @unchecked Sendable {
     private let corrections: (any CorrectionApplying)?
     private let corrector: SpokenSpellingCorrector?
     private let gate: RecordingGate?
+    /// Rungs 1–2 of the insertion ladder. nil = Phase-1 behaviour: the pill shows
+    /// the live tail and the text is pasted at the end.
+    private let liveTyping: (any LiveTypingPort)?
     private let config: Configuration
 
     private let lock = NSLock()
@@ -98,6 +101,7 @@ public final class SessionController: @unchecked Sendable {
                 corrections: (any CorrectionApplying)? = nil,
                 corrector: SpokenSpellingCorrector? = nil,
                 gate: RecordingGate? = nil,
+                liveTyping: (any LiveTypingPort)? = nil,
                 configuration: Configuration = Configuration()) {
         self.events = events
         self.asr = asr
@@ -111,6 +115,7 @@ public final class SessionController: @unchecked Sendable {
         self.corrections = corrections
         self.corrector = corrector
         self.gate = gate
+        self.liveTyping = liveTyping
         self.config = configuration
     }
 
@@ -140,13 +145,20 @@ public final class SessionController: @unchecked Sendable {
     public func stop() {
         stopFlag.signal()
         stopLevelTicker()
+        liveTyping?.shutdown()
     }
 
     /// The worker loop. Public so a caller can run it on a thread it owns.
     public func run() {
         log.info("session loop started")
         while !stopFlag.isSignalled {
-            guard let event = events.get(timeout: config.pollTimeout) else { continue }
+            guard let event = events.get(timeout: config.pollTimeout) else {
+                // The idle sweep rides the existing 0.25 s poll rather than
+                // spawning a timer: it only ever has to notice that a whole
+                // idle timeout has gone by.
+                liveTyping?.tickIdle()
+                continue
+            }
             dispatch(event)
         }
     }
@@ -185,11 +197,31 @@ public final class SessionController: @unchecked Sendable {
             return
         }
 
+        // Pick the insertion rung before a single word exists: on rung 1 the
+        // input source is selected here, while the user is still drawing breath,
+        // so the first partial has somewhere to land.
+        let tier = liveTyping?.beginUtterance() ?? .paste
+        if tier.usesInputMethod {
+            log.info("insertion tier \(tier.rawValue, privacy: .public) for this utterance")
+        }
+
         // begin() carries the analyzer's prepareToAnalyze (31–54 ms measured);
         // the sub-400 ms finalize budget depends on paying it here, on key-down.
         let pill = self.pill
+        let live = self.liveTyping
         runBlocking { [asr] in
-            await asr.begin(onPartial: { text in pill?.livePartial(text) })
+            await asr.begin(onPartial: { text in
+                // The pill bubble is the feedback for every rung that CANNOT put
+                // provisional text in the field. When rung 1 is actually
+                // streaming, showing it too would print the same words twice —
+                // and the check is live, so losing the client mid-utterance hands
+                // the preview straight back to the pill.
+                if let live, live.isStreaming {
+                    live.streamPartial(text)
+                } else {
+                    pill?.livePartial(text)
+                }
+            })
         }
 
         // Spawn/prewarm the Apple Intelligence session now so the model loads
@@ -215,6 +247,7 @@ public final class SessionController: @unchecked Sendable {
             audio.stop()
             runBlocking { [asr] in await asr.cancel() }
             cancelRefiner()
+            endLiveUtterance(discardingTail: true)
             setState(.idle)
             pill?.hide()
             return
@@ -234,6 +267,7 @@ public final class SessionController: @unchecked Sendable {
         if events.drainCancel() {
             gate?.setRecording(false)
             cancelRefiner()
+            endLiveUtterance(discardingTail: true)
             setState(.idle)
             pill?.hide()
             return
@@ -245,8 +279,20 @@ public final class SessionController: @unchecked Sendable {
         // the safety net, not the detector.
         let raw = result.text
         let action = corrector?.decide(utterance: raw, previousUtterance: previousUtterance) ?? .none
-        let correction = CorrectionApplier.apply(action, to: raw)
+        var correction = CorrectionApplier.apply(action, to: raw)
         setPreviousUtterance(raw)
+
+        // Cross-utterance retro-replace: the wrong word is already in the user's
+        // document. On rungs 3–5 that is the end of it — learn the term, flash
+        // "Learned Sharique", leave their text alone. On rungs 1–2 the input
+        // method still owns the run it committed, so the fix is real: it re-reads
+        // the live document and aborts unless our text is still exactly where we
+        // left it (`RetroEditPlanner`), which is what stops a stale offset from
+        // mangling a sentence the user has since typed into.
+        if correction.wasCrossUtterance, case .retroReplace(let target, let replacement, _, _) = action {
+            correction.notice = applyRetroEdit(target: target, replacement: replacement)
+                ?? correction.notice
+        }
 
         // Apple Intelligence refinement (prewarmed at record start). Any
         // failure/skip returns the verbatim text — never blocks insertion. The
@@ -256,8 +302,9 @@ public final class SessionController: @unchecked Sendable {
         var refined = correction.text
         if let refiner {
             let events = self.events
+            let corrected = correction.text
             let outcome = runBlocking {
-                await refiner.refine(correction.text, interrupt: {
+                await refiner.refine(corrected, interrupt: {
                     SessionController.interruptSignal(for: events.pollInterrupt())
                 })
             }
@@ -276,12 +323,16 @@ public final class SessionController: @unchecked Sendable {
         // An Esc pressed WHILE we were finalizing/refining means the user wants
         // to abort — honor it before inserting.
         if aiOutcome == .cancelled || events.drainCancel() {
+            endLiveUtterance(discardingTail: true)
             setState(.idle)
             pill?.hide()
             return
         }
 
         guard !text.isEmpty else {
+            // Nothing to commit — take the provisional tail back down so the
+            // field is left exactly as the user found it.
+            endLiveUtterance(discardingTail: true)
             setState(.idle)
             // A pure spelling directive ("Actually, it's S-H-A-R-I-Q-U-E")
             // legitimately leaves nothing to insert: the whole utterance WAS
@@ -310,12 +361,12 @@ public final class SessionController: @unchecked Sendable {
         history.add(text: text, engine: result.engine, durationMs: heldMs)
 
         setState(.inserting)
-        let insertion = inserter.insert(text)
+        let insertion = deliver(text)
         let tInsert = MonotonicClock.now()
 
         if insertion.ok {
             pill?.flashSuccess()
-        } else if insertion.method == .blockedSecure {
+        } else if insertion.blockedSecure {
             flashError("secure field — press ⌘⌃V to paste")
         } else {
             flashError(insertion.detail.isEmpty ? "insert failed" : insertion.detail)
@@ -324,7 +375,7 @@ public final class SessionController: @unchecked Sendable {
         writeMetrics(heldMs: heldMs, result: result,
                      postMs: (tPost - tAi) * 1000.0,
                      insertMs: (tInsert - tPost) * 1000.0,
-                     outcome: insertion.method.rawValue,
+                     outcome: insertion.outcome,
                      releaseToTextMs: (tInsert - tRelease) * 1000.0,
                      aiMs: (tAi - tAsr) * 1000.0,
                      ai: aiOutcome.rawValue)
@@ -341,6 +392,7 @@ public final class SessionController: @unchecked Sendable {
         audio.stop()
         runBlocking { [asr] in await asr.cancel() }
         cancelRefiner()
+        endLiveUtterance(discardingTail: true)
         setState(.idle)
         if reason == "esc" || reason == "cancelled" {
             pill?.hide()
@@ -372,6 +424,66 @@ public final class SessionController: @unchecked Sendable {
         } else {
             flashError(insertion.detail.isEmpty ? "paste failed" : insertion.detail)
         }
+    }
+
+    // MARK: - insertion ladder
+
+    /// What one delivery attempt produced, whichever rung served it.
+    struct Delivery: Equatable {
+        var ok: Bool
+        /// `metrics.log`'s `outcome` field: `im_streaming` / `im_commit` /
+        /// `paste` / `type` / `blocked_secure` / `error`.
+        var outcome: String
+        var detail: String
+        var blockedSecure: Bool
+    }
+
+    /// Walk the ladder for real. Rungs 1–2 first when the input method holds a
+    /// live client, then the existing `Inserter` cascade, which stays the
+    /// authority on rungs 3–5 — it re-checks Secure Input and AX trust at the
+    /// moment of insertion, both of which can change between key-down and here.
+    ///
+    /// A rung-1/2 refusal falls through to paste rather than failing: the text
+    /// was never delivered (the transport says so explicitly), and history was
+    /// written before any of this, so the worst case is still ⌘⌃V.
+    func deliver(_ text: String) -> Delivery {
+        if let live = liveTyping, live.isEngaged {
+            switch live.commit(text) {
+            case .committed(let tier):
+                live.endUtterance()
+                return Delivery(ok: true, outcome: tier.rawValue, detail: "", blockedSecure: false)
+            case .fallback(let reason):
+                log.info("live typing declined (\(reason, privacy: .public)) — pasting")
+            }
+        }
+        endLiveUtterance(discardingTail: true)
+        let insertion = inserter.insert(text)
+        return Delivery(ok: insertion.ok,
+                        outcome: insertion.method.rawValue,
+                        detail: insertion.detail,
+                        blockedSecure: insertion.method == .blockedSecure)
+    }
+
+    /// Route a cross-utterance `retroReplace` through the input method. Returns
+    /// the pill notice to use, or nil to keep the learn-only one.
+    func applyRetroEdit(target: String, replacement: String) -> String? {
+        guard let live = liveTyping, live.isEngaged else { return nil }
+        guard let result = live.applyRetroEdit(replace: target, with: replacement) else { return nil }
+        guard result.ok else {
+            log.info("""
+                retro edit \(target, privacy: .public) → \(replacement, privacy: .public) \
+                declined: \(result.detail.rawValue, privacy: .public)
+                """)
+            return nil
+        }
+        return "Fixed \(replacement)"
+    }
+
+    /// Close out the input method's share of this utterance.
+    private func endLiveUtterance(discardingTail: Bool) {
+        guard let live = liveTyping else { return }
+        if discardingTail { live.discardTail() }
+        live.endUtterance()
     }
 
     // MARK: - helpers
