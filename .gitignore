@@ -12,3 +12,8 @@ __pycache__/
 # test artifacts
 *.aiff
 *.wav
+
+# Swift
+.build*/
+*.xcodeproj
+DerivedData/

@@ -1,0 +1,91 @@
+import Foundation
+import WispritKit
+
+/// Engine-layer contract, ported from `wisprit/asr.py`.
+///
+/// Streaming ASR for one push-to-talk utterance: `begin` on key-down, `feed`
+/// from the audio callback, `finalize` on key-up, `cancel` to throw it away.
+/// Nothing in here is macOS-specific — the capture seam is `MicCapture`.
+
+/// One utterance's outcome. Field-for-field the Python `UtteranceResult`.
+public struct UtteranceResult: Sendable, Equatable {
+    public var text: String
+    public var engine: String
+    public var finalizeMs: Double
+    /// finalize did not complete inside `finalize_timeout_ms`.
+    public var timedOut: Bool
+    /// The engine failed for real (results stream errored / finalize threw) —
+    /// the ONLY condition that may trigger the batch fallback. An empty result
+    /// is not a failure: on silence the engine legitimately returns nothing.
+    public var crashed: Bool
+
+    public init(text: String, engine: String, finalizeMs: Double,
+                timedOut: Bool = false, crashed: Bool = false) {
+        self.text = text; self.engine = engine; self.finalizeMs = finalizeMs
+        self.timedOut = timedOut; self.crashed = crashed
+    }
+}
+
+public protocol AsrEngine: AnyObject, Sendable {
+    /// Start an utterance. `onPartial` receives the full text-so-far
+    /// (finalized prefix + current volatile window — see `SpeechAnalyzerEngine`),
+    /// on an arbitrary task. Returns false if the engine could not start, so the
+    /// caller can fall back.
+    func begin(onPartial: @escaping @Sendable (String) -> Void) async -> Bool
+
+    /// Hand one PCM chunk (16 kHz mono Int16) to the engine. **Never blocks** —
+    /// it is called from the audio callback. Bounded queue, drop-oldest: a
+    /// dropped chunk costs a few ms of captions, never a stall.
+    func feed(pcm: Data)
+
+    // CONTRACT-DEVIATION: SWIFT-INTERFACES.md specifies `finalize() async -> String`,
+    // but the same clause requires finalize to report the timed-out flag, which a
+    // String cannot carry. The requirement returns `UtteranceResult`; `finalizeText()`
+    // below is the String-shaped convenience.
+    func finalize() async -> UtteranceResult
+
+    /// Discard the utterance and release the transcriber.
+    func cancel() async
+}
+
+public extension AsrEngine {
+    func finalizeText() async -> String { await finalize().text }
+}
+
+/// `settings["engine"]`, exactly the Python vocabulary.
+public enum AsrEngineKind: String, Sendable, CaseIterable {
+    case auto = "auto"
+    case appleLive = "apple_live"
+    case mlxWhisper = "mlx_whisper"
+    case fasterWhisper = "faster_whisper"
+
+    public init(settingsValue: String?) {
+        self = AsrEngineKind(rawValue: settingsValue ?? "auto") ?? .auto
+    }
+
+    /// auto/apple_live drive the streaming primary; the whisper values skip
+    /// straight to finalize-time batch transcription of the retained PCM.
+    public var usesStreamingPrimary: Bool { self == .auto || self == .appleLive }
+}
+
+/// The slice of `config.json` the engine layer needs. WispritPersistence owns
+/// `Settings`; the shell copies the relevant keys in here.
+public struct AsrSettings: Sendable {
+    public var locale: String
+    public var finalizeTimeoutMs: Double
+    public var engine: AsrEngineKind
+    /// Cap on `contextualStrings` terms. nil = the whole dictionary — spike S1 Q3
+    /// measured ~3.1 ms/term, all of it in session setup, on a path the user
+    /// never waits for, and no biasing dilution at n = 500.
+    public var contextualTermLimit: Int?
+
+    public init(locale: String = "en-US", finalizeTimeoutMs: Double = 1500,
+                engine: AsrEngineKind = .auto, contextualTermLimit: Int? = nil) {
+        self.locale = locale; self.finalizeTimeoutMs = finalizeTimeoutMs
+        self.engine = engine; self.contextualTermLimit = contextualTermLimit
+    }
+
+    var finalizeTimeoutSeconds: Double {
+        finalizeTimeoutMs > 0 ? finalizeTimeoutMs / 1000.0 : 1.5
+    }
+}
