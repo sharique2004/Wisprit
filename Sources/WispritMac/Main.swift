@@ -11,10 +11,15 @@ import WispritPersistence
 enum WispritMacMain {
 
     static func main() {
+        applyStateDirOverride()
         let arguments = Array(CommandLine.arguments.dropFirst())
         switch arguments.first {
         case "doctor":
             exit(runDoctor())
+        case "window":
+            // Same app, but it opens showing itself. The point of a front end is
+            // that there is always a way to make it appear.
+            runApp(open: WindowLaunch.parse(Array(arguments.dropFirst())))
         case "bootstrap":
             exit(runBootstrap())
         case "hotkey":
@@ -39,6 +44,8 @@ enum WispritMacMain {
         Wisprit \(WispritVersion.string) — fully-local push-to-talk dictation.
 
           Wisprit                 run the menu-bar app
+          Wisprit window [page]   run it with the window open (status|dictionary|
+                                  history|settings|setup)
           Wisprit doctor          permission + engine checklist (exit 0 when ready)
           Wisprit bootstrap       create ~/.wisprit and seed config + dictionary
           Wisprit hotkey [secs]   print hotkey events (needs WISPRIT_MANUAL_INPUT=1)
@@ -47,7 +54,24 @@ enum WispritMacMain {
 
     // MARK: - the app
 
-    static func runApp() {
+    /// What `Wisprit window …` should show. Parsed here so the argument spelling
+    /// is pinned by a test rather than by a string comparison in `main`.
+    enum WindowLaunch: Equatable {
+        case none
+        case page(WispritWindowModel.Tab)
+        case setupGuide
+
+        static func parse(_ arguments: [String]) -> WindowLaunch {
+            switch arguments.first?.lowercased() {
+            case nil, "": return .page(.status)
+            case "setup", "onboarding", "guide": return .setupGuide
+            case let name?:
+                return .page(WispritWindowModel.Tab(rawValue: name) ?? .status)
+            }
+        }
+    }
+
+    static func runApp(open launch: WindowLaunch = .none) {
         try? WispritPaths.ensureStateDir()
 
         // Single instance: two taps would each paste on every release. The lock
@@ -65,6 +89,11 @@ enum WispritMacMain {
         MainActor.assumeIsolated {
             let controller = AppController(instanceLock: lock)
             controller.launch()
+            switch launch {
+            case .none: break
+            case .page(let tab): controller.openWindow(tab: tab)
+            case .setupGuide: controller.openSetupGuide()
+            }
             // NSApplication.delegate is weak and every menu closure captures
             // self weakly, so THIS reference is what keeps the whole app object
             // graph (status item, pill, session) alive for the process
@@ -123,6 +152,28 @@ enum WispritMacMain {
     }
 
     // MARK: - helpers
+
+    /// `WISPRIT_STATE_DIR` points the whole state directory somewhere else —
+    /// config, dictionary, history, metrics, log and the single-instance lock.
+    ///
+    /// It exists so a freshly built copy can be launched and driven (screenshots,
+    /// smoke runs, a second identity) without writing a byte into the `~/.wisprit`
+    /// the user's installed Wisprit is living in. Because the lock moves with it,
+    /// an overridden instance also does not fight the installed one for the
+    /// single-instance flock — which is exactly what you want for a throwaway run
+    /// and exactly what you do NOT want by default, hence the opt-in env var.
+    ///
+    /// Must run before anything reads `WispritPaths`, which is why it is the
+    /// first statement in `main()`.
+    static func applyStateDirOverride() {
+        guard let raw = ProcessInfo.processInfo.environment["WISPRIT_STATE_DIR"],
+              !raw.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        let expanded = (raw as NSString).expandingTildeInPath
+        WispritPaths.overrideRoot = URL(fileURLWithPath: expanded, isDirectory: true)
+        // The Settings singleton may not have been touched yet, but resetting is
+        // free and guarantees the next `load()` reads the overridden path.
+        Settings.resetSharedForTesting()
+    }
 
     static func currentSettings() -> Settings {
         _ = try? Bootstrap.ensureStateDir()

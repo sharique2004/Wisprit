@@ -16,6 +16,8 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
     public struct Actions {
         /// Sampled on every menu open.
         public var state: () -> StatusMenuState
+        /// Show the main window (and flip the app to a Dock-visible policy).
+        public var openWindow: () -> Void
         public var toggleDictation: () -> Void
         public var toggleAiCleanup: () -> Void
         /// One of the four polish modes, by key (`clean`/`formal`/…).
@@ -37,6 +39,7 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         public var quit: () -> Void
 
         public init(state: @escaping () -> StatusMenuState,
+                    openWindow: @escaping () -> Void = {},
                     toggleDictation: @escaping () -> Void,
                     toggleAiCleanup: @escaping () -> Void,
                     polishLast: @escaping (String) -> Void = { _ in },
@@ -50,6 +53,7 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
                     purgeHistory: @escaping () -> Void,
                     quit: @escaping () -> Void) {
             self.state = state
+            self.openWindow = openWindow
             self.toggleDictation = toggleDictation
             self.toggleAiCleanup = toggleAiCleanup
             self.polishLast = polishLast
@@ -149,6 +153,8 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
     @objc private func itemFired(_ sender: NSMenuItem) {
         guard rows.indices.contains(sender.tag), let action = rows[sender.tag].action else { return }
         switch action {
+        case .openWindow:
+            actions.openWindow()
         case .toggleDictation:
             actions.toggleDictation()
             rebuild()

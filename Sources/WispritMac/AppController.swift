@@ -42,6 +42,15 @@ public final class AppController: NSObject, NSApplicationDelegate {
     private var statusMenu: StatusMenu!
     private let instanceLock: SingleInstanceLock
 
+    /// The front end. Built eagerly (it is cheap — no probes until the window
+    /// opens) so `applicationShouldHandleReopen` never has to construct it while
+    /// the user is waiting on a Dock click.
+    private var windowModel: WispritWindowModel!
+    private var windowController: MainWindowController!
+    /// One window-raise per launch for a broken hotkey tap; the ghost-tap
+    /// watchdog can fire repeatedly and must not keep stealing focus.
+    private var inputMonitoringSurfaced = false
+
     /// `Refiner.availability` is actor-isolated while the menu build is
     /// synchronous, so the last probed value is cached here and refreshed on a
     /// slow timer. nil (still probing) and true both show the toggle; only an
@@ -155,10 +164,89 @@ public final class AppController: NSObject, NSApplicationDelegate {
         super.init()
 
         self.statusMenu = StatusMenu(actions: makeMenuActions())
+        let windowModel = WispritWindowModel(
+            settings: settings,
+            dictionary: DictionaryEditor(store: dictionary),
+            ports: AppController.makeWindowPorts(history: history,
+                                                 settings: settings,
+                                                 fix: { [weak self] kind in
+                                                     self?.runFix(kind)
+                                                 }))
+        self.windowModel = windowModel
+        self.windowController = MainWindowController(model: windowModel)
+
         let statusMenu = self.statusMenu!
         session.onStateChange = { state in
-            WispritUI.callOnMain { statusMenu.update(stateNamed: state.rawValue) }
+            WispritUI.callOnMain {
+                statusMenu.update(stateNamed: state.rawValue)
+                // The window's "try a dictation" step needs proof that the whole
+                // chain ran, and INSERTING is that proof — it survives history
+                // being switched off, which a history poll would not.
+                if state == .inserting { windowModel.noteDictationObserved() }
+            }
         }
+    }
+
+    /// The window's system seams. Kept static and closure-shaped so the model
+    /// never sees the controller (and so tests can build it with fakes).
+    private static func makeWindowPorts(history: History,
+                                        settings: Settings,
+                                        fix: @escaping (SetupFixKind) -> Void)
+        -> WispritWindowModel.Ports {
+        WispritWindowModel.Ports(
+            fullProbe: {
+                // Three hops on purpose. The speech/model probes are slow and
+                // must not run on the main thread; `TISCreateInputSourceList`
+                // traps if it is NOT on the main thread once the app has an
+                // event loop; and the bridge ping can stall for a second, which
+                // would freeze the pill if it happened on main.
+                let base = await Doctor.gather(locale: settings.locale, liveTyping: false)
+                var facts = await MainActor.run {
+                    var onMain = base
+                    Doctor.gatherInputSources(into: &onMain)
+                    return onMain
+                }
+                Doctor.gatherBridge(into: &facts)
+                return facts
+            },
+            fastProbe: { Doctor.refreshingPermissions($0) },
+            globeKey: { GlobeKeySettings.current() },
+            recents: { history.recent(limit: $0) },
+            purgeHistory: { history.purge() },
+            copy: { StatusMenu.copyToPasteboard($0) },
+            performFix: fix)
+    }
+
+    /// Perform one checklist fix. `enableLiveTyping` and the relaunch are the
+    /// app's own, so they are injected here rather than reimplemented.
+    private func runFix(_ kind: SetupFixKind) {
+        SetupFixRunner(
+            enableLiveTyping: { [weak self] in self?.enableLiveTyping() },
+            relaunch: { [weak self] in self?.relaunch() }).run(kind)
+    }
+
+    /// Quit and come back. The replacement is spawned first and only waits for
+    /// this process to release the single-instance lock; if it cannot be
+    /// spawned we stay running rather than leave the user with nothing.
+    func relaunch() {
+        guard AppRelaunch.spawnHelper() else {
+            log.error("relaunch aborted — could not spawn the helper; staying up")
+            return
+        }
+        terminate()
+    }
+
+    // MARK: - the window
+
+    /// Show the main window. This is what a Dock click, a Finder open and the
+    /// menu's first row all end up calling.
+    public func openWindow(tab: WispritWindowModel.Tab = .status) {
+        windowController.show(tab: tab)
+    }
+
+    /// Open the window straight into the first-run wizard.
+    public func openSetupGuide() {
+        windowController.showOnboarding()
     }
 
     private static func makeGenerator() -> any RefineGenerating {
@@ -185,27 +273,15 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
     // MARK: - startup
 
-    private var inputMonitoringAlertShown = false
-
-    /// One-per-launch alert with a working deep link; without it a fresh
-    /// install looks completely dead (no prompt, no icon if notch-hidden).
-    private func showInputMonitoringAlert() {
-        guard !inputMonitoringAlertShown else { return }
-        inputMonitoringAlertShown = true
-        let alert = NSAlert()
-        alert.messageText = "Wisprit needs Input Monitoring"
-        alert.informativeText = """
-        The push-to-talk key can't be seen yet. In System Settings ▸ Privacy & \
-        Security ▸ Input Monitoring, enable Wisprit — then QUIT AND REOPEN \
-        Wisprit; macOS applies this permission only at launch.
-        """
-        alert.addButton(withTitle: "Open System Settings")
-        alert.addButton(withTitle: "Later")
-        NSApp.activate(ignoringOtherApps: true)
-        if alert.runModal() == .alertFirstButtonReturn,
-           let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent") {
-            NSWorkspace.shared.open(url)
-        }
+    /// The hotkey tap can't see the key. Used to be a modal alert with a deep
+    /// link — now it raises the window, which says the same thing but with a
+    /// live status dot, the relaunch button, and everywhere else the user has to
+    /// go next. Once per launch: the ghost-tap watchdog fires repeatedly and
+    /// must not keep stealing focus.
+    private func surfaceInputMonitoringProblem() {
+        guard !inputMonitoringSurfaced else { return }
+        inputMonitoringSurfaced = true
+        openWindow(tab: .status)
     }
 
     /// Everything `app.py: main()` does between the lock and `NSApp.run()`.
@@ -222,7 +298,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
         // in the System Settings list, prompts, and tells the user to relaunch.
         if !CGPreflightListenEventAccess() {
             CGRequestListenEventAccess()
-            showInputMonitoringAlert()
+            surfaceInputMonitoringProblem()
         }
 
         // Tap creation must happen on the main thread — its run-loop source is
@@ -236,12 +312,12 @@ public final class AppController: NSObject, NSApplicationDelegate {
             // macOS never prompts for Input Monitoring on a listen-only tap — it
             // silently fails, and with the menu icon possibly notch-hidden a log
             // line is invisible. This alert is the user's only signal.
-            showInputMonitoringAlert()
+            surfaceInputMonitoringProblem()
         }
         // The grant can also be missing with a SUCCESSFULLY created tap that
         // never fires ("ghost tap") — only the watchdog can see that case.
         monitor.onGhostTap = { [weak self] in
-            WispritUI.callOnMain { self?.showInputMonitoringAlert() }
+            WispritUI.callOnMain { self?.surfaceInputMonitoringProblem() }
         }
 
         // Grants are per-identity: a new launcher must be granted even when the
@@ -346,6 +422,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
                     liveTyping: self.liveTypingStatus,
                     liveTypingDetail: self.liveTypingDetail)
             },
+            openWindow: { [weak self] in self?.openWindow() },
             toggleDictation: { [weak self] in
                 guard let self else { return }
                 self.settings.set(SettingsKey.enabled, !self.settings.enabled)
@@ -470,6 +547,39 @@ public final class AppController: NSObject, NSApplicationDelegate {
     }
 
     // MARK: - NSApplicationDelegate
+
+    /// First probe, then decide whether to show ourselves.
+    ///
+    /// A healthy install stays quiet in the menu bar — that is the whole point
+    /// of a push-to-talk agent. A first run, or one with a required permission
+    /// missing, opens the window instead of leaving the user staring at a Mac
+    /// that appears to have done nothing.
+    public func applicationDidFinishLaunching(_ notification: Notification) {
+        let model = windowModel!
+        Task { @MainActor in
+            await model.refreshFull()
+            // A window that is already up was asked for deliberately (`Wisprit
+            // window …`, or the Input Monitoring surface during `launch`).
+            // Yanking it to the Status page would undo the user's own request.
+            guard !self.windowController.isVisible, model.shouldAutoOpenWindow else { return }
+            self.openWindow(tab: .status)
+            model.beginOnboarding()
+        }
+    }
+
+    /// Clicking the app in Finder, the Dock, or Spotlight when it is already
+    /// running. Without this, "opening" Wisprit does nothing at all — the single
+    /// behaviour that made a working install look broken.
+    public func applicationShouldHandleReopen(_ sender: NSApplication,
+                                              hasVisibleWindows flag: Bool) -> Bool {
+        openWindow()
+        return true
+    }
+
+    /// Closing the window is not quitting: the hotkey has to keep working.
+    public func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        false
+    }
 
     public func applicationWillTerminate(_ notification: Notification) {
         liveTyping.shutdown()

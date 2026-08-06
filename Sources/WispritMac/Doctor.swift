@@ -28,6 +28,22 @@ public enum DoctorMark: String, Sendable, Equatable {
         case .warn: return "\u{001B}[33m!\u{001B}[0m"
         }
     }
+
+    private var severity: Int {
+        switch self {
+        case .ok: return 0
+        case .warn: return 1
+        case .bad: return 2
+        }
+    }
+
+    /// The more alarming of two marks — how one window row can stand for several
+    /// doctor checks without hiding the worst of them. `nil` is "that check was
+    /// not emitted", which is not evidence of anything.
+    public static func worst(_ lhs: DoctorMark, _ rhs: DoctorMark?) -> DoctorMark {
+        guard let rhs else { return lhs }
+        return lhs.severity >= rhs.severity ? lhs : rhs
+    }
 }
 
 public struct DoctorCheck: Sendable, Equatable {

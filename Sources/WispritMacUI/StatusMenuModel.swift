@@ -11,6 +11,9 @@ public enum AppState: String, Equatable, Sendable, CaseIterable {
 /// Everything a menu item can do. The `StatusMenu` maps each to an injected
 /// closure; the model itself knows nothing about settings, history or AppKit.
 public enum MenuAction: Equatable, Sendable {
+    /// Bring up the main window. First row of the menu, because a menu-bar-only
+    /// app with a notch-hidden icon otherwise offers no way back to itself.
+    case openWindow
     case toggleDictation
     case toggleAiCleanup
     /// One of the four "Polish Last" submenu rows. The payload is the mode's
@@ -187,6 +190,10 @@ public enum StatusMenuModel {
     /// Build the whole menu, in order.
     public static func build(_ state: StatusMenuState) -> [MenuItemModel] {
         var items: [MenuItemModel] = []
+
+        // First, and above the separator: the way back to a visible app.
+        items.append(MenuItemModel(title: "Open Wisprit…", action: .openWindow))
+        items.append(.separator)
 
         items.append(MenuItemModel(
             title: "Dictation \(state.dictationEnabled ? "On" : "Off")",

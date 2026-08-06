@@ -13,7 +13,13 @@ import WispritRefine
 /// code) lives in `Doctor.report(from:)`, which is what the tests cover.
 public extension Doctor {
 
-    static func gather(locale: String = "en-US") async -> DoctorFacts {
+    /// `liveTyping: false` skips the input-source half. The window needs that:
+    /// once an app has an event loop, `TISCreateInputSourceList` asserts the
+    /// main queue and traps anywhere else, so the window runs this probe off the
+    /// main actor and calls `gatherInputSources` on it separately. The CLI keeps
+    /// the default and is unaffected — HIToolbox has no such queue to assert
+    /// against in a process with no NSApplication.
+    static func gather(locale: String = "en-US", liveTyping: Bool = true) async -> DoctorFacts {
         var facts = DoctorFacts()
         facts.executablePath = Bundle.main.executableURL?.path
             ?? ProcessInfo.processInfo.arguments.first
@@ -38,7 +44,7 @@ public extension Doctor {
         facts.aiAvailable = availability.available
         facts.aiReason = availability.reason
 
-        gatherLiveTyping(into: &facts)
+        if liveTyping { gatherLiveTyping(into: &facts) }
 
         facts.configPath = WispritPaths.configPath.path
         facts.configValid = isValidJSON(WispritPaths.configPath)
@@ -56,6 +62,16 @@ public extension Doctor {
     /// `WispritIMClient.ping` uses generation 0, which the gate can never open a
     /// session for.
     static func gatherLiveTyping(into facts: inout DoctorFacts) {
+        gatherInputSources(into: &facts)
+        gatherBridge(into: &facts)
+    }
+
+    /// The input-source database half. **Main thread only in a GUI process** —
+    /// `TISCreateInputSourceList` runs `dispatch_assert_queue(main)` under
+    /// HIToolbox once an event loop exists, and traps on any other thread.
+    /// Cheap (one list copy plus a file read), so blocking the main thread on it
+    /// costs nothing.
+    static func gatherInputSources(into facts: inout DoctorFacts) {
         facts.liveTypingEnabled = LiveTypingSettings.isEnabled(Settings.load())
 
         let staged = IMStagedBundle.url
@@ -69,7 +85,15 @@ public extension Doctor {
         if let plist = InputSourceProbe.installedInfoPlist() {
             facts.imPlistViolations = IMBundleTemplate.violations(in: plist)
         }
+    }
 
+    /// The liveness half: one round trip with a 1 s ceiling. Thread-agnostic,
+    /// and deliberately kept OFF the main thread by the window — a second of
+    /// main-thread stall would freeze the pill mid-utterance.
+    ///
+    /// Requires `gatherInputSources` to have run first: an unregistered input
+    /// method is never pinged.
+    static func gatherBridge(into facts: inout DoctorFacts) {
         guard !LiveTypingEnvironment.isDisabled, facts.imStatus.registered else { return }
         let client = WispritIMClient(onEvent: { _ in })
         facts.imReachable = client.ping(timeout: 1.0) != nil

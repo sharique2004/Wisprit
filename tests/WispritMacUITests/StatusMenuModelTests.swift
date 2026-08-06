@@ -55,6 +55,8 @@ final class StatusMenuModelTests: XCTestCase {
             dictationEnabled: true, aiCleanupEnabled: true, aiAvailability: nil, recents: [],
             polishModes: StatusMenuModelTests.modes))
         XCTAssertEqual(titles(items), [
+            "Open Wisprit…",
+            "---",
             "Dictation On",
             "AI Cleanup (Apple Intelligence)",
             "Polish Last",
@@ -73,13 +75,24 @@ final class StatusMenuModelTests: XCTestCase {
         ])
     }
 
+    /// A menu-bar-only app whose icon can hide behind the notch needs a way back
+    /// to itself, and it has to be the first thing in the menu.
+    func testOpenWindowIsTheFirstRow() {
+        let items = StatusMenuModel.build(StatusMenuState())
+        XCTAssertEqual(items[0].title, "Open Wisprit…")
+        XCTAssertEqual(items[0].action, .openWindow)
+        XCTAssertTrue(items[0].isEnabled)
+        XCTAssertTrue(items[1].isSeparator)
+        XCTAssertEqual(items.compactMap(\.action).filter { $0 == .openWindow }.count, 1)
+    }
+
     func testDictationToggleTitleAndCheckmark() {
-        let on = StatusMenuModel.build(StatusMenuState(dictationEnabled: true))[0]
+        let on = StatusMenuModel.build(StatusMenuState(dictationEnabled: true))[2]
         XCTAssertEqual(on.title, "Dictation On")
         XCTAssertTrue(on.isChecked)
         XCTAssertEqual(on.action, .toggleDictation)
 
-        let off = StatusMenuModel.build(StatusMenuState(dictationEnabled: false))[0]
+        let off = StatusMenuModel.build(StatusMenuState(dictationEnabled: false))[2]
         XCTAssertEqual(off.title, "Dictation Off")
         XCTAssertFalse(off.isChecked)
     }
@@ -88,7 +101,7 @@ final class StatusMenuModelTests: XCTestCase {
 
     func testAiCleanupShownWhileProbing() {
         let row = StatusMenuModel.build(
-            StatusMenuState(aiCleanupEnabled: true, aiAvailability: nil))[1]
+            StatusMenuState(aiCleanupEnabled: true, aiAvailability: nil))[3]
         XCTAssertEqual(row.title, "AI Cleanup (Apple Intelligence)")
         XCTAssertEqual(row.action, .toggleAiCleanup)
         XCTAssertTrue(row.isEnabled)
@@ -97,7 +110,7 @@ final class StatusMenuModelTests: XCTestCase {
 
     func testAiCleanupShownWhenAvailableAndUnchecked() {
         let row = StatusMenuModel.build(
-            StatusMenuState(aiCleanupEnabled: false, aiAvailability: true))[1]
+            StatusMenuState(aiCleanupEnabled: false, aiAvailability: true))[3]
         XCTAssertEqual(row.title, "AI Cleanup (Apple Intelligence)")
         XCTAssertFalse(row.isChecked)
         XCTAssertEqual(row.action, .toggleAiCleanup)
@@ -105,7 +118,7 @@ final class StatusMenuModelTests: XCTestCase {
 
     func testAiCleanupReplacedByDisabledRowWhenUnavailable() {
         let row = StatusMenuModel.build(
-            StatusMenuState(aiCleanupEnabled: true, aiAvailability: false))[1]
+            StatusMenuState(aiCleanupEnabled: true, aiAvailability: false))[3]
         XCTAssertEqual(row.title, "AI Cleanup unavailable — run Doctor")
         XCTAssertNil(row.action)
         XCTAssertFalse(row.isEnabled)
@@ -181,7 +194,7 @@ final class StatusMenuModelTests: XCTestCase {
 
     func testPolishSubmenuCarriesTheFourPythonModeKeys() {
         let row = StatusMenuModel.build(
-            StatusMenuState(polishModes: StatusMenuModelTests.modes))[2]
+            StatusMenuState(polishModes: StatusMenuModelTests.modes))[4]
         XCTAssertEqual(row.title, "Polish Last")
         XCTAssertNil(row.action, "the parent row is a container")
         XCTAssertTrue(row.isEnabled)
@@ -199,7 +212,7 @@ final class StatusMenuModelTests: XCTestCase {
 
     func testPolishShownWhileProbingJustLikeAiCleanup() {
         let row = StatusMenuModel.build(StatusMenuState(
-            polishAvailability: nil, polishModes: StatusMenuModelTests.modes))[2]
+            polishAvailability: nil, polishModes: StatusMenuModelTests.modes))[4]
         XCTAssertTrue(row.isSubmenu)
     }
 
@@ -207,7 +220,7 @@ final class StatusMenuModelTests: XCTestCase {
         let row = StatusMenuModel.build(StatusMenuState(
             polishAvailability: false,
             polishUnavailableReason: "Apple Intelligence is off",
-            polishModes: StatusMenuModelTests.modes))[2]
+            polishModes: StatusMenuModelTests.modes))[4]
         XCTAssertEqual(row.title, "Polish Last unavailable — Apple Intelligence is off")
         XCTAssertNil(row.action)
         XCTAssertNil(row.submenu)
@@ -215,12 +228,12 @@ final class StatusMenuModelTests: XCTestCase {
     }
 
     func testPolishUnavailableWithoutAReasonPointsAtDoctor() {
-        let row = StatusMenuModel.build(StatusMenuState(polishAvailability: false))[2]
+        let row = StatusMenuModel.build(StatusMenuState(polishAvailability: false))[4]
         XCTAssertEqual(row.title, "Polish Last unavailable — run Doctor")
     }
 
     func testPolishWithNoModesIsInertRatherThanAnEmptySubmenu() {
-        let row = StatusMenuModel.build(StatusMenuState(polishModes: []))[2]
+        let row = StatusMenuModel.build(StatusMenuState(polishModes: []))[4]
         XCTAssertNil(row.submenu)
         XCTAssertFalse(row.isEnabled)
     }
@@ -229,7 +242,7 @@ final class StatusMenuModelTests: XCTestCase {
 
     func testLiveTypingRowReflectsEachStageOfOnboarding() {
         func row(_ status: LiveTypingMenuStatus) -> MenuItemModel {
-            StatusMenuModel.build(StatusMenuState(liveTyping: status))[3]
+            StatusMenuModel.build(StatusMenuState(liveTyping: status))[5]
         }
 
         XCTAssertEqual(row(.notInstalled).title, "Enable Live Typing…")
@@ -269,6 +282,6 @@ final class StatusMenuModelTests: XCTestCase {
     }
 
     func testThreeSeparators() {
-        XCTAssertEqual(StatusMenuModel.build(StatusMenuState()).filter(\.isSeparator).count, 3)
+        XCTAssertEqual(StatusMenuModel.build(StatusMenuState()).filter(\.isSeparator).count, 4)
     }
 }
