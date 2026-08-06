@@ -96,14 +96,26 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
         }
 
         state.install(Session(analyzer: analyzer, sink: sink, queue: queue,
-                              collector: collector, pump: pump))
+                              collector: collector, pump: pump, fed: AudioMeter()))
         return true
     }
 
     /// Called from the audio callback. Lock-only, never waits.
     public func feed(pcm: Data) {
-        state.session?.queue.enqueue(pcm)
+        guard let session = state.session else { return }
+        session.fed.add(pcm)
+        session.queue.enqueue(pcm)
     }
+
+    /// One 100 ms chunk. Below this the analyzer never had a chance, so an empty
+    /// result is a capture fault and must not be blamed on (or "recovered" from
+    /// in) the engine.
+    static let minimumAudioBytes = Int(PcmFormat.chunkFrames) * PcmFormat.bytesPerFrame
+
+    /// Peak `PcmFormat.level` (RMS × 4, clamped) below which the utterance is
+    /// treated as "the user did not speak". Digital silence measures exactly 0
+    /// and normal speech 0.1–1.0, so this only has to clear room tone.
+    static let voicedPeakThreshold: Float = 0.02
 
     public func finalize() async -> UtteranceResult {
         let t0 = Date()
@@ -111,6 +123,8 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
             return UtteranceResult(text: "", engine: Self.engineName, finalizeMs: 0, timedOut: true)
         }
         let budget = settings.finalizeTimeoutSeconds
+        let fedBytes = session.fed.byteCount
+        let peakLevel = session.fed.peakLevel
 
         session.queue.close()          // drain what is queued, then EOF
         _ = await session.pump.value
@@ -127,10 +141,19 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
         }
         let completed = await done.wait(timeout: budget, deadlineFrom: t0)
 
-        // Results can land a beat after finalize returns; give the collector the
-        // remainder of the budget, never more.
+        // Results can land a beat after finalize returns. Wait for the COLLECTOR
+        // to finish rather than polling `sink.isDrained()`: the collector exits
+        // when `module.results` ends, which is the analyzer's own statement that
+        // nothing more is coming. The old heuristic required a final to have
+        // landed, so an utterance that produced no final could never satisfy it
+        // and burned the entire budget — that is the measured `finalize_ms≈1500`
+        // in every empty production row, and it made a dead microphone cost the
+        // user 1.5 s per press on top of getting nothing.
         if completed {
-            _ = await Signal.waitFor(remaining: budget, from: t0) { await sink.isDrained() }
+            let drained = Signal()
+            let collector = session.collector
+            Task.detached { _ = await collector.value; drained.fire() }
+            _ = await drained.wait(timeout: budget, deadlineFrom: t0)
         }
         session.collector.cancel()
 
@@ -142,22 +165,43 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
             .joined(separator: " ")
         let timedOut = !completed
         let crashed = completed && error != nil
+        let starved = fedBytes < Self.minimumAudioBytes
+        // The analyzer was given audible speech, finished cleanly, and produced
+        // nothing at all — not a final, not even a volatile. That is a dead
+        // session, and the cached engine behind it is suspect.
+        //
+        // The `peakLevel` gate is load-bearing: MEASURED, 3 s of digital silence
+        // also yields zero results (0 partials, 0 finals), so emptiness alone
+        // cannot tell a wedged analyzer from a user who simply did not speak.
+        // Without the gate every silent press would release the cached engines
+        // and pay a reload on the next press — a routine cooldown, which spike
+        // S1 explicitly rejected.
+        let producedNothing = text.isEmpty && finals.isEmpty && !starved
+            && peakLevel >= Self.voicedPeakThreshold
 
-        if timedOut || crashed {
+        if timedOut || crashed || producedNothing {
             // Best effort, exactly as asr.py: append the last volatile if it adds anything.
+            // This now also covers `producedNothing`, where volatiles had been
+            // collected and then silently discarded.
             let tail = lastPartial.trimmingCharacters(in: .whitespaces)
             if !tail.isEmpty && !text.contains(tail) {
                 text = (text + " " + tail).trimmingCharacters(in: .whitespaces)
             }
-            log.warning("finalize \(timedOut ? "timed out" : "engine failed", privacy: .public) after \(finalizeMs, format: .fixed(precision: 0)) ms")
+            let reason = timedOut ? "timed out" : (crashed ? "engine failed" : "produced no result")
+            log.warning("finalize \(reason, privacy: .public) after \(finalizeMs, format: .fixed(precision: 0)) ms (fed \(fedBytes) bytes, peak \(peakLevel, format: .fixed(precision: 2))) — releasing cached engines")
             await teardown(session, hard: true)
         } else {
+            if starved {
+                // Never silently indistinguishable from a quiet user again.
+                log.error("analyzer received \(fedBytes) bytes of audio — the capture side delivered nothing")
+            }
             await teardown(session, hard: false)
         }
 
         return UtteranceResult(text: text.trimmingCharacters(in: .whitespaces),
                                engine: Self.engineName, finalizeMs: finalizeMs,
-                               timedOut: timedOut, crashed: crashed)
+                               timedOut: timedOut, crashed: crashed,
+                               starvedInput: starved)
     }
 
     public func cancel() async {
@@ -186,6 +230,9 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
         let queue: PcmChunkQueue
         let collector: Task<Void, Never>
         let pump: Task<Void, Never>
+        /// Audio actually handed to this session, so `finalize` can tell a dead
+        /// analyzer from a dead microphone.
+        let fed: AudioMeter
     }
 
     private final class StateBox: @unchecked Sendable {
@@ -203,6 +250,26 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
     }
 }
 
+/// What one session was actually fed: how much, and whether any of it was loud
+/// enough to be speech. Written from the audio callback, so lock-only; the RMS
+/// is the same O(chunk) pass `MicCapture` already runs for the pill meter.
+final class AudioMeter: @unchecked Sendable {
+    private let lock = UnfairLock()
+    private var bytes = 0
+    private var peak: Float = 0
+
+    func add(_ chunk: Data) {
+        let level = PcmFormat.level(of: chunk)
+        lock.lock()
+        bytes += chunk.count
+        if level > peak { peak = level }
+        lock.unlock()
+    }
+
+    var byteCount: Int { lock.lock(); defer { lock.unlock() }; return bytes }
+    var peakLevel: Float { lock.lock(); defer { lock.unlock() }; return peak }
+}
+
 /// Accumulates finals + the current volatile window and derives the text-so-far.
 actor TranscriptSink {
     private var finals: [String] = []
@@ -210,14 +277,12 @@ actor TranscriptSink {
     private var volatileText = ""
     private var lastEmitted = ""
     private var error: String?
-    private var sawTerminalFinal = false
 
     func appendFinal(_ text: String) -> String? {
         finals.append(text)
         joinedFinals = finals.map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }.joined(separator: " ")
         volatileText = ""
-        sawTerminalFinal = true
         return emit(joinedFinals)
     }
 
@@ -230,10 +295,6 @@ actor TranscriptSink {
     }
 
     func setError(_ message: String) { if error == nil { error = message } }
-
-    /// Heuristic used only to decide whether it is worth waiting a few more ms
-    /// after finalize returned: a final has landed and no volatile is pending.
-    func isDrained() -> Bool { sawTerminalFinal && volatileText.isEmpty }
 
     func snapshot() -> ([String], String, String?) { (finals, lastVolatileOrEmitted(), error) }
 

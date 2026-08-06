@@ -107,6 +107,13 @@ public final class VocabularyChannel: @unchecked Sendable {
             log.error("vocabulary pass failed: \(error.localizedDescription, privacy: .public)")
             collector.cancel()
             await analyzer.cancelAndFinishNow()
+            // Same recovery lever the live path uses after a failure, for the same
+            // reason: a failed DictationTranscriber session leaves a cached engine
+            // behind, and this channel shares that cache with the live path.
+            // Measured free (0 ms, spike S1 Q1). Failure path ONLY — the matrix
+            // below showed a *successful* reconcile does not degrade the live
+            // path, so this is not a routine cooldown.
+            await SpeechModels.endRetention()
             return nil
         }
         _ = await collector.value

@@ -18,11 +18,22 @@ public struct UtteranceResult: Sendable, Equatable {
     /// the ONLY condition that may trigger the batch fallback. An empty result
     /// is not a failure: on silence the engine legitimately returns nothing.
     public var crashed: Bool
+    /// Less than one 100 ms chunk of audio ever reached the analyzer, so an
+    /// empty result says nothing about the engine — the capture side starved it.
+    ///
+    /// This exists because the two faults were indistinguishable in production.
+    /// A starved analyzer and a wedged analyzer both produced
+    /// `outcome=empty, finalize_ms≈1500, timed_out=false` (measured: 1500.9 ms
+    /// for both "no audio at all" and "3 s of digital silence"), which is what
+    /// made the 2026-08-05 incident unreadable from `metrics.log` alone.
+    public var starvedInput: Bool
 
     public init(text: String, engine: String, finalizeMs: Double,
-                timedOut: Bool = false, crashed: Bool = false) {
+                timedOut: Bool = false, crashed: Bool = false,
+                starvedInput: Bool = false) {
         self.text = text; self.engine = engine; self.finalizeMs = finalizeMs
         self.timedOut = timedOut; self.crashed = crashed
+        self.starvedInput = starvedInput
     }
 }
 

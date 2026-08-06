@@ -265,3 +265,181 @@ swiftc -O conv.swift -o conv                 # ./conv  (AVAudioConverter capacit
 **Caveat carried from the parent research:** all audio is `say`-synthesized. Directions and
 orders of magnitude are trustworthy; absolute WER and the biasing win need re-validation on
 human speech (spike S4).
+
+---
+
+# S1-b — the "every utterance after the second comes back empty" incident (5 Aug 2026)
+
+A real user, real microphone, on this machine: utterance 1 SUCCESS (paste, finalize 175 ms),
+utterance 2 SUCCESS 76 s later (paste, 21 chars, finalize 14 ms), then **utterances 3–7 over the
+next 50 s ALL `outcome=empty` with `finalize_ms` pinned at the 1500 ms budget**
+(`~/.wisprit/metrics.log`, ts 1785971800–1785971842 = 16:16:40–16:17:22 local). No error-level
+`os_log` lines. The suspicion on entry was the vocabulary channel: `completeCorrection` fires
+`AsrManager.reconcileVocabulary()` after each success, `VocabularyChannel.reconcile` never calls
+`SpeechModels.endRetention()`, and the parent research flagged "rapid-session degradation".
+
+**That suspicion was wrong. The ASR engine was never poisoned — it was starved. The default
+input device changed from a 48 kHz mic to a 24 kHz Bluetooth one between the last success and
+the first failure, and `MicCapture` reused one `AVAudioEngine` for the app's lifetime, so its
+input chain stayed wired for 48 kHz and the tap silently stopped delivering buffers forever.**
+
+## The matrix (fed PCM, no microphone anywhere)
+
+`tests/WispritEngineTests/RapidSessionMatrixTests.swift`, env-gated so the normal suite never
+pays for it. One `AsrManager` for the whole run (the production topology — `SessionController`
+holds a single manager), `say`-synthesized clips fed as real-time-paced 100 ms 16 kHz Int16
+chunks, 138 contextual terms (the size of the user's real `dictionary.json`), gap measured from
+the production rows (release→next press was 3.7–4.1 s, not the 5–8 s the ts column suggests):
+
+```
+WISPRIT_LIVE_ASR=1 WISPRIT_MATRIX=b swift test --filter RapidSessionMatrixTests \
+    --scratch-path /tmp/wisprit-build-WispritEngine
+```
+
+| cfg | shape | empties | finalize ms |
+|---|---|---|---|
+| a | control, no reconcile, 8 utt @ 4.0 s | **0 / 8** | 62–101 |
+| b | reconcile detached after every success (production), 8 utt @ 4.0 s | **0 / 8** | 54–122 |
+| b′ | as b, 0.5 s gaps — reconcile genuinely in flight at *every* `begin` | **0 / 8** | 73–102 |
+| b″ | as b, **500** terms, **0.0 s** gap, 10 utt — maximum overlap | **0 / 10** | 43–98 |
+| c | as b + `SpeechModels.endRetention()` after each reconcile | **0 / 8** | 71–98 |
+
+**The production shape does not reproduce, in any configuration, including ones far more hostile
+than production.** Reconcile took 552–1399 ms at 138 terms and 1964–2536 ms at 500 terms; under
+b″ it genuinely overlapped the next utterance's analyzer every time (`inflight=1`, twice
+`inflight=2`). The live path did not care. Spike S1's original finding stands: fresh objects per
+utterance is sufficient, and there is no cooldown requirement.
+
+One real defect did surface in b″: with 500 terms at a 0 s gap, `reconcile` **itself** failed
+(returned nil from its `catch`) on 4 of 10 passes. It never harmed the live path, but it used to
+leave a failed DictationTranscriber session's cached engine behind.
+
+## What actually produces the production signature
+
+Config d — the same engine, given nothing:
+
+| input | finalize | outcome | timedOut | crashed | partials |
+|---|---|---|---|---|---|
+| no audio at all | **1500.9 ms** | EMPTY | false | false | 0 |
+| 3 s digital silence | **1500.9 ms** | EMPTY | false | false | 0 |
+| normal speech | 72.5 ms | ok | false | false | 13 |
+
+Production rows: `finalize_ms` 1500.0–1502.0, `outcome=empty`, `timed_out=false`. **Byte-identical
+to a starved analyzer, and nothing like a wedged one** (a wedge sets `timedOut=true`). The 1500 ms
+was not the analyzer working and failing; it was `finalize()` waiting out its whole budget on a
+drain condition that could never be satisfied, because `TranscriptSink.isDrained()` requires a
+final to have landed and no final ever lands when there is no audio. That also explains the
+missing log line: with `timedOut=false` and `crashed=false`, `finalize` took the **soft** teardown
+branch, which logs nothing and — crucially — never calls `endRetention`. The premise that
+"endRetention fired and the stream stayed dead anyway" was false; it never fired.
+
+## Root cause, from the production log
+
+The failure was 2 minutes before the investigation, so `log show` still had it. Wisprit PID 86025:
+
+```
+16:15:14  Input render format:  1 ch, 48000 Hz, Float32     ← utterance 1, SUCCESS
+16:16:27  setPlayState Started Input                        ← utterance 2, SUCCESS
+16:16:32  setPlayState Stopped Input                        ← utterance 2 released
+16:16:35  Input render format:  1 ch, 24000 Hz, Float32     ← utterance 3, FIRST EMPTY
+          setPlayState IOState: [1, 0]. BT device UIDS: { "00-C5-85-7D-4D-59:input" }
+16:16:40 / :48 / 17:03 / :11 / :22   session: utterance error: nothing recognized   (×5)
+```
+
+The default input became a **24 kHz Bluetooth** device between the last success and the first
+failure. `AVAudioEngine.h` documents precisely what happens next:
+
+> When the engine's I/O unit observes a change to the audio input or output hardware's channel
+> count or sample rate, the engine **stops itself** … The nodes remain attached and connected
+> with **previously set formats**. However, the app **must reestablish connections** … in an
+> input node chain, connections must follow the hardware sample rate.
+
+`MicCapture` held **one `AVAudioEngine` for the app's lifetime**, re-installing a tap per
+utterance with a format read from that stale engine, and never observed
+`AVAudioEngineConfigurationChangeNotification`. So after the device change the input chain was
+permanently wrong, the tap delivered nothing, `start()` still returned `true`, and every
+subsequent press produced a perfectly healthy-looking 1.5 s of nothing — until the app was
+relaunched. Five failures, then the user gave up; there was no path in the code that could ever
+have recovered.
+
+There were no `engine.capture` or `engine.apple_live` log lines in the whole window, which is
+itself the finding: **a totally dead microphone was indistinguishable from a quiet user**, in the
+logs and in `metrics.log` alike.
+
+## The fix
+
+`Sources/WispritEngine/MicCapture.swift` — **a capture session never outlives one utterance.**
+`start()` builds a fresh `AVAudioEngine`, so the input chain is established against the format the
+hardware has *now*; that is the only state that is correct by construction, and it removes the
+"sticky forever" property entirely. It also registers an
+`AVAudioEngineConfigurationChangeNotification` observer on that engine (flag-only — the header
+warns the engine must not be deallocated from the handler), counts delivered bytes, and logs
+loudly when a session ends having received none.
+
+`Sources/WispritEngine/SpeechAnalyzerEngine.swift` — **drain on the analyzer's own signal, and
+recover from a real wedge.** The `isDrained()` poll is replaced by waiting for the collector task
+to finish (it exits when `module.results` ends, which is the analyzer stating nothing more is
+coming), still capped by the budget. An utterance is now classified with two new inputs — bytes
+fed and peak input level:
+
+* `starvedInput` (< one 100 ms chunk ever reached the analyzer) is reported on `UtteranceResult`
+  and logged as a capture fault. It does **not** trigger engine recovery: resetting the ASR cannot
+  fix a dead microphone.
+* audible speech in (`peak ≥ 0.02`) and *nothing* out — no final, no volatile — is now treated as
+  a failure like a timeout or crash: any volatile tail is kept instead of discarded, a warning is
+  logged, and `teardown(hard:)` runs `cancelAndFinishNow()` + `endRetention()` so the next
+  utterance cannot inherit a suspect cached engine.
+
+The peak-level gate is load-bearing and measured: 3 s of digital silence also yields zero results,
+so emptiness alone cannot separate a wedged analyzer from a user who did not speak. Without the
+gate every silent press would release the cached engines — a routine cooldown, which this spike
+rejected.
+
+`Sources/WispritEngine/VocabularyChannel.swift` — `endRetention()` on the reconcile **failure**
+path only (the 4-of-10 case from b″), matching the live path's existing "recovery lever after a
+failure, never routine" rule. **No idle-delay knob was added to `AsrSettings`:** the matrix
+exonerated reconcile at 0 s gaps and 500 terms, so serializing it would have been a speculative
+fix to a problem that does not exist.
+
+Measured after the fix (config d, same harness):
+
+| input | before | after |
+|---|---|---|
+| no audio at all | 1500.9 ms, EMPTY | **4.1 ms**, EMPTY, `starvedInput=true` |
+| 3 s digital silence | 1500.9 ms, EMPTY | **38.7 ms**, EMPTY, `starvedInput=false` |
+| normal speech | 72.5 ms, ok | 58.2 ms, ok |
+
+A dead microphone now costs 4 ms and says so, instead of costing 1.5 s per press and saying
+nothing.
+
+## Recovery — one bad utterance must never strand the user
+
+Config p injects the production failure (two consecutive starved sessions) into the middle of a
+production-shaped run:
+
+```
+utt 1 fed      104.1 ms  ok      | utt 5 fed       56.9 ms  ok
+utt 2 fed       75.9 ms  ok      | utt 6 fed       74.0 ms  ok
+utt 3 STARVED    4.1 ms  EMPTY   | utt 7 fed      101.1 ms  ok
+utt 4 STARVED    4.1 ms  EMPTY   | utt 8 fed       74.8 ms  ok
+```
+
+Starvation is reported exactly when real, and utterances 5–8 are unaffected.
+
+## Verification
+
+* production shape (config b, assertions on), **2 fresh runs: 8/8 non-empty both times**,
+  finalize 65–100 ms.
+* configs a / b / b′ / b″ / c / p as tabulated above — 0 empties everywhere.
+* `swift test --filter WispritEngineTests --scratch-path /tmp/wisprit-build-WispritEngine`
+  → **67 tests, 0 failures** (and 67/0 again with `WISPRIT_LIVE_ASR=1`, live models included).
+* `swift test --scratch-path /tmp/wisprit-build-agentfix` → **705 tests, 0 failures**, 19 skipped.
+
+## What is NOT proven
+
+The device-change → wedged-tap chain is established from the production log plus Apple's
+documented behaviour, not from a headless repro: the constraint for this investigation was fed
+PCM only, so `MicCapture` was never run against a real microphone or a real device switch. The
+fix is sound by construction (a fresh engine cannot carry a stale graph), but the live check that
+would close the loop is: connect/disconnect a Bluetooth mic between two utterances on the fixed
+build and confirm the second still transcribes, with `capturedBytes > 0`.
