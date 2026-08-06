@@ -250,6 +250,13 @@ public final class AppController: NSObject, NSApplicationDelegate {
         auditPermissions()
         startAvailabilityRefresh()
 
+        // A menu-bar-only app with a notch-hidden icon starts INVISIBLY — users
+        // read that as "not starting" (it happened). The pill flash is the
+        // proof-of-life: no window, no permission, just 1.6 s at the pill spot.
+        WispritUI.callOnMain { [pill] in
+            pill.transientNotice("Wisprit ready — hold 🌐 to dictate")
+        }
+
         // Listen for `clientLost` from the input method. This registers a local
         // message port and nothing else — no input source is touched until the
         // user has enabled live typing and holds the dictation key.

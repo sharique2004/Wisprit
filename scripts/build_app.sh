@@ -128,11 +128,22 @@ IM_DIR="$CONTENTS/Library/InputMethods"
 fi
 
 # --- sign -------------------------------------------------------------------
-# Ad-hoc signing gives the bundle a STABLE identity. Without it, TCC can treat
-# each rebuild as a new app and silently drop the Accessibility / Input
-# Monitoring grants. Re-running this script re-signs with the same identity.
-if codesign --force --sign - "$APP" 2>/dev/null; then
-    echo "  signed: ad-hoc"
+# Developer ID when available: a REAL certificate keys TCC to team+bundle id,
+# so grants survive every rebuild. Ad-hoc (cdhash-keyed) proved NOT to: each
+# rebuild silently voided Input Monitoring and the user relived onboarding
+# ("quit and reopen spam", 2026-08-05). Override with WISPRIT_SIGN_IDENTITY.
+SIGN_ID="${WISPRIT_SIGN_IDENTITY:-$(security find-identity -v -p codesigning 2>/dev/null \
+    | grep -m1 'Developer ID Application' | sed 's/.*"\(.*\)".*/\1/')}"
+if [[ -n "$SIGN_ID" ]]; then
+    if [[ -d "$IM_DIR/WispritIM.app" ]]; then
+        # Nested bundle first, keeping its sandbox/mach-port entitlements.
+        codesign --force --preserve-metadata=entitlements --sign "$SIGN_ID" \
+            "$IM_DIR/WispritIM.app"
+    fi
+    codesign --force --sign "$SIGN_ID" "$APP"
+    echo "  signed: $SIGN_ID"
+elif codesign --force --sign - "$APP" 2>/dev/null; then
+    echo "  signed: ad-hoc (no Developer ID found — grants reset on every rebuild)"
 else
     echo "  sign: SKIPPED (codesign unavailable) — grants may not stick" >&2
 fi
@@ -146,8 +157,8 @@ codesign --verify --deep --strict "$APP" 2>/dev/null \
 if [[ $INSTALL -eq 1 ]]; then
     echo "Installing to /Applications/Wisprit.app"
     rm -rf /Applications/Wisprit.app
-    cp -R "$APP" /Applications/Wisprit.app
-    codesign --force --sign - /Applications/Wisprit.app 2>/dev/null || true
+    # ditto preserves the signature; never re-sign after the copy.
+    ditto "$APP" /Applications/Wisprit.app
     /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
         -f /Applications/Wisprit.app 2>/dev/null || true
     APP=/Applications/Wisprit.app
