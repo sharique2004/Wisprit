@@ -143,22 +143,33 @@ struct OnboardingView: View {
         }
     }
 
+    /// Two states, one page.
+    ///
+    /// A satisfied step drops the remediation entirely. Showing a green check
+    /// beside "Input Monitoring" *and* three steps of instructions *and* a
+    /// prominent "Quit & Reopen Wisprit" button is how a user who has nothing to
+    /// do restarts the app for no reason.
     private func permissionPage(id: String) -> some View {
         let item = model.items.first { $0.id == id }
+        let done = item?.isSatisfied ?? false
         return VStack(alignment: .leading, spacing: 16) {
             header(item)
             if let item {
-                Text(item.summary).font(.body).fixedSize(horizontal: false, vertical: true)
-                if let note = item.note {
-                    Label(note, systemImage: "info.circle")
-                        .font(.callout).foregroundStyle(.orange)
+                if done {
+                    settledLine(item.detail)
+                } else {
+                    Text(item.summary).font(.body).fixedSize(horizontal: false, vertical: true)
+                    if let note = item.note {
+                        Label(note, systemImage: "info.circle")
+                            .font(.callout).foregroundStyle(.orange)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Text(item.detail).font(.caption).foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
-                }
-                Text(item.detail).font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if item.fix != .none {
-                    Button(item.fixTitle) { model.fix(item.fix) }
-                        .buttonStyle(.borderedProminent)
+                    if item.fix != .none {
+                        Button(item.fixTitle) { model.fix(item.fix) }
+                            .buttonStyle(.borderedProminent)
+                    }
                 }
             }
         }
@@ -166,62 +177,72 @@ struct OnboardingView: View {
 
     private var inputMonitoringPage: some View {
         let item = model.items.first { $0.id == SetupChecklist.inputMonitoringID }
+        let done = item?.isSatisfied ?? false
         return VStack(alignment: .leading, spacing: 16) {
             header(item)
-            Text("""
-                This is the one macOS handles worst, so read it once: Wisprit cannot \
-                make this prompt appear, and switching it on while Wisprit is running \
-                changes nothing.
-                """)
-                .font(.body).fixedSize(horizontal: false, vertical: true)
-
-            VStack(alignment: .leading, spacing: 10) {
-                numbered(1, "Open the Input Monitoring list.")
-                numbered(2, "Switch Wisprit on. Use the + button if it is not listed.")
-                numbered(3, "Quit Wisprit and open it again — the permission only takes "
-                            + "effect at launch.")
-            }
-            .padding(.leading, 2)
-
-            HStack(spacing: 10) {
-                Button("Open Input Monitoring") { model.fix(.requestInputMonitoring) }
-                    .buttonStyle(.borderedProminent)
-                Button("Quit & Reopen Wisprit") { model.fix(.relaunch) }
-            }
-
-            if let item {
-                Label(item.detail, systemImage: item.isSatisfied ? "checkmark.circle" : "clock")
-                    .font(.caption).foregroundStyle(.secondary)
+            if done {
+                settledLine(item?.detail ?? "")
+                Text("This is the permission that most often goes wrong later — if "
+                     + "the key ever stops working, come back here first.")
+                    .font(.callout).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Text("""
+                    This is the one macOS handles worst, so read it once: Wisprit cannot \
+                    make this prompt appear, and switching it on while Wisprit is running \
+                    changes nothing.
+                    """)
+                    .font(.body).fixedSize(horizontal: false, vertical: true)
+
+                VStack(alignment: .leading, spacing: 10) {
+                    numbered(1, "Open the Input Monitoring list.")
+                    numbered(2, "Switch Wisprit on. Use the + button if it is not listed.")
+                    numbered(3, "Quit Wisprit and open it again — the permission only takes "
+                                + "effect at launch.")
+                }
+                .padding(.leading, 2)
+
+                HStack(spacing: 10) {
+                    Button("Open Input Monitoring") { model.fix(.requestInputMonitoring) }
+                        .buttonStyle(.borderedProminent)
+                    Button("Quit & Reopen Wisprit") { model.fix(.relaunch) }
+                }
+
+                if let item {
+                    Label(item.detail, systemImage: "clock")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
             }
         }
     }
 
     private var globeKeyPage: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        let clear = model.globeKey.isClear
+        return VStack(alignment: .leading, spacing: 16) {
             HStack(spacing: 10) {
-                StatusDot(mark: model.globeKey.isClear ? .ok : .warn)
+                StatusDot(mark: clear ? .ok : .warn)
                 Text("The 🌐 key").font(.title2).fontWeight(.semibold)
             }
-            Text("""
-                By default macOS gives the 🌐 key its own job — usually the emoji \
-                picker or Apple's dictation. If it still has one, pressing it will do \
-                that instead of starting Wisprit, which looks exactly like Wisprit \
-                being broken.
-                """)
-                .font(.body).fixedSize(horizontal: false, vertical: true)
-            Label(model.globeKey.advice,
-                  systemImage: model.globeKey.isClear ? "checkmark.circle" : "exclamationmark.circle")
-                .font(.callout)
-                .foregroundStyle(model.globeKey.isClear ? Color.green : Color.orange)
-                .fixedSize(horizontal: false, vertical: true)
-            Text("System Settings ▸ Keyboard ▸ “Press 🌐 key to” → Do Nothing")
-                .font(.callout).monospaced().foregroundStyle(.secondary)
-            HStack(spacing: 10) {
+            if clear {
+                settledLine(model.globeKey.advice)
+            } else {
+                Text("""
+                    By default macOS gives the 🌐 key its own job — usually the emoji \
+                    picker or Apple's dictation. If it still has one, pressing it will do \
+                    that instead of starting Wisprit, which looks exactly like Wisprit \
+                    being broken.
+                    """)
+                    .font(.body).fixedSize(horizontal: false, vertical: true)
+                Label(model.globeKey.advice, systemImage: "exclamationmark.circle")
+                    .font(.callout).foregroundStyle(Color.orange)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("System Settings ▸ Keyboard ▸ “Press 🌐 key to” → Do Nothing")
+                    .font(.callout).monospaced().foregroundStyle(.secondary)
                 Button("Open Keyboard Settings") { model.fix(.openKeyboardSettings) }
                     .buttonStyle(.borderedProminent)
-                Button("I use an external keyboard") { model.setHotkey(.rightOption) }
             }
+            Button("I use an external keyboard") { model.setHotkey(.rightOption) }
             Text("On many external keyboards Fn never reaches macOS at all. "
                  + "That button switches the hotkey to the right ⌥ key instead.")
                 .font(.caption).foregroundStyle(.secondary)
@@ -256,9 +277,16 @@ struct OnboardingView: View {
         }
     }
 
+    /// The last page, and therefore also the finish line.
+    ///
+    /// When there is nothing left to ask it becomes the completion moment the
+    /// wizard used to skip: it dismissed itself on the first tick where
+    /// everything was satisfied, so a user on an already-healthy machine watched
+    /// a panel appear and vanish with no "you're set up" anywhere.
     private var liveTypingPage: some View {
         let item = model.items.first { $0.id == SetupChecklist.liveTypingID }
         return VStack(alignment: .leading, spacing: 16) {
+            if model.isOnboardingComplete { completionBanner }
             header(item)
             Text("""
                 Optional. Normally Wisprit pastes the finished sentence when you let \
@@ -266,6 +294,9 @@ struct OnboardingView: View {
                 are still speaking, the way the system dictation does.
                 """)
                 .font(.body).fixedSize(horizontal: false, vertical: true)
+            Text(SetupChecklist.liveTypingPerAppNote)
+                .font(.callout).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             Text("""
                 Turning it on installs a small input method into your Input Sources \
                 and macOS asks you to approve it. Everything keeps working without it.
@@ -276,12 +307,32 @@ struct OnboardingView: View {
                 Button(item.fixTitle) { model.fix(item.fix) }
                     .buttonStyle(.borderedProminent)
             }
-            Button("No thanks, paste at the end") { model.settleLiveTyping() }
+            if !model.liveTypingSettled {
+                Button("No thanks, paste at the end") { model.settleLiveTyping() }
+            }
             if let item {
                 Text(item.detail).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+    }
+
+    private var completionBanner: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: "checkmark.seal.fill")
+                .font(.system(size: 26)).foregroundStyle(.green)
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Wisprit is set up.").font(.title3).fontWeight(.semibold)
+                Text("Hold \(SetupChecklist.hotkeyLabel(model.hotkey.rawValue)) anywhere "
+                     + "you can type. Press Finish to close this guide — you can reopen "
+                     + "it any time from the Status page.")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.green.opacity(0.12), in: RoundedRectangle(cornerRadius: 12))
     }
 
     // MARK: - Bits
@@ -291,6 +342,18 @@ struct OnboardingView: View {
             StatusDot(mark: item?.mark ?? .warn)
             Text(item?.title ?? model.onboardingStep.title)
                 .font(.title2).fontWeight(.semibold)
+        }
+    }
+
+    /// A step with nothing left to do says so, and stops there.
+    private func settledLine(_ detail: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label("Done — nothing to do here.", systemImage: "checkmark.circle.fill")
+                .font(.body).foregroundStyle(.green)
+            if !detail.isEmpty {
+                Text(detail).font(.callout).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
     }
 

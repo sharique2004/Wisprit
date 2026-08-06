@@ -29,7 +29,7 @@ struct HistoryView: View {
 
             Divider()
 
-            if model.recents.isEmpty {
+            if model.history.isEmpty {
                 VStack(spacing: 8) {
                     Image(systemName: "text.bubble")
                         .font(.system(size: 34)).foregroundStyle(.tertiary)
@@ -42,12 +42,27 @@ struct HistoryView: View {
             } else {
                 ScrollView {
                     LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(Array(model.recents.enumerated()), id: \.offset) { index, entry in
+                        ForEach(Array(model.history.enumerated()), id: \.offset) { index, entry in
                             if index > 0 { Divider() }
                             TranscriptRow(text: entry.text,
                                           subtitle: subtitle(for: entry)) {
                                 model.copy(entry.text)
                             }
+                        }
+                        // The page used to stop silently at twenty rows while
+                        // Purge deleted a thousand. Now the list either ends
+                        // because the history ends, or it says so and offers the
+                        // rest.
+                        if model.historyHasMore {
+                            Divider()
+                            Button {
+                                model.loadMoreHistory()
+                            } label: {
+                                Label("Load older transcripts",
+                                      systemImage: "arrow.down.circle")
+                            }
+                            .buttonStyle(.borderless)
+                            .padding(.vertical, 12)
                         }
                     }
                     .padding(.horizontal, 24)
@@ -58,28 +73,44 @@ struct HistoryView: View {
 
             HStack {
                 Button {
-                    model.refreshRecents()
+                    model.loadHistory(reset: true)
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
+                Text(countLabel).font(.caption).foregroundStyle(.secondary)
                 Spacer()
                 Button(role: .destructive) {
                     confirmingPurge = true
                 } label: {
                     Label("Purge History…", systemImage: "trash")
                 }
-                .disabled(model.recents.isEmpty)
+                .disabled(model.history.isEmpty)
             }
             .padding(.horizontal, 24).padding(.vertical, 12)
         }
-        .confirmationDialog("Delete every saved transcript?",
+        .confirmationDialog(purgeTitle,
                             isPresented: $confirmingPurge, titleVisibility: .visible) {
             Button("Delete All", role: .destructive) { model.purgeHistory() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("This cannot be undone. Paste Last will have nothing to paste.")
+            Text(model.historyDeletionWarning)
         }
-        .onAppear { model.refreshRecents() }
+        .onAppear { model.loadHistory(reset: true) }
+    }
+
+    /// Says what is on screen, not what is in the database — the two are only
+    /// the same once everything has been loaded.
+    private var countLabel: String {
+        guard !model.history.isEmpty else { return "" }
+        return model.historyHasMore
+            ? "Showing the \(model.history.count) most recent"
+            : "\(model.history.count) transcript\(model.history.count == 1 ? "" : "s")"
+    }
+
+    private var purgeTitle: String {
+        model.historyHasMore
+            ? "Delete every saved transcript, not just the ones shown?"
+            : "Delete all \(model.history.count) saved transcripts?"
     }
 
     private func subtitle(for entry: HistoryEntry) -> String {

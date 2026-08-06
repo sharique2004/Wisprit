@@ -17,6 +17,15 @@ import WispritPersistence
 /// Every system call arrives as a closure in `Ports`, so the whole model —
 /// including states that would need a revoked TCC grant to reach — is driven by
 /// fakes in tests.
+///
+/// The one hard rule: **the window adds no main-thread work while the user is
+/// holding the key.** The hotkey tap callback, the pill and the input-method
+/// streaming path are all main-thread, and the try-it card asks the user to
+/// dictate with this window open. So the timer stops for the duration of a
+/// session (`noteSessionState`), and everything it runs — the TCC re-read, the
+/// 🌐-key preference, the history queries — happens off the main actor and is
+/// published back on it. The only main-thread reads left are one-shots at
+/// window open, where nothing is competing for the thread.
 @MainActor
 public final class WispritWindowModel: ObservableObject {
 
@@ -32,6 +41,10 @@ public final class WispritWindowModel: ObservableObject {
         public var recents: @Sendable (Int) -> [HistoryEntry]
         public var purgeHistory: @Sendable () -> Void
         public var copy: @Sendable (String) -> Void
+        /// Apps where the insertion ladder has already learned it cannot stream
+        /// live text. In-memory and per-launch — this is the ladder's own cache,
+        /// not a probe.
+        public var liveTypingFallbacks: @Sendable () -> [BundleVerdict]
         /// Perform a checklist fix. Runs on the main actor: some of these raise
         /// system prompts.
         public var performFix: (SetupFixKind) -> Void
@@ -42,6 +55,7 @@ public final class WispritWindowModel: ObservableObject {
                     recents: @escaping @Sendable (Int) -> [HistoryEntry] = { _ in [] },
                     purgeHistory: @escaping @Sendable () -> Void = {},
                     copy: @escaping @Sendable (String) -> Void = { _ in },
+                    liveTypingFallbacks: @escaping @Sendable () -> [BundleVerdict] = { [] },
                     performFix: @escaping (SetupFixKind) -> Void = { _ in }) {
             self.fullProbe = fullProbe
             self.fastProbe = fastProbe
@@ -49,6 +63,7 @@ public final class WispritWindowModel: ObservableObject {
             self.recents = recents
             self.purgeHistory = purgeHistory
             self.copy = copy
+            self.liveTypingFallbacks = liveTypingFallbacks
             self.performFix = performFix
         }
     }
@@ -84,12 +99,22 @@ public final class WispritWindowModel: ObservableObject {
     @Published public private(set) var summary = SetupSummary(
         hero: .checking, headline: "Checking…", subhead: "")
     @Published public private(set) var globeKey: GlobeKeyUsage = .unknown
+    /// The Status page's short preview. The History page has its own, paged list
+    /// — the two used to share this one, which is how a page titled "History"
+    /// showed twenty rows while Purge deleted a thousand.
     @Published public private(set) var recents: [HistoryEntry] = []
+    /// Apps the insertion ladder has learned cannot take live text.
+    @Published public private(set) var liveTypingFallbacks: [BundleVerdict] = []
     @Published public private(set) var dictionaryRows: [DictionaryRow] = []
     @Published public var dictionarySearch = ""
     @Published public var selectedTab: Tab = .status
     /// The try-it scratch field. Held here so switching tabs does not lose it.
     @Published public var playgroundText = ""
+
+    // History page — its own list, its own limit.
+    @Published public private(set) var history: [HistoryEntry] = []
+    /// The last fetch came back full, so there is very likely more behind it.
+    @Published public private(set) var historyHasMore = false
 
     // Onboarding
     @Published public private(set) var isOnboarding = false
@@ -121,9 +146,24 @@ public final class WispritWindowModel: ObservableObject {
     /// promotes to a full probe every `fullProbeEvery` ticks.
     private var ticksSinceFullProbe = 0
     private static let fullProbeEvery = 8   // ≈16 s
+    /// How many transcripts the Status page previews, and the only reason the
+    /// tick touches SQLite at all.
+    public static let recentsPreviewLimit = 5
+    /// One History page. "Load more" adds another.
+    public static let historyPageSize = 50
+    private var historyLimit = WispritWindowModel.historyPageSize
     /// Newest history timestamp when the window opened — the baseline the try-it
-    /// step compares against when the session never reports directly.
+    /// step compares against when the session never reports directly. Set once,
+    /// and reset only when the setup guide is re-run: reopening the window is
+    /// not a reason to un-prove a dictation that already worked.
     private var dictationBaseline: Double = 0
+    private var hasTakenDictationBaseline = false
+    /// The window is on screen, so the tick has something to keep up to date.
+    private var isWindowVisible = false
+    /// A dictation is in flight. The timer is off for the duration: the hotkey
+    /// tap, the pill and the IM streaming path all run on the main thread, and
+    /// this window must not compete with them while the key is held.
+    private var isDictating = false
 
     public init(settings: Settings, dictionary: DictionaryEditor, ports: Ports = Ports()) {
         self.settings = settings
@@ -135,24 +175,55 @@ public final class WispritWindowModel: ObservableObject {
 
     // MARK: - Refresh
 
-    /// Called when the window opens: reset the try-it baseline, probe everything.
+    /// Called when the window opens: probe everything and start keeping up.
+    ///
+    /// Idempotent by design. It used to clear `didDictate` and re-take the
+    /// try-it baseline on every `show()`, so closing and reopening the window
+    /// wiped the green "Dictation is working." line while the transcript that
+    /// proved it was still listed directly underneath — and silently un-proved
+    /// the wizard's try-it step with it.
     public func windowDidOpen() {
-        dictationBaseline = ports.recents(1).first?.ts ?? 0
-        didDictate = false
+        isWindowVisible = true
+        takeDictationBaselineIfNeeded()
         reloadSettings()
         reloadDictionary()
         refreshRecents()
-        globeKey = ports.globeKey()
+        loadHistory(reset: true)
         Task { await refreshFull() }
         startPolling()
     }
 
     public func windowDidClose() {
+        isWindowVisible = false
         stopPolling()
+    }
+
+    /// The session state machine, forwarded by the app.
+    ///
+    /// Anything but `.idle` means the user is mid-utterance, and the window's
+    /// job for that stretch is to do nothing at all.
+    public func noteSessionState(_ state: SessionController.State) {
+        let busy = state != .idle
+        guard busy != isDictating else { return }
+        isDictating = busy
+        if busy {
+            stopPolling()
+        } else if isWindowVisible {
+            // Catch up cheaply on what the pause skipped. Deliberately not a
+            // full probe: that would put the asset inventory and the model
+            // availability check at the end of every single utterance, which is
+            // worse than the polling this was meant to relieve. The full probe
+            // keeps its own ~16 s cadence, and `ticksSinceFullProbe` survives
+            // the pause.
+            Task { await refreshFast() }
+            refreshRecents()
+            startPolling()
+        }
     }
 
     public func startPolling(interval: TimeInterval = 2.0) {
         stopPolling()
+        guard !isDictating else { return }
         let timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { _ in
             MainActor.assumeIsolated { self.tick() }
         }
@@ -164,40 +235,65 @@ public final class WispritWindowModel: ObservableObject {
         timer = nil
     }
 
+    /// Whether the 2-second tick is armed. Exposed so "the window adds no
+    /// main-thread work during a hold" is a property a test can assert rather
+    /// than a promise in a comment.
+    public var isPolling: Bool { timer != nil }
+
     private func tick() {
+        guard !isDictating else { return }
         ticksSinceFullProbe += 1
         if ticksSinceFullProbe >= Self.fullProbeEvery {
             ticksSinceFullProbe = 0
             Task { await refreshFull() }
         } else {
-            refreshFast()
+            Task { await refreshFast() }
         }
         refreshRecents()
+        // The History page is the only one that would otherwise go stale while
+        // the user watched it, and re-fetching its page is worth a query only
+        // while it is the page on screen.
+        if selectedTab == .history { loadHistory() }
     }
 
     /// The whole picture. Safe to call from anywhere; it awaits off the main
     /// actor and publishes back on it.
     public func refreshFull() async {
         let probe = ports.fullProbe
+        let readGlobeKey = ports.globeKey
         let gathered = await probe()
+        let usage = await Task.detached(priority: .utility) { readGlobeKey() }.value
         // Order matters: `apply` builds the hero, and the hero is "Checking…"
         // until `hasProbed` says a real probe has landed.
         hasProbed = true
-        globeKey = ports.globeKey()
+        globeKey = usage
         reloadSettings()
         apply(facts: gathered)
     }
 
-    /// Four TCC reads over the last full snapshot. This is what makes a grant
-    /// flipped in System Settings show up in the window within two seconds.
-    public func refreshFast() {
+    /// Five TCC reads and the 🌐-key preference over the last full snapshot.
+    /// This is what makes a setting flipped in System Settings show up in the
+    /// window within two seconds.
+    ///
+    /// Off the main actor, published back on it. They are only syscalls, but
+    /// they are syscalls on a 2-second timer in a process whose main thread is
+    /// also carrying the hotkey tap and the live-typing stream.
+    public func refreshFast() async {
         guard hasProbed else { return }
-        apply(facts: ports.fastProbe(facts))
+        let probe = ports.fastProbe
+        let readGlobeKey = ports.globeKey
+        let snapshot = facts
+        let refreshed = await Task.detached(priority: .utility) {
+            (probe(snapshot), readGlobeKey())
+        }.value
+        globeKey = refreshed.1
+        apply(facts: refreshed.0)
     }
 
     private func apply(facts newFacts: DoctorFacts) {
         facts = newFacts
         items = SetupChecklist.items(from: newFacts)
+        liveTypingFallbacks = ports.liveTypingFallbacks()
         summary = SetupChecklist.summary(
             items: items,
             hotkeyLabel: SetupChecklist.hotkeyLabel(hotkey.rawValue),
@@ -215,11 +311,57 @@ public final class WispritWindowModel: ObservableObject {
         return SetupChecklist.secureInputNotice(facts)
     }
 
+    /// The Status page's five-row preview, fetched off the main actor — it is a
+    /// SQLite query and it runs on the same 2-second timer as everything else.
     public func refreshRecents() {
-        recents = ports.recents(20)
-        if let newest = recents.first?.ts, newest > dictationBaseline {
+        let fetch = ports.recents
+        let limit = Self.recentsPreviewLimit
+        Task { [weak self] in
+            let rows = await Task.detached(priority: .utility) { fetch(limit) }.value
+            self?.publish(recents: rows)
+        }
+    }
+
+    private func publish(recents rows: [HistoryEntry]) {
+        recents = rows
+        if let newest = rows.first?.ts, newest > dictationBaseline {
             didDictate = true
         }
+    }
+
+    /// The History page's own list. `reset` starts again at one page; otherwise
+    /// this re-fetches whatever the user has already loaded.
+    public func loadHistory(reset: Bool = false) {
+        if reset { historyLimit = Self.historyPageSize }
+        let fetch = ports.recents
+        let limit = historyLimit
+        Task { [weak self] in
+            let rows = await Task.detached(priority: .utility) { fetch(limit) }.value
+            guard let self else { return }
+            self.history = rows
+            // A full page is the only evidence available without a count query:
+            // it means the limit, not the table, decided where the list stopped.
+            self.historyHasMore = rows.count >= limit
+        }
+    }
+
+    public func loadMoreHistory() {
+        historyLimit += Self.historyPageSize
+        loadHistory()
+    }
+
+    /// What the purge confirmation is allowed to claim. "N" only when N is the
+    /// whole table; otherwise the dialog says plainly that it deletes more than
+    /// the page shows.
+    public var historyDeletionWarning: String {
+        if historyHasMore {
+            return "Every transcript Wisprit has saved will be deleted, including "
+                + "the ones older than the \(history.count) listed here. This "
+                + "cannot be undone, and Paste Last will have nothing to paste."
+        }
+        let count = history.count
+        return "All \(count) saved transcript\(count == 1 ? "" : "s") will be deleted. "
+            + "This cannot be undone, and Paste Last will have nothing to paste."
     }
 
     /// Called by the app when the session reaches INSERTING — proof a dictation
@@ -228,6 +370,23 @@ public final class WispritWindowModel: ObservableObject {
         didDictate = true
         refreshRecents()
         advanceOnboardingIfNeeded()
+    }
+
+    /// Take the try-it baseline once, so an already-populated history is never
+    /// mistaken for the sentence the user just spoke.
+    private func takeDictationBaselineIfNeeded() {
+        guard !hasTakenDictationBaseline else { return }
+        hasTakenDictationBaseline = true
+        dictationBaseline = ports.recents(1).first?.ts ?? 0
+    }
+
+    /// Re-arm the try-it proof. Only the setup guide does this: re-running the
+    /// guide is a request to see it work *now*, whereas reopening the window is
+    /// not.
+    private func resetDictationProof() {
+        dictationBaseline = ports.recents(1).first?.ts ?? 0
+        hasTakenDictationBaseline = true
+        didDictate = false
     }
 
     // MARK: - Fixes
@@ -249,6 +408,7 @@ public final class WispritWindowModel: ObservableObject {
     public func purgeHistory() {
         ports.purgeHistory()
         refreshRecents()
+        loadHistory(reset: true)
     }
 
     // MARK: - Dictionary
@@ -383,6 +543,9 @@ public final class WispritWindowModel: ObservableObject {
         liveTypingSettled = settings.bool(OnboardingSettings.liveTypingSettledKey, or: false)
         welcomeAcknowledged = false
         isOnboarding = true
+        // Re-running the guide from the top is a request to see it work again,
+        // so the try-it step has to be re-proved. Resuming is not.
+        if !resuming { resetDictationProof() }
         if resuming,
            let saved = settings.string(OnboardingSettings.stepKey),
            let step = OnboardingStep(rawValue: saved),
@@ -435,15 +598,24 @@ public final class WispritWindowModel: ObservableObject {
         isOnboarding = false
     }
 
+    /// Everything the wizard asks about is satisfied — the last page becomes the
+    /// "you're set up" page, and Finish is the only way out.
+    public var isOnboardingComplete: Bool {
+        OnboardingModel.firstIncomplete(onboardingInputs) == nil
+    }
+
     /// Move to the first unsatisfied step, but never backwards: a user who
     /// skipped ahead should not be yanked back by a probe finishing late.
+    ///
+    /// When there is nothing left it lands on the final step rather than closing
+    /// the sheet. Dismissing on the first satisfied tick is what made the wizard
+    /// flash and vanish on an already-healthy machine — the user got no
+    /// completion moment at all, just a panel that appeared and disappeared,
+    /// which reads as a glitch. Only the Finish button ends it now.
     private func advanceOnboardingIfNeeded() {
         guard isOnboarding else { return }
         let inputs = onboardingInputs
-        guard let next = OnboardingModel.firstIncomplete(inputs) else {
-            finishOnboarding()
-            return
-        }
+        let next = OnboardingModel.firstIncomplete(inputs) ?? OnboardingStep.allCases.last!
         guard let current = OnboardingStep.allCases.firstIndex(of: onboardingStep),
               let candidate = OnboardingStep.allCases.firstIndex(of: next) else { return }
         if candidate > current {

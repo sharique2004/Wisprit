@@ -342,9 +342,16 @@ final class SetupChecklistTests: XCTestCase {
         }
     }
 
-    func testRelaunchHelperQuotesThePath() {
+    /// The relaunch helper waits for the condition, not the clock: a fixed
+    /// `sleep 1` let a slow quit turn the relaunch into a reopen, after which
+    /// Wisprit finished quitting and the user was left with nothing running.
+    func testRelaunchHelperWaitsForThisProcessToExitBeforeReopening() {
         let command = AppRelaunch.helperCommand(bundlePath: "/Users/me/Wisprit's App.app",
-                                                delay: 1)
-        XCTAssertEqual(command, "sleep 1; /usr/bin/open '/Users/me/Wisprit'\\''s App.app'")
+                                                pid: 4321, maxTicks: 100)
+        XCTAssertEqual(command,
+                       "i=0; while kill -0 4321 2>/dev/null && [ $i -lt 100 ]; "
+                       + "do sleep 0.1; i=$((i+1)); done; "
+                       + "/usr/bin/open '/Users/me/Wisprit'\\''s App.app'")
+        XCTAssertFalse(command.contains("sleep 1;"), "no fixed-delay race left")
     }
 }

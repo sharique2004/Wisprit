@@ -13,12 +13,13 @@ import WispritRefine
 /// code) lives in `Doctor.report(from:)`, which is what the tests cover.
 public extension Doctor {
 
-    /// `liveTyping: false` skips the input-source half. The window needs that:
+    /// `liveTyping: false` skips the Live Typing half. The window needs that:
     /// once an app has an event loop, `TISCreateInputSourceList` asserts the
     /// main queue and traps anywhere else, so the window runs this probe off the
-    /// main actor and calls `gatherInputSources` on it separately. The CLI keeps
-    /// the default and is unaffected — HIToolbox has no such queue to assert
-    /// against in a process with no NSApplication.
+    /// main actor and calls `gatheringLiveTyping` afterwards, which puts each
+    /// half on the thread it needs. The CLI keeps the default and is unaffected —
+    /// HIToolbox has no such queue to assert against in a process with no
+    /// NSApplication.
     static func gather(locale: String = "en-US", liveTyping: Bool = true) async -> DoctorFacts {
         var facts = DoctorFacts()
         facts.executablePath = Bundle.main.executableURL?.path
@@ -62,8 +63,40 @@ public extension Doctor {
     /// `WispritIMClient.ping` uses generation 0, which the gate can never open a
     /// session for.
     static func gatherLiveTyping(into facts: inout DoctorFacts) {
-        gatherInputSources(into: &facts)
-        gatherBridge(into: &facts)
+        let sources = gatherInputSources(into: &facts)
+        gatherBridge(into: &facts, after: sources)
+    }
+
+    /// The whole Live Typing probe from a GUI process, each half on the thread
+    /// it needs, in the only order that works.
+    ///
+    /// One entry point rather than two calls the caller has to sequence itself:
+    /// the input-source read must be on the main thread (see
+    /// `gatherInputSources`) while the bridge ping must *not* be, because its
+    /// one-second ceiling would freeze the pill mid-utterance. Getting either
+    /// half wrong is silent — a checklist that reports Live Typing unreachable,
+    /// or a stalled main thread — so neither is left to a comment.
+    static func gatheringLiveTyping(_ base: DoctorFacts) async -> DoctorFacts {
+        var probed = await MainActor.run { () -> (DoctorFacts, LiveTypingSources) in
+            var onMain = base
+            let sources = gatherInputSources(into: &onMain)
+            return (onMain, sources)
+        }
+        gatherBridge(into: &probed.0, after: probed.1)
+        return probed.0
+    }
+
+    /// What the input-source half found, and the only way to ask for the bridge
+    /// half.
+    ///
+    /// The ping is meaningless before the input-source read (an unregistered
+    /// input method is never pinged), and that used to be a doc comment a caller
+    /// could ignore — silently producing a checklist that reported Live Typing
+    /// unreachable. Now the ordering is in the types: nothing but
+    /// `gatherInputSources` can make one of these.
+    struct LiveTypingSources: Sendable {
+        let registered: Bool
+        fileprivate init(registered: Bool) { self.registered = registered }
     }
 
     /// The input-source database half. **Main thread only in a GUI process** —
@@ -71,7 +104,8 @@ public extension Doctor {
     /// HIToolbox once an event loop exists, and traps on any other thread.
     /// Cheap (one list copy plus a file read), so blocking the main thread on it
     /// costs nothing.
-    static func gatherInputSources(into facts: inout DoctorFacts) {
+    @discardableResult
+    static func gatherInputSources(into facts: inout DoctorFacts) -> LiveTypingSources {
         facts.liveTypingEnabled = LiveTypingSettings.isEnabled(Settings.load())
 
         let staged = IMStagedBundle.url
@@ -85,16 +119,18 @@ public extension Doctor {
         if let plist = InputSourceProbe.installedInfoPlist() {
             facts.imPlistViolations = IMBundleTemplate.violations(in: plist)
         }
+
+        return LiveTypingSources(registered: facts.imStatus.registered)
     }
 
     /// The liveness half: one round trip with a 1 s ceiling. Thread-agnostic,
     /// and deliberately kept OFF the main thread by the window — a second of
     /// main-thread stall would freeze the pill mid-utterance.
     ///
-    /// Requires `gatherInputSources` to have run first: an unregistered input
-    /// method is never pinged.
-    static func gatherBridge(into facts: inout DoctorFacts) {
-        guard !LiveTypingEnvironment.isDisabled, facts.imStatus.registered else { return }
+    /// Takes the input-source result rather than re-reading `facts`, so the
+    /// order dependency is a compiler error instead of a quiet wrong answer.
+    static func gatherBridge(into facts: inout DoctorFacts, after sources: LiveTypingSources) {
+        guard !LiveTypingEnvironment.isDisabled, sources.registered else { return }
         let client = WispritIMClient(onEvent: { _ in })
         facts.imReachable = client.ping(timeout: 1.0) != nil
         client.invalidate()

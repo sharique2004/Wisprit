@@ -50,8 +50,11 @@ struct SettingsView: View {
             Section {
                 Toggle("Live Typing (types into the field as you speak)",
                        isOn: bind(model.liveTypingEnabled, model.setLiveTypingEnabled))
-                    .disabled(!liveTypingReady)
-                if !liveTypingReady {
+                    .disabled(!liveTypingInstalled)
+                Text(SetupChecklist.liveTypingPerAppNote)
+                    .font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if !liveTypingInstalled {
                     HStack(spacing: 10) {
                         Text(liveTypingDetail)
                             .font(.caption).foregroundStyle(.secondary)
@@ -59,6 +62,22 @@ struct SettingsView: View {
                         Spacer()
                         Button("Enable Live Typing…") { model.fix(.enableLiveTyping) }
                             .controlSize(.small)
+                    }
+                }
+                // What the ladder has actually learned on this machine, so the
+                // sentence above stops being an abstraction the moment it has a
+                // real example.
+                if !model.liveTypingFallbacks.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Apps where Wisprit falls back to pasting")
+                            .font(.caption).fontWeight(.semibold)
+                        ForEach(model.liveTypingFallbacks) { verdict in
+                            Text("\(verdict.displayName) — \(verdict.behaviour)")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text("Noticed while you dictated. The list starts empty each "
+                             + "time Wisprit launches.")
+                            .font(.caption2).foregroundStyle(.tertiary)
                     }
                 }
             } header: {
@@ -141,7 +160,10 @@ struct SettingsView: View {
         model.items.first { $0.id == SetupChecklist.liveTypingID }
     }
 
-    private var liveTypingReady: Bool { liveTypingItem?.isSatisfied ?? false }
+    /// Installed and working — deliberately NOT `isSatisfied`, which also
+    /// requires the switch to be on. Reading satisfaction here disabled the very
+    /// toggle that turns it on.
+    private var liveTypingInstalled: Bool { liveTypingItem?.mark == .ok }
 
     private var liveTypingDetail: String {
         liveTypingItem?.detail ?? "Checking the input method…"

@@ -75,7 +75,14 @@ public enum GlobeKeySettings {
 
     /// Read the live value. Read-only: Wisprit never writes another app's
     /// preferences — the user changes this in System Settings, we only report.
+    ///
+    /// The synchronize is not optional. cfprefsd hands a long-lived process its
+    /// cached copy of another domain, so without it a user who fixes "Press 🌐
+    /// key to" while the wizard is open watches the step insist it is still
+    /// wrong for the rest of the session — the exact you-already-did-that trap
+    /// this check exists to prevent.
     public static func current() -> GlobeKeyUsage {
+        CFPreferencesAppSynchronize(domain as CFString)
         let value = CFPreferencesCopyAppValue(key as CFString, domain as CFString)
         guard let number = value as? NSNumber else { return GlobeKeyUsage.from(rawValue: nil) }
         return GlobeKeyUsage.from(rawValue: number.intValue)

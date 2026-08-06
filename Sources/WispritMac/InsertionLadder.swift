@@ -162,6 +162,41 @@ public enum InsertionLadder {
     }
 }
 
+/// One app's learned delivery verdict, in a shape the window can render.
+///
+/// Deliberately not `BundleCapabilityCache.Entry`: a view has no use for the
+/// timestamp, and a value type with no reference to the cache is what lets the
+/// list cross into the UI without carrying the lock with it.
+public struct BundleVerdict: Sendable, Equatable, Identifiable {
+    public var bundleID: String
+    public var tier: IMDeliveryTier
+    public var reason: String
+
+    public var id: String { bundleID }
+
+    public init(bundleID: String, tier: IMDeliveryTier, reason: String = "") {
+        self.bundleID = bundleID
+        self.tier = tier
+        self.reason = reason
+    }
+
+    /// The last path component of a bundle id is the closest thing to an app
+    /// name available without asking LaunchServices — "com.microsoft.VSCode"
+    /// reads as "VSCode".
+    public var displayName: String {
+        bundleID.split(separator: ".").last.map(String.init) ?? bundleID
+    }
+
+    /// What actually happens in this app now, in the user's terms.
+    public var behaviour: String {
+        switch tier {
+        case .markedStreaming: return "types as you speak"
+        case .commitOnly: return "types in chunks, without the live preview"
+        case .unsupported: return "pastes the finished text at the end"
+        }
+    }
+}
+
 /// Per-bundle-id memory of what the input method managed to do in each app.
 ///
 /// Monotone by design: a verdict only ever gets worse within one launch. An app
@@ -198,6 +233,20 @@ public final class BundleCapabilityCache: @unchecked Sendable {
     public func entry(for bundleID: String) -> Entry? {
         lock.lock(); defer { lock.unlock() }
         return entries[bundleID]
+    }
+
+    /// Every app the ladder has learned cannot take live text, newest first.
+    ///
+    /// Read-only, and the reason it exists is honesty: the window used to promise
+    /// "types into the field as you speak" unconditionally, while this cache was
+    /// quietly recording the apps where that had already stopped being true. The
+    /// user who dictated into one of them concluded the feature was broken.
+    public func downgraded() -> [BundleVerdict] {
+        lock.lock(); defer { lock.unlock() }
+        return entries
+            .filter { $0.value.tier != .markedStreaming }
+            .sorted { $0.value.updatedAt > $1.value.updatedAt }
+            .map { BundleVerdict(bundleID: $0.key, tier: $0.value.tier, reason: $0.value.reason) }
     }
 
     /// Record an observation. Never promotes: the stored verdict is the worst one

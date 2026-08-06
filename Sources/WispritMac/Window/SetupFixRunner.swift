@@ -70,14 +70,31 @@ public struct SetupFixRunner {
 /// outlive the process asking for it.
 public enum AppRelaunch {
 
-    /// Seconds the helper waits before relaunching — long enough for
-    /// `terminate()` to release the flock and for AppKit to finish quitting.
-    public static let delaySeconds = 1
+    /// How long the helper is willing to wait for this process to go away, in
+    /// 100 ms polls. Ten seconds is far past any real teardown (a FoundationModels
+    /// session, an in-flight utterance, `liveTyping.shutdown()`); past it the
+    /// helper opens anyway, because leaving the user with nothing running is
+    /// worse than a reopen that lands on a still-live instance.
+    public static let maxWaitTicks = 100
 
-    /// The shell the helper runs. Exposed so the quoting is testable without
-    /// actually restarting anything.
-    public static func helperCommand(bundlePath: String, delay: Int = delaySeconds) -> String {
-        "sleep \(delay); /usr/bin/open \(shellQuoted(bundlePath))"
+    /// The shell the helper runs.
+    ///
+    /// It waits on the actual condition — this pid exiting, which is what
+    /// releases the fcntl flock — rather than on a clock. The fixed `sleep 1` it
+    /// replaces was a race: a quit that took longer than a second let `open`
+    /// reach the still-running instance, LaunchServices turned it into a reopen
+    /// instead of a launch, and then Wisprit finished quitting. That leaves
+    /// nothing running, from the one button whose whole purpose is recovering a
+    /// broken Input Monitoring grant.
+    ///
+    /// Exposed so the quoting, the bound and the wait condition are testable
+    /// without actually restarting anything.
+    public static func helperCommand(bundlePath: String,
+                                     pid: Int32,
+                                     maxTicks: Int = maxWaitTicks) -> String {
+        "i=0; while kill -0 \(pid) 2>/dev/null && [ $i -lt \(maxTicks) ]; "
+            + "do sleep 0.1; i=$((i+1)); done; "
+            + "/usr/bin/open \(shellQuoted(bundlePath))"
     }
 
     static func shellQuoted(_ path: String) -> String {
@@ -88,10 +105,11 @@ public enum AppRelaunch {
     /// false when the helper could not be spawned — in that case the caller must
     /// NOT quit, or the user is left with nothing running.
     @discardableResult
-    public static func spawnHelper(bundlePath: String = Bundle.main.bundleURL.path) -> Bool {
+    public static func spawnHelper(bundlePath: String = Bundle.main.bundleURL.path,
+                                   pid: Int32 = ProcessInfo.processInfo.processIdentifier) -> Bool {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/sh")
-        process.arguments = ["-c", helperCommand(bundlePath: bundlePath)]
+        process.arguments = ["-c", helperCommand(bundlePath: bundlePath, pid: pid)]
         do {
             try process.run()
             return true

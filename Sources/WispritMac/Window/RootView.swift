@@ -24,7 +24,12 @@ struct RootView: View {
             detail
                 .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
-        .navigationTitle(model.selectedTab.title)
+        // The window's identity is the app, not the page. `.navigationTitle`
+        // alone overrode `window.title`, so Mission Control, the Window menu and
+        // ⌘-Tab all offered the user a window called "Status" when they were
+        // looking for one called "Wisprit".
+        .navigationTitle("Wisprit")
+        .navigationSubtitle(model.selectedTab.title)
         .sheet(isPresented: onboardingPresented) {
             OnboardingView(model: model)
         }

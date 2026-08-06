@@ -169,6 +169,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
             dictionary: DictionaryEditor(store: dictionary),
             ports: AppController.makeWindowPorts(history: history,
                                                  settings: settings,
+                                                 tierCache: tierCache,
                                                  fix: { [weak self] kind in
                                                      self?.runFix(kind)
                                                  }))
@@ -179,9 +180,14 @@ public final class AppController: NSObject, NSApplicationDelegate {
         session.onStateChange = { state in
             WispritUI.callOnMain {
                 statusMenu.update(stateNamed: state.rawValue)
-                // The window's "try a dictation" step needs proof that the whole
-                // chain ran, and INSERTING is that proof — it survives history
-                // being switched off, which a history poll would not.
+                // The window's 2-second timer stops for the duration of an
+                // utterance. Everything it polls shares the main thread with the
+                // hotkey tap, the pill and the live-typing stream, and the Try-it
+                // card asks the user to dictate with the window open.
+                windowModel.noteSessionState(state)
+                // The "try a dictation" step needs proof that the whole chain
+                // ran, and INSERTING is that proof — it survives history being
+                // switched off, which a history poll would not.
                 if state == .inserting { windowModel.noteDictationObserved() }
             }
         }
@@ -191,29 +197,25 @@ public final class AppController: NSObject, NSApplicationDelegate {
     /// never sees the controller (and so tests can build it with fakes).
     private static func makeWindowPorts(history: History,
                                         settings: Settings,
+                                        tierCache: BundleCapabilityCache,
                                         fix: @escaping (SetupFixKind) -> Void)
         -> WispritWindowModel.Ports {
         WispritWindowModel.Ports(
             fullProbe: {
-                // Three hops on purpose. The speech/model probes are slow and
-                // must not run on the main thread; `TISCreateInputSourceList`
-                // traps if it is NOT on the main thread once the app has an
-                // event loop; and the bridge ping can stall for a second, which
-                // would freeze the pill if it happened on main.
+                // Two hops on purpose: the speech/model probes are slow and must
+                // not run on the main thread, and the Live Typing probe has to
+                // straddle it (main for the input-source read, off it for the
+                // bridge ping). `gatheringLiveTyping` owns that split so the
+                // order and the threads are not this call site's to remember.
                 let base = await Doctor.gather(locale: settings.locale, liveTyping: false)
-                var facts = await MainActor.run {
-                    var onMain = base
-                    Doctor.gatherInputSources(into: &onMain)
-                    return onMain
-                }
-                Doctor.gatherBridge(into: &facts)
-                return facts
+                return await Doctor.gatheringLiveTyping(base)
             },
             fastProbe: { Doctor.refreshingPermissions($0) },
             globeKey: { GlobeKeySettings.current() },
             recents: { history.recent(limit: $0) },
             purgeHistory: { history.purge() },
             copy: { StatusMenu.copyToPasteboard($0) },
+            liveTypingFallbacks: { tierCache.downgraded() },
             performFix: fix)
     }
 

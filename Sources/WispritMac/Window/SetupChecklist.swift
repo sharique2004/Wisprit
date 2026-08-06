@@ -176,6 +176,20 @@ public enum SetupChecklist {
         "macOS applies Input Monitoring only when an app launches. After you switch "
         + "Wisprit on in the list, quit and reopen it — the button below does both."
 
+    /// Live Typing is per-app, and saying so is not a footnote.
+    ///
+    /// `InsertionLadder` keeps a per-bundle delivery tier and downgrades
+    /// imStreaming → imCommit → paste the moment an app refuses marked text;
+    /// terminals never get the streaming rung at all. Every string that
+    /// described the feature promised streaming unconditionally, so a user who
+    /// switched it on, dictated into Terminal or an Electron field, and saw
+    /// paste-at-the-end concluded the feature — or Wisprit — was broken. That
+    /// invisible fallback is the exact confusion this window exists to end.
+    public static let liveTypingPerAppNote =
+        "Some apps (terminals, and some browser and Electron text fields) don't "
+        + "accept live text. Wisprit notices and quietly pastes at the end there "
+        + "instead — nothing is lost either way."
+
     /// The plain-language banner for a transient condition that no permission
     /// can fix and no checklist row should nag about once it clears.
     ///
@@ -351,7 +365,7 @@ public enum SetupChecklist {
                   + "in one go when you let the key go. Turn it on to watch the "
                   + "words arrive as you speak."
                 : "Optional. Types words into the field as you speak instead of "
-                  + "pasting them all at the end.",
+                  + "pasting them all at the end. " + liveTypingPerAppNote,
             detail: liveDetail,
             fix: (installed && !switchedOff) ? .none : .enableLiveTyping,
             fixTitle: (installed && !switchedOff)

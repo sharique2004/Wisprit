@@ -66,6 +66,17 @@ final class WindowModelTests: XCTestCase {
                 performFix: onFix))
     }
 
+    /// Everything the window polls now runs on a detached task and publishes
+    /// back on the main actor, so a synchronous assert straight after the call
+    /// would race it.
+    private func settle(_ condition: @MainActor () -> Bool) async {
+        var attempts = 0
+        while !condition(), attempts < 300 {
+            attempts += 1
+            try? await Task.sleep(nanoseconds: 2_000_000)
+        }
+    }
+
     // MARK: - probing
 
     func testHeroStaysCheckingUntilTheFirstProbeLands() async {
@@ -110,20 +121,54 @@ final class WindowModelTests: XCTestCase {
         await model.refreshFull()
         XCTAssertEqual(model.summary.hero, .needsSetup(blocking: 1))
 
-        model.refreshFast()
+        await model.refreshFast()
 
         XCTAssertEqual(model.summary.hero, .ready)
     }
 
-    func testTheFastProbeIsInertBeforeTheFirstFullProbe() {
+    func testTheFastProbeIsInertBeforeTheFirstFullProbe() async {
         let counter = ProbeCounter()
         let model = WispritWindowModel(
             settings: settings,
             dictionary: DictionaryEditor(store: DictionaryStore(
                 path: root.appendingPathComponent("dictionary.json"))),
             ports: WispritWindowModel.Ports(fastProbe: { counter.bump(); return $0 }))
-        model.refreshFast()
+        await model.refreshFast()
         XCTAssertEqual(counter.count, 0, "there is nothing to patch yet")
+    }
+
+    /// The window must add no main-thread work while the key is held: the hotkey
+    /// tap, the pill and the live-typing stream all run there, and the Try-it
+    /// card asks the user to dictate with this window open.
+    func testTheTimerStopsForTheDurationOfADictation() async {
+        let model = makeModel()
+        await model.refreshFull()
+        model.windowDidOpen()
+        XCTAssertTrue(model.isPolling)
+
+        model.noteSessionState(.recording)
+        XCTAssertFalse(model.isPolling, "nothing polls while the key is down")
+
+        model.noteSessionState(.finalizing)
+        XCTAssertFalse(model.isPolling)
+
+        model.noteSessionState(.idle)
+        XCTAssertTrue(model.isPolling, "and it comes back on its own")
+        model.stopPolling()
+    }
+
+    /// A closed window has nothing to keep up to date, so the end of a dictation
+    /// must not quietly restart the timer behind it.
+    func testAClosedWindowDoesNotResumePollingAfterADictation() async {
+        let model = makeModel()
+        await model.refreshFull()
+        model.windowDidOpen()
+        model.noteSessionState(.recording)
+        model.windowDidClose()
+
+        model.noteSessionState(.idle)
+
+        XCTAssertFalse(model.isPolling)
     }
 
     // MARK: - fixes
@@ -241,13 +286,14 @@ final class WindowModelTests: XCTestCase {
 
     // MARK: - history + dictation proof
 
-    func testRecentsFeedTheTryItProof() {
+    func testRecentsFeedTheTryItProof() async {
         let now = Date().timeIntervalSince1970
         let model = makeModel(recents: [
             HistoryEntry(id: 2, ts: now, text: "hello there", engine: "apple_live", durationMs: 320),
         ])
         model.windowDidOpen()
         model.stopPolling()
+        await settle { model.recents.count == 1 }
 
         // The baseline is the newest entry at open, so an already-present
         // transcript is not mistaken for one the user just spoke.
@@ -256,6 +302,110 @@ final class WindowModelTests: XCTestCase {
 
         model.noteDictationObserved()
         XCTAssertTrue(model.didDictate)
+    }
+
+    /// Reopening the window used to wipe the green "Dictation is working." line
+    /// while the transcript that proved it was still listed underneath — and it
+    /// silently un-proved the wizard's try-it step with it.
+    func testReopeningTheWindowKeepsAProvenDictationProven() async {
+        let model = makeModel()
+        model.windowDidOpen()
+        model.stopPolling()
+        model.noteDictationObserved()
+        XCTAssertTrue(model.didDictate)
+
+        model.windowDidClose()
+        model.windowDidOpen()
+        model.stopPolling()
+
+        XCTAssertTrue(model.didDictate, "closing a window does not un-prove anything")
+    }
+
+    /// Re-running the setup guide from the top IS a request to see it work
+    /// again, so that one does re-arm the proof.
+    func testRerunningTheSetupGuideAsksForAFreshDictation() async {
+        let model = makeModel()
+        await model.refreshFull()
+        model.windowDidOpen()
+        model.stopPolling()
+        model.noteDictationObserved()
+
+        model.beginOnboarding(resuming: false)
+
+        XCTAssertFalse(model.didDictate)
+        XCTAssertEqual(model.onboardingStep, .welcome)
+    }
+
+    // MARK: - the History page
+
+    /// The page called "History" showed twenty rows while Purge deleted every
+    /// one of the thousand the store keeps.
+    func testHistoryPagesInsteadOfSilentlyStoppingAtThePreviewLimit() async {
+        let rows = (0..<120).map {
+            HistoryEntry(id: Int64(120 - $0), ts: Double(120 - $0),
+                         text: "line \($0)", engine: "apple_live", durationMs: nil)
+        }
+        let model = makeModel(recents: rows)
+        model.refreshRecents()
+        model.loadHistory(reset: true)
+        await settle { model.history.count == WispritWindowModel.historyPageSize }
+
+        XCTAssertEqual(model.history.count, WispritWindowModel.historyPageSize)
+        XCTAssertTrue(model.historyHasMore)
+        await settle { model.recents.count == WispritWindowModel.recentsPreviewLimit }
+        XCTAssertEqual(model.recents.count, WispritWindowModel.recentsPreviewLimit,
+                       "the Status preview keeps its own, much smaller limit")
+
+        model.loadMoreHistory()
+        await settle { model.history.count == WispritWindowModel.historyPageSize * 2 }
+        XCTAssertEqual(model.history.count, WispritWindowModel.historyPageSize * 2)
+
+        model.loadMoreHistory()
+        await settle { model.history.count == 120 }
+        XCTAssertEqual(model.history.count, 120)
+        XCTAssertFalse(model.historyHasMore, "the list ended because the history did")
+    }
+
+    /// "This cannot be undone" is fine; "20 entries" when it deletes 1000 is not.
+    func testThePurgeWarningNeverClaimsACountItCannotSee() async {
+        let rows = (0..<120).map {
+            HistoryEntry(id: Int64(120 - $0), ts: Double(120 - $0),
+                         text: "line \($0)", engine: "apple_live", durationMs: nil)
+        }
+        let model = makeModel(recents: rows)
+        model.loadHistory(reset: true)
+        await settle { model.history.count == WispritWindowModel.historyPageSize }
+
+        XCTAssertTrue(model.historyDeletionWarning.contains("older than the 50 listed here"))
+        XCTAssertFalse(model.historyDeletionWarning.contains("All 50"))
+
+        model.loadMoreHistory()
+        await settle { model.history.count == WispritWindowModel.historyPageSize * 2 }
+        model.loadMoreHistory()
+        await settle { model.history.count == 120 }
+        XCTAssertTrue(model.historyDeletionWarning.contains("All 120 saved transcripts"))
+    }
+
+    /// The ladder already knows which apps refuse live text; the window has to
+    /// stop promising streaming everywhere.
+    func testTheLiveTypingFallbackListReachesTheWindow() async {
+        let store = DictionaryStore(path: root.appendingPathComponent("dictionary.json"))
+        let model = WispritWindowModel(
+            settings: settings,
+            dictionary: DictionaryEditor(store: store),
+            ports: WispritWindowModel.Ports(
+                fullProbe: { [snapshot = facts()] in snapshot },
+                liveTypingFallbacks: {
+                    [BundleVerdict(bundleID: "com.apple.Terminal", tier: .unsupported)]
+                }))
+
+        await model.refreshFull()
+
+        XCTAssertEqual(model.liveTypingFallbacks.map(\.displayName), ["Terminal"])
+        XCTAssertEqual(model.liveTypingFallbacks.first?.behaviour,
+                       "pastes the finished text at the end")
+        XCTAssertTrue(model.items.first { $0.id == SetupChecklist.liveTypingID }?
+            .summary.contains("quietly pastes at the end") ?? false)
     }
 
     // MARK: - onboarding
@@ -312,14 +462,27 @@ final class WindowModelTests: XCTestCase {
                        "a late probe must not yank the user back mid-page")
     }
 
-    func testOnboardingClosesItselfOnceEverythingIsSatisfied() async {
+    /// The wizard used to dismiss itself on the first tick where everything was
+    /// satisfied, so an already-healthy machine got a panel that appeared and
+    /// vanished — no "you're set up" anywhere, which reads as a glitch to
+    /// exactly the audience this was built for.
+    func testOnboardingLandsOnACompletionPageRatherThanVanishing() async {
         let model = makeModel()
         await model.refreshFull()
         model.beginOnboarding()
         model.acknowledgeWelcome()
         model.noteDictationObserved()
 
-        XCTAssertFalse(model.isOnboarding, "nothing left to ask about")
+        XCTAssertTrue(model.isOnboarding, "the user has not seen a finish line yet")
+        XCTAssertEqual(model.onboardingStep, OnboardingStep.allCases.last)
+        XCTAssertTrue(model.isOnboardingComplete)
+        XCTAssertFalse(Settings(path: settings.configPath)
+            .bool(OnboardingSettings.completedKey, or: false),
+                       "completion is what the Finish button writes, not a probe")
+
+        model.finishOnboarding()
+
+        XCTAssertFalse(model.isOnboarding)
         XCTAssertTrue(Settings(path: settings.configPath)
             .bool(OnboardingSettings.completedKey, or: false))
     }
