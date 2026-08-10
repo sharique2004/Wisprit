@@ -194,12 +194,18 @@ final class FakeInserter: InsertPort, @unchecked Sendable {
     /// all zeroes.
     var reconcileDepthAtInsert: [Int] = []
     var asr: FakeAsr?
+    /// The session's parked-work label at each insert. A retro edit is planned
+    /// seconds after this moment and applied later still, so this stays all nils
+    /// — the other half of "nothing off-path runs before the text lands".
+    var deferredAtInsert: [String?] = []
+    var deferredLabel: (@Sendable () -> String?)?
 
     func insert(_ text: String) -> InsertResult {
         lock.lock()
         inserted.append(text)
         historyDepthAtInsert.append(history?.addedCount ?? -1)
         reconcileDepthAtInsert.append(asr?.reconcileTally ?? -1)
+        deferredAtInsert.append(deferredLabel?())
         let result = self.result
         lock.unlock()
         return result
@@ -278,6 +284,10 @@ final class FakeVocabulary: VocabularyPort, @unchecked Sendable {
     private(set) var learned: [LearnedTerm] = []
     private(set) var pending: [(term: String, observation: String)] = []
     private(set) var uses: [String] = []
+    /// Canonical terms the dictionary already holds, matched case-insensitively
+    /// like `DictionaryStore.isKnownTerm`. Empty by default, so the retro
+    /// fallback stays inert unless a test says otherwise.
+    var known: Set<String> = []
 
     @discardableResult
     func maybeReload() -> Bool { lock.lock(); reloadCount += 1; lock.unlock(); return false }
@@ -286,6 +296,11 @@ final class FakeVocabulary: VocabularyPort, @unchecked Sendable {
         lock.lock(); pending.append((term, observation)); lock.unlock()
     }
     func recordUse(term: String) { lock.lock(); uses.append(term); lock.unlock() }
+    func isKnownTerm(_ word: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let needle = word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return known.contains { $0.lowercased() == needle }
+    }
 }
 
 final class FakeGate: RecordingGate, @unchecked Sendable {

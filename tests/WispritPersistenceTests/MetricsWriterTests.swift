@@ -121,7 +121,8 @@ final class MetricsWriterTests: XCTestCase {
             postMs: 4.0, insertMs: 5.0, outcome: "paste", chars: 6,
             releaseToTextMs: 7.0, aiMs: 8.0, ai: "applied",
             emptyReason: "silent", peakLevel: 0.5, audioMs: 9.0,
-            rawChars: 10, refineDelta: 11)
+            rawChars: 10, refineDelta: 11,
+            vocabMs: 12.0, vocabHits: 13, vocabDelta: 1, applied: false)
         guard case .object(let object) = try WispritJSON.parse(record.jsonLine()) else {
             return XCTFail("not an object")
         }
@@ -129,7 +130,47 @@ final class MetricsWriterTests: XCTestCase {
             "ts", "held_ms", "engine", "finalize_ms", "timed_out", "post_ms",
             "insert_ms", "outcome", "chars", "release_to_text_ms", "ai_ms", "ai",
             "empty_reason", "peak_level", "audio_ms", "raw_chars", "refine_delta",
+            "vocab_ms", "vocab_hits", "vocab_delta", "applied",
         ])
+    }
+
+    // MARK: the `vocab_retro` deviation row
+
+    func testVocabRetroRowMatchesItsGoldenLine() {
+        let record = MetricsRecord(
+            ts: 1786399512.204418, heldMs: 0, engine: "apple_dictation", finalizeMs: 0,
+            timedOut: false, postMs: 0, insertMs: 0, outcome: "vocab_retro", chars: 0,
+            vocabMs: 1243.62, vocabHits: 2, vocabDelta: 1, applied: true)
+        XCTAssertEqual(record.jsonLine(), Golden.metricsVocabRetroRow)
+    }
+
+    /// The additive promise again, for the four newest keys: an utterance row is
+    /// byte-identical to what the previous build wrote.
+    func testAnUtteranceRowNeverCarriesTheVocabFields() {
+        let line = MetricsRecord(
+            ts: 1785872035.681684, heldMs: 1468.75, engine: "apple_live",
+            finalizeMs: 1500.9, timedOut: false, postMs: 0.0, insertMs: 0.0,
+            outcome: "empty", chars: 0).jsonLine()
+        XCTAssertEqual(line, Golden.metricsLegacyEmptyRow)
+        for key in ["vocab_ms", "vocab_hits", "vocab_delta", "applied"] {
+            XCTAssertFalse(line.contains(key), "\(key) must be omitted, not null")
+        }
+    }
+
+    func testVocabRetroRowsRideTheSameStreamAsUtteranceRows() throws {
+        let writer = MetricsWriter(path: path)
+        writer.write(MetricsRecord(
+            ts: 1786399511.0, heldMs: 2153.61, engine: "apple_live", finalizeMs: 118.42,
+            timedOut: false, postMs: 0.5, insertMs: 12.0, outcome: "im_streaming", chars: 43))
+        writer.write(MetricsRecord(
+            ts: 1786399512.204418, heldMs: 0, engine: "apple_dictation", finalizeMs: 0,
+            timedOut: false, postMs: 0, insertMs: 0, outcome: "vocab_retro", chars: 0,
+            vocabMs: 1243.62, vocabHits: 2, vocabDelta: 1, applied: true))
+        let rows = writer.readAll()
+        XCTAssertEqual(rows.count, 2)
+        XCTAssertNil(rows[0]["vocab_ms"], "an utterance row never carries them")
+        XCTAssertEqual(rows[1]["applied"], .bool(true))
+        XCTAssertEqual(rows[1]["vocab_delta"], .int(1))
     }
 
     /// `peak_level` arrives as a `Float` widened to `Double`

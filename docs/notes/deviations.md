@@ -71,3 +71,23 @@ result, which is the resilience case the SPEC intended.
 - **"Polish Last with Claude" removed by product decision (permanent).**
   User directive 2026-08-05: Apple Intelligence only, zero network calls.
   Replacement is `WispritPolish` (FoundationModels, 4 modes, eval battery).
+
+## Retro-correction (Phase 3)
+
+- **A second `metrics.log` line per utterance, `outcome: "vocab_retro"`.**
+  The off-path vocabulary pass finishes 1–2.5 s after insertion, by which time
+  the utterance's own row is already on disk and `metrics.log` is append-only —
+  so `vocab_ms` / `vocab_hits` / `vocab_delta` / `applied` cannot ride it, and
+  attributing them to the *next* utterance's row would be worse than a second
+  line. This follows the `outcome: "correction"` precedent (a fourth value
+  beyond `paste|type|blocked_secure|error|empty`) and extends it in one way:
+  `correction` rows describe an utterance, `vocab_retro` rows do not. They are
+  reference-less — nothing but file order ties one to its utterance — and
+  `MetricsSummary` therefore drops them before counting anything, or a
+  `finalize_ms` of 0.0 would anchor the latency percentiles and every rate in
+  `Wisprit stats` would be diluted by roughly the success rate. Pinned by
+  `Golden.metricsVocabRetroRow` and `MetricsSummaryTests`.
+  Exactly one row is written per completed reconciliation, at the moment
+  `applied` is finally known. A plan whose deferred application is dropped
+  because the user started speaking again writes **no** row, rather than one
+  claiming `applied: false` for an edit that was never attempted.

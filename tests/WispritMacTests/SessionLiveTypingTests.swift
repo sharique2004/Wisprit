@@ -4,6 +4,7 @@ import WispritEngine
 import WispritIMProtocol
 import WispritKit
 import WispritMacInput
+import WispritPersistence
 import WispritRefine
 @testable import WispritMac
 
@@ -32,8 +33,11 @@ final class SessionLiveTypingTests: XCTestCase {
         let session: SessionController
 
         init(corrector: SpokenSpellingCorrector? = nil,
-             liveTypingEnabled: Bool = true) {
+             liveTypingEnabled: Bool = true,
+             reconcile: Bool = false,
+             vocabularyRetro: Bool = true) {
             inserter.history = history
+            inserter.asr = asr
             let peer = self.peer
             live = LiveTypingSession(
                 peer: peer,
@@ -61,13 +65,50 @@ final class SessionLiveTypingTests: XCTestCase {
                 configuration: SessionController.Configuration(
                     holdDebounceMs: { 150 },
                     levelTickInterval: nil,
-                    reconcileVocabulary: false))
+                    reconcileVocabulary: reconcile,
+                    vocabularyRetro: { vocabularyRetro }))
+            inserter.deferredLabel = { [weak session] in session?.deferredLabel }
         }
 
         func utterance(heldSeconds: Double = 1.0) {
             session.dispatch(HotkeyEvent(.press, ts: 0))
             session.dispatch(HotkeyEvent(.release, ts: heldSeconds))
         }
+
+        /// Block until the detached reconciliation has parked its plan. The pass
+        /// runs 0.5–2.5 s after insertion in reality, so there is nothing to
+        /// synchronize on but the slot it fills.
+        func waitForDeferred(file: StaticString = #filePath, line: UInt = #line) {
+            let deadline = Date().addingTimeInterval(5)
+            while session.deferredLabel != "vocab-retro" && Date() < deadline { usleep(2_000) }
+            XCTAssertEqual(session.deferredLabel, "vocab-retro",
+                           "the reconciliation never parked a plan", file: file, line: line)
+        }
+
+        /// Block until the pass has written its `vocab_retro` row.
+        func waitForVocabRow(file: StaticString = #filePath, line: UInt = #line) -> MetricsRecord? {
+            let deadline = Date().addingTimeInterval(5)
+            while Date() < deadline {
+                if let row = metrics.records.last(where: { $0.outcome == "vocab_retro" }) {
+                    return row
+                }
+                usleep(2_000)
+            }
+            XCTFail("no vocab_retro row was written", file: file, line: line)
+            return nil
+        }
+    }
+
+    /// The utterance the retro-correction tests all use: the live engine heard
+    /// "in forge", the biased pass heard the dictionary term.
+    private static let liveText = "Ping the in forge team about the migration."
+    private static let reconciledText = "Ping the InsForge team about the migration."
+
+    private func arm(_ h: Harness) {
+        h.asr.result = UtteranceResult(text: Self.liveText, engine: "apple_live", finalizeMs: 70)
+        h.asr.reconciliation = VocabularyReconciliation(
+            transcript: Self.reconciledText, termHits: ["InsForge": 1],
+            termCount: 1, elapsedMs: 1240.4)
     }
 
     // MARK: - rung 1: streaming into the field
@@ -268,6 +309,172 @@ final class SessionLiveTypingTests: XCTestCase {
         XCTAssertEqual(h.pill.notices, ["Learned Sharique"])
         XCTAssertEqual(h.inserter.inserted.count, 1)
         XCTAssertEqual(h.peer.commandNames, [])
+    }
+
+    // MARK: - vocabulary retro-correction
+
+    func testAMisheardDictionaryTermIsFixedInTheFieldAfterTheFact() {
+        let h = Harness(reconcile: true)
+        arm(h)
+
+        h.utterance()
+
+        XCTAssertEqual(h.peer.snapshot.document, Self.liveText,
+                       "the live text lands first, unchanged — nothing waits on the second engine")
+        XCTAssertEqual(h.peer.count(of: "apply_edit"), 0,
+                       "nothing retroactive happens before the text is in the field")
+
+        h.waitForDeferred()
+        XCTAssertEqual(h.peer.count(of: "apply_edit"), 0,
+                       "…nor when the plan is ready: it is parked until the machine is idle")
+
+        h.session.drainDeferred()
+
+        XCTAssertEqual(h.peer.snapshot.document, Self.reconciledText,
+                       "the word the user is looking at was corrected in place")
+        XCTAssertEqual(h.pill.notices, ["Fixed InsForge"])
+        XCTAssertTrue(h.vocabulary.learned.isEmpty,
+                      "the field was fixed, so there is nothing to fall back to learning")
+        XCTAssertTrue(h.inserter.inserted.isEmpty, "no paste, no clipboard, no keystroke")
+    }
+
+    func testTheRetroEditNeverRunsBeforeTheTextReachesTheField() {
+        // The paste rung's half of the same promise: reconciliation and the work
+        // it parks are both strictly after `inserter.insert`.
+        let h = Harness(liveTypingEnabled: false, reconcile: true)
+        arm(h)
+        h.vocabulary.known = ["InsForge"]
+
+        h.utterance()
+
+        XCTAssertEqual(h.inserter.reconcileDepthAtInsert, [0])
+        XCTAssertEqual(h.inserter.deferredAtInsert, [nil],
+                       "no work was parked when the text was delivered")
+    }
+
+    func testAPasteRungLearnsTheMisrecognitionInsteadOfEditingTheDocument() {
+        let h = Harness(liveTypingEnabled: false, reconcile: true)
+        arm(h)
+        h.vocabulary.known = ["InsForge"]
+
+        h.utterance()
+        h.waitForDeferred()
+        h.session.drainDeferred()
+
+        XCTAssertEqual(h.inserter.inserted, [Self.liveText],
+                       "the text was pasted and is no longer ours to edit")
+        XCTAssertEqual(h.vocabulary.learned,
+                       [LearnedTerm(term: "InsForge", heard: ["in forge"], source: "vocab_retro")],
+                       "the misrecognition becomes hear evidence on the term that already exists")
+        XCTAssertEqual(h.pill.notices, ["Learned InsForge"])
+    }
+
+    /// The fallback's entire safety argument. A term the dictionary does not
+    /// already hold is never created from a second engine's opinion — that is
+    /// how the three junk canonical terms got written the first time.
+    func testTheFallbackNeverCreatesACanonicalTermItOnlyAddsEvidence() {
+        let h = Harness(liveTypingEnabled: false, reconcile: true)
+        arm(h)
+        h.vocabulary.known = []
+
+        h.utterance()
+        h.waitForDeferred()
+        h.session.drainDeferred()
+
+        XCTAssertTrue(h.vocabulary.learned.isEmpty)
+        XCTAssertTrue(h.vocabulary.pending.isEmpty)
+        XCTAssertTrue(h.pill.notices.isEmpty, "nothing was learned, so nothing is claimed")
+    }
+
+    func testTwoFixesInOneUtteranceStillFlashExactlyOneNotice() {
+        let h = Harness(reconcile: true)
+        let live = "We tested in forge then whisper it plus Monday morning with the whole team"
+        h.asr.result = UtteranceResult(text: live, engine: "apple_live", finalizeMs: 70)
+        h.asr.reconciliation = VocabularyReconciliation(
+            transcript: "We tested InsForge then Wisprit plus Monday morning with the whole team",
+            termHits: ["InsForge": 1, "Wisprit": 1], termCount: 2, elapsedMs: 900)
+
+        h.utterance()
+        h.waitForDeferred()
+        h.session.drainDeferred()
+
+        XCTAssertEqual(h.peer.snapshot.document,
+                       "We tested InsForge then Wisprit plus Monday morning with the whole team")
+        XCTAssertEqual(h.peer.count(of: "apply_edit"), 2)
+        XCTAssertEqual(h.pill.notices, ["Fixed InsForge"],
+                       "one notice per utterance, naming the first thing fixed")
+    }
+
+    func testANewUtteranceDropsAPlanThatHasNotBeenAppliedYet() {
+        let h = Harness(reconcile: true)
+        arm(h)
+
+        h.utterance()
+        h.waitForDeferred()
+
+        // The user starts talking again inside the reconcile window. The document
+        // the edit was planned against is about to stop being the current one.
+        h.session.dispatch(HotkeyEvent(.press, ts: 2))
+        h.session.dispatch(HotkeyEvent(.release, ts: 3))
+        h.session.drainDeferred()
+
+        XCTAssertEqual(h.peer.count(of: "apply_edit"), 0,
+                       "a stale plan is dropped, never applied late")
+        XCTAssertTrue(h.pill.notices.isEmpty)
+    }
+
+    func testTheSettingTurnsRetroCorrectionOffWithoutStoppingTheReconciliation() {
+        let h = Harness(reconcile: true, vocabularyRetro: false)
+        arm(h)
+
+        h.utterance()
+        let row = h.waitForVocabRow()
+
+        XCTAssertEqual(h.session.deferredLabel, nil, "nothing is planned, so nothing is parked")
+        XCTAssertEqual(h.peer.snapshot.document, Self.liveText)
+        XCTAssertEqual(h.vocabulary.uses, ["InsForge"],
+                       "the pass still runs — its usage bookkeeping is useful either way")
+        XCTAssertEqual(row?.vocabDelta, 0)
+    }
+
+    // MARK: - the vocab_retro metrics row
+
+    func testTheVocabRetroRowCarriesTheTimingHitsAndOutcome() {
+        let h = Harness(reconcile: true)
+        arm(h)
+
+        h.utterance()
+        h.waitForDeferred()
+        h.session.drainDeferred()
+        let row = h.waitForVocabRow()
+
+        XCTAssertEqual(row?.outcome, "vocab_retro")
+        XCTAssertEqual(row?.engine, "apple_dictation")
+        XCTAssertEqual(row?.vocabMs ?? -1, 1240.4, accuracy: 0.001)
+        XCTAssertEqual(row?.vocabHits, 1)
+        XCTAssertEqual(row?.vocabDelta, 1)
+        XCTAssertEqual(row?.applied, true)
+        // It is its own line, not a rewrite of the utterance's.
+        XCTAssertEqual(h.metrics.records.map(\.outcome), ["im_streaming", "vocab_retro"])
+        XCTAssertNil(h.metrics.records.first?.vocabMs,
+                     "the utterance row was on disk before the pass even started")
+    }
+
+    func testARefusedPlanStillReportsTheReconciliation() {
+        let h = Harness(reconcile: true)
+        h.asr.result = UtteranceResult(text: "Ping the InsForge team about the migration.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.asr.reconciliation = VocabularyReconciliation(
+            transcript: "Ping the InsForge team about the migration.",
+            termHits: ["InsForge": 2], termCount: 1, elapsedMs: 640)
+
+        h.utterance()
+        let row = h.waitForVocabRow()
+
+        XCTAssertEqual(row?.vocabHits, 2)
+        XCTAssertEqual(row?.vocabDelta, 0, "the planner proposed nothing")
+        XCTAssertEqual(row?.applied, false)
+        XCTAssertEqual(h.peer.count(of: "apply_edit"), 0)
     }
 
     func testSameUtteranceCorrectionNeverReachesTheInputMethod() {

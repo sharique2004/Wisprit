@@ -43,7 +43,8 @@ final class SessionControllerTests: XCTestCase {
              corrector: SpokenSpellingCorrector? = nil,
              enabled: Bool = true,
              debounceMs: Double = 150,
-             reconcile: Bool = false) {
+             reconcile: Bool = false,
+             vocabularyRetro: Bool = true) {
             inserter.history = history
             inserter.asr = asr
             session = SessionController(
@@ -65,7 +66,9 @@ final class SessionControllerTests: XCTestCase {
                     // The ticker and the reconciliation pass both spawn
                     // background work; off here so assertions stay deterministic.
                     levelTickInterval: nil,
-                    reconcileVocabulary: reconcile))
+                    reconcileVocabulary: reconcile,
+                    vocabularyRetro: { vocabularyRetro }))
+            inserter.deferredLabel = { [weak session] in session?.deferredLabel }
         }
 
         /// One complete hold: press at t=0, release at t=`heldSeconds`.
@@ -685,16 +688,104 @@ final class SessionControllerTests: XCTestCase {
 
     func testNoReconcileRunsBeforeInsertion() {
         let h = Harness(reconcile: true)
+        // A reconciliation that WOULD propose a retro edit: the ordering claim is
+        // only worth anything when there is something to have run early.
+        h.asr.result = UtteranceResult(text: "Ping the in forge team about the migration.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.asr.reconciliation = VocabularyReconciliation(
+            transcript: "Ping the InsForge team about the migration.",
+            termHits: ["InsForge": 1], termCount: 1, elapsedMs: 1100)
 
         h.utterance()
 
         XCTAssertEqual(h.inserter.reconcileDepthAtInsert, [0],
                        "the vocabulary pass costs seconds — none of it may run before the "
                        + "text reaches the field")
+        XCTAssertEqual(h.inserter.deferredAtInsert, [nil],
+                       "…and neither may anything it wants to do afterwards")
         // …but it does run, off the path, or the assertion above proves nothing.
         let deadline = Date().addingTimeInterval(5)
         while h.asr.reconcileTally == 0 && Date() < deadline { usleep(5_000) }
         XCTAssertEqual(h.asr.reconcileTally, 1)
+    }
+
+    // MARK: - vocabulary retro-correction, off the input-method rungs
+
+    /// Waits for the reconciliation to park its plan, then drains it.
+    private func drainVocabRetro(_ h: Harness, file: StaticString = #filePath, line: UInt = #line) {
+        let deadline = Date().addingTimeInterval(5)
+        while h.session.deferredLabel != "vocab-retro" && Date() < deadline { usleep(2_000) }
+        XCTAssertEqual(h.session.deferredLabel, "vocab-retro", file: file, line: line)
+        h.session.drainDeferred()
+    }
+
+    private func armRetro(_ h: Harness) {
+        h.asr.result = UtteranceResult(text: "Ping the in forge team about the migration.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.asr.reconciliation = VocabularyReconciliation(
+            transcript: "Ping the InsForge team about the migration.",
+            termHits: ["InsForge": 1], termCount: 1, elapsedMs: 1100)
+    }
+
+    /// With no live-typing port at all — the Phase-1 shape — every rung is a
+    /// paste, so the only honest thing to do with a recovered term is learn it.
+    func testWithoutAnInputMethodTheFixDegradesToLearningTheTerm() {
+        let h = Harness(reconcile: true)
+        armRetro(h)
+        h.vocabulary.known = ["InsForge"]
+
+        h.utterance()
+        drainVocabRetro(h)
+
+        XCTAssertEqual(h.inserter.inserted, ["Ping the in forge team about the migration."],
+                       "the document is left exactly as the user has it")
+        XCTAssertEqual(h.vocabulary.learned,
+                       [LearnedTerm(term: "InsForge", heard: ["in forge"], source: "vocab_retro")])
+        XCTAssertEqual(h.pill.notices, ["Learned InsForge"])
+    }
+
+    func testTheSettingSuppressesPlanningEntirely() {
+        let h = Harness(reconcile: true, vocabularyRetro: false)
+        armRetro(h)
+        h.vocabulary.known = ["InsForge"]
+
+        h.utterance()
+        let deadline = Date().addingTimeInterval(5)
+        while h.asr.reconcileTally == 0 && Date() < deadline { usleep(2_000) }
+        while h.metrics.records.count < 2 && Date() < deadline { usleep(2_000) }
+
+        XCTAssertNil(h.session.deferredLabel)
+        XCTAssertTrue(h.vocabulary.learned.isEmpty)
+        XCTAssertEqual(h.vocabulary.uses, ["InsForge"], "recordUse is not what the flag gates")
+        XCTAssertEqual(h.metrics.records.last?.vocabDelta, 0)
+    }
+
+    /// An utterance that inserted nothing has nothing in the field to correct,
+    /// however much the biased pass recovered from its audio. The pure spelling
+    /// directive — the `outcome: "correction"` branch — is that utterance.
+    func testACorrectionUtteranceWithNothingToInsertPlansNothing() {
+        let dictionary = FakeDictionary()
+        let h = Harness(corrector: SpokenSpellingCorrector(vocabulary: dictionary), reconcile: true)
+        h.refiner.transform = { RefineResult(text: $0, outcome: .applied) }
+        h.asr.reconciliation = VocabularyReconciliation(
+            transcript: "Actually, it's Sharique.", termHits: ["Sharique": 1],
+            termCount: 1, elapsedMs: 800)
+
+        h.asr.result = UtteranceResult(text: "Please ping Cherie about the migration.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.utterance()
+        h.asr.result = UtteranceResult(text: "Actually, it's S-H-A-R-I-Q-U-E.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.utterance()
+
+        let deadline = Date().addingTimeInterval(5)
+        while h.metrics.records.filter({ $0.outcome == "vocab_retro" }).count < 2
+            && Date() < deadline { usleep(2_000) }
+
+        XCTAssertTrue(h.metrics.records.contains { $0.outcome == "correction" })
+        XCTAssertEqual(h.metrics.records.filter { $0.outcome == "vocab_retro" }.map(\.vocabDelta),
+                       [0, 0], "neither pass had anything in the field to plan against")
+        XCTAssertNil(h.session.deferredLabel)
     }
 
     func testReconcileKeepsTheUtteranceItWasSpawnedFor() {

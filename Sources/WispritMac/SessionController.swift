@@ -7,6 +7,26 @@ import WispritPersistence
 import WispritPostProcess
 import WispritRefine
 
+/// The one config key retro-correction adds.
+///
+/// Read through `Settings`' generic string-keyed accessors for the same reason
+/// `LiveTypingSettings` is: `Settings.defaults` is golden-pinned, the settings
+/// file preserves keys it does not know about, and a config written by either
+/// build round-trips intact.
+public enum VocabularyRetroSettings {
+    /// `vocabulary_retro` — on by default. The reconciliation pass already runs;
+    /// this decides whether its findings are allowed to touch the document.
+    public static let enabledKey = "vocabulary_retro"
+
+    public static func isEnabled(_ settings: Settings) -> Bool {
+        settings.bool(enabledKey, or: true)
+    }
+
+    public static func setEnabled(_ settings: Settings, _ value: Bool) {
+        settings.set(enabledKey, value)
+    }
+}
+
 /// The dictation state machine — a 1:1 port of `wisprit/session.py`.
 ///
 /// Consumes `HotkeyEvent`s from the shared queue and drives one utterance
@@ -41,6 +61,12 @@ public final class SessionController: @unchecked Sendable {
         /// Run the off-path DictationTranscriber vocabulary pass after each
         /// insertion. Off in tests: it spawns a detached task.
         public var reconcileVocabulary: Bool
+        /// `vocabulary_retro` — let that pass retroactively fix a misheard
+        /// dictionary term in the field. A closure, not a value, so the toggle
+        /// takes effect on the very next utterance; the pass itself keeps
+        /// running either way, because its `recordUse` bookkeeping is useful
+        /// even when the document is left alone.
+        public var vocabularyRetro: @Sendable () -> Bool
         /// `self._events.get(timeout=0.25)` in the Python run loop.
         public var pollTimeout: TimeInterval
 
@@ -49,12 +75,14 @@ public final class SessionController: @unchecked Sendable {
                     postProcessOptions: @escaping @Sendable () -> PostProcessOptions = { PostProcessOptions() },
                     levelTickInterval: TimeInterval? = 0.05,
                     reconcileVocabulary: Bool = true,
+                    vocabularyRetro: @escaping @Sendable () -> Bool = { true },
                     pollTimeout: TimeInterval = 0.25) {
             self.holdDebounceMs = holdDebounceMs
             self.isEnabled = isEnabled
             self.postProcessOptions = postProcessOptions
             self.levelTickInterval = levelTickInterval
             self.reconcileVocabulary = reconcileVocabulary
+            self.vocabularyRetro = vocabularyRetro
             self.pollTimeout = pollTimeout
         }
     }
@@ -192,6 +220,14 @@ public final class SessionController: @unchecked Sendable {
         if let replaced {
             log.info("deferred \(replaced, privacy: .public) replaced by \(label, privacy: .public)")
         }
+    }
+
+    /// Label of the work currently parked, nil when the slot is empty. The
+    /// reconciliation that fills it lands on a detached task, so this is how a
+    /// test waits for it without sleeping on a guess.
+    var deferredLabel: String? {
+        lock.lock(); defer { lock.unlock() }
+        return deferredWork?.label
     }
 
     /// Run the parked work, but only from IDLE: an edit computed for the last
@@ -411,7 +447,10 @@ public final class SessionController: @unchecked Sendable {
             // the directive. Learn it and flash "Learned Sharique" — flashing
             // "nothing recognized" would call a successful correction a failure.
             if correction.learn != nil || correction.notice != nil {
-                completeCorrection(correction, retained: retained)
+                // Nothing was inserted, so there is nothing in the field for the
+                // vocabulary pass to correct — it still runs, for `recordUse`.
+                completeCorrection(correction, retained: retained,
+                                   inserted: "", outcome: "correction")
                 if correction.notice == nil { pill?.hide() }
                 // CONTRACT-DEVIATION: a fourth `outcome` value beyond
                 // paste|type|blocked_secure|error|empty. Logging this as
@@ -469,7 +508,12 @@ public final class SessionController: @unchecked Sendable {
 
         // Strictly off the paste path: dictionary writes and the vocabulary
         // reconciliation pass cost hundreds of ms and must never delay text.
-        completeCorrection(correction, retained: retained)
+        // `text` and `insertion.outcome` are passed by value because the retro
+        // pass needs to know what went into the field and by which rung, and by
+        // the time it finishes both may describe a different utterance.
+        completeCorrection(correction, retained: retained,
+                           inserted: insertion.ok ? text : "",
+                           outcome: insertion.outcome)
     }
 
     private func abort(reason: String) {
@@ -595,8 +639,12 @@ public final class SessionController: @unchecked Sendable {
     ///
     /// `retained` is the audio snapshotted at finalize, passed by value: the
     /// pass below can still be running when the next utterance starts, and it
-    /// must keep transcribing the one it was spawned for.
-    func completeCorrection(_ correction: CorrectionOutcome, retained: RetainedUtterance) {
+    /// must keep transcribing the one it was spawned for. `inserted` and
+    /// `outcome` travel with it for exactly the same reason — the retro pass
+    /// plans against the text THIS utterance put in the field, by the rung THIS
+    /// utterance used, and both have moved on by the time it finishes.
+    func completeCorrection(_ correction: CorrectionOutcome, retained: RetainedUtterance,
+                            inserted: String = "", outcome: String = "") {
         if let learned = correction.learn {
             if correction.learnIsPending {
                 // Quarantined: recorded, excluded from corrections and biasing
@@ -614,12 +662,111 @@ public final class SessionController: @unchecked Sendable {
         guard config.reconcileVocabulary else { return }
         let asr = self.asr
         let vocabulary = self.vocabulary
-        Task.detached(priority: .utility) {
+        let planRetro = config.vocabularyRetro() && !inserted.isEmpty
+        let onInputMethodRung = SessionController.isInputMethodRung(outcome)
+        Task.detached(priority: .utility) { [weak self] in
             guard let reconciliation = await asr.reconcileVocabulary(retained) else { return }
             for (term, hits) in reconciliation.termHits where hits > 0 {
                 vocabulary?.recordUse(term: term)
             }
+            guard let self else { return }
+            let plan = planRetro
+                ? VocabularyReconciler.plan(
+                    inserted: inserted,
+                    reconciled: reconciliation.transcript,
+                    termHits: reconciliation.termHits,
+                    knownTerm: { vocabulary?.isKnownTerm($0) ?? false })
+                : VocabularyRetroPlan()
+            self.scheduleVocabularyRetro(plan, reconciliation: reconciliation,
+                                         onInputMethodRung: onInputMethodRung)
         }
+    }
+
+    /// `metrics.log`'s `outcome` for the two rungs that can still edit what they
+    /// wrote.
+    ///
+    /// Taken from the delivery that actually happened, never re-derived at drain
+    /// time: `liveTyping.tier` is live state and by then it can already describe
+    /// a different utterance in a different app. An utterance that was pasted
+    /// must reach the learn-only fallback even if the input method has since
+    /// come back, because the text in the field is no longer ours to touch.
+    static func isInputMethodRung(_ outcome: String) -> Bool {
+        outcome == InsertionTier.imStreaming.rawValue || outcome == InsertionTier.imCommit.rawValue
+    }
+
+    /// Park the plan for the next idle moment, or — when there is nothing to
+    /// apply — close the books on it immediately.
+    private func scheduleVocabularyRetro(_ plan: VocabularyRetroPlan,
+                                         reconciliation: VocabularyReconciliation,
+                                         onInputMethodRung: Bool) {
+        let hits = reconciliation.termHits.values.reduce(0, +)
+        guard !plan.edits.isEmpty else {
+            if let refusal = plan.refusal {
+                log.info("vocab retro refused: \(refusal.rawValue, privacy: .public)")
+            }
+            writeVocabularyRetroMetrics(reconciliation: reconciliation, hits: hits,
+                                        proposed: false, applied: false)
+            return
+        }
+        enqueueDeferred("vocab-retro") { [weak self] in
+            self?.applyVocabularyRetro(plan, reconciliation: reconciliation, hits: hits,
+                                       onInputMethodRung: onInputMethodRung)
+        }
+    }
+
+    /// Drain-time half of retro-correction, on the session thread, at idle.
+    ///
+    /// Every edit is offered to the input method first and falls back to
+    /// learning when that is refused — including, unconditionally, on the paste
+    /// and type rungs, where the text has left our custody entirely. The
+    /// fallback is deliberately narrower than it looks: `isKnownTerm` gates it,
+    /// so it can only ever add a `hear` phrase to a term the user already has.
+    /// It can never invent a canonical spelling out of a machine's guess.
+    func applyVocabularyRetro(_ plan: VocabularyRetroPlan,
+                              reconciliation: VocabularyReconciliation,
+                              hits: Int,
+                              onInputMethodRung: Bool) {
+        var fixed: String?
+        var learned: String?
+        for edit in plan.edits {
+            if onInputMethodRung,
+               applyRetroEdit(target: edit.replace, replacement: edit.with) != nil {
+                if fixed == nil { fixed = edit.with }
+                continue
+            }
+            if learnVocabularyEvidence(term: edit.with, heard: edit.replace), learned == nil {
+                learned = edit.with
+            }
+        }
+        // One notice per utterance, and the truthful one: "Fixed" only when the
+        // user's document actually changed.
+        if let fixed {
+            pill?.transientNotice("Fixed \(fixed)")
+        } else if let learned {
+            pill?.transientNotice("Learned \(learned)")
+        }
+        writeVocabularyRetroMetrics(reconciliation: reconciliation, hits: hits,
+                                    proposed: true, applied: fixed != nil)
+    }
+
+    /// Record the misrecognition against a term the dictionary ALREADY has.
+    /// Returns false when it does not have it — in which case nothing at all is
+    /// written, because a canonical term created from a second engine's opinion
+    /// is exactly the pollution `LearnPlausibility` exists to prevent.
+    private func learnVocabularyEvidence(term: String, heard: String) -> Bool {
+        guard let vocabulary, vocabulary.isKnownTerm(term) else { return false }
+        vocabulary.add(LearnedTerm(term: term, heard: [heard], source: "vocab_retro"))
+        return true
+    }
+
+    /// The reference-less second line. See the note on `MetricsRecord`.
+    private func writeVocabularyRetroMetrics(reconciliation: VocabularyReconciliation,
+                                             hits: Int, proposed: Bool, applied: Bool) {
+        metrics.write(MetricsRecord(
+            heldMs: 0, engine: VocabularyChannel.engineName, finalizeMs: 0,
+            timedOut: false, postMs: 0, insertMs: 0, outcome: "vocab_retro", chars: 0,
+            vocabMs: reconciliation.elapsedMs, vocabHits: hits,
+            vocabDelta: proposed ? 1 : 0, applied: applied))
     }
 
     private func flashError(_ message: String) {
