@@ -143,7 +143,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
             history: history,
             metrics: metrics,
             refiner: RefinerPort(refiner),
-            pill: MainThreadPill(pill),
+            pill: MainThreadPill(pill, isSuppressed: { settings.pillHidden }),
             vocabulary: dictionary,
             corrections: dictionary,
             corrector: SpokenSpellingCorrector(vocabulary: dictionary),
@@ -159,7 +159,18 @@ public final class AppController: NSObject, NSApplicationDelegate {
                         leadingSpace: PostProcessOptions.LeadingSpace(
                             rawValue: settings.leadingSpace) ?? .auto)
                 },
-                levelTickInterval: settings.pillHidden ? nil : 0.05))
+                // Armed unconditionally, and suppressed live inside
+                // `MainThreadPill` instead.
+                //
+                // Reading `settings.pillHidden` HERE captured it once, at
+                // construction: every other closure in this struct re-reads the
+                // setting per utterance, but the ticker interval is a value, so
+                // "Show the floating pill" needed a relaunch to take effect —
+                // switch it back on and the pill appeared with a dead meter.
+                // The port now drops the tick when the pill is hidden, which
+                // costs one bool read on the `pill-level` thread and no main
+                // thread work at all, and the toggle is live in both directions.
+                levelTickInterval: 0.05))
 
         super.init()
 
@@ -170,6 +181,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
             ports: AppController.makeWindowPorts(history: history,
                                                  settings: settings,
                                                  tierCache: tierCache,
+                                                 paste: { [weak self] text in
+                                                     self?.pasteFromWindow(text)
+                                                 },
                                                  fix: { [weak self] kind in
                                                      self?.runFix(kind)
                                                  }))
@@ -198,6 +212,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
     private static func makeWindowPorts(history: History,
                                         settings: Settings,
                                         tierCache: BundleCapabilityCache,
+                                        paste: @escaping (String) -> Void,
                                         fix: @escaping (SetupFixKind) -> Void)
         -> WispritWindowModel.Ports {
         WispritWindowModel.Ports(
@@ -215,8 +230,33 @@ public final class AppController: NSObject, NSApplicationDelegate {
             recents: { history.recent(limit: $0) },
             purgeHistory: { history.purge() },
             copy: { StatusMenu.copyToPasteboard($0) },
+            pasteAtCursor: paste,
             liveTypingFallbacks: { tierCache.downgraded() },
             performFix: fix)
+    }
+
+    /// Home's per-row "paste at cursor" (§3.3).
+    ///
+    /// Two things this cannot skip. The Hub window is key when the button is
+    /// clicked, so the app has to hand the front back before anything is
+    /// posted — `deactivate()` (never `hide`, which would take the pill down
+    /// with it, see `MainWindowController.windowWillClose`) — and the settle is
+    /// the same measured 0.25 s the window uses in the other direction. And the
+    /// insert itself sleeps for the clipboard-restore delay (500 ms by
+    /// default), so it runs off the main thread, which is carrying the hotkey
+    /// tap and the live-typing stream.
+    ///
+    /// `WispritWindowModel.pasteAtCursor` refuses mid-utterance, so this never
+    /// races the session's own clipboard swap.
+    private func pasteFromWindow(_ text: String) {
+        guard !text.isEmpty else { return }
+        let inserter = SettingsInserterPort(inserter: Inserter(), settings: settings)
+        NSApp.deactivate()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
+            DispatchQueue.global(qos: .userInitiated).async {
+                _ = inserter.insert(text)
+            }
+        }
     }
 
     /// Perform one checklist fix. `enableLiveTyping` and the relaunch are the
@@ -265,7 +305,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
     /// Show the main window. This is what a Dock click, a Finder open and the
     /// menu's first row all end up calling.
-    public func openWindow(tab: WispritWindowModel.Tab = .status) {
+    public func openWindow(tab: WispritWindowModel.Tab = .setup) {
         windowController.show(tab: tab)
     }
 
@@ -306,7 +346,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
     private func surfaceInputMonitoringProblem() {
         guard !inputMonitoringSurfaced else { return }
         inputMonitoringSurfaced = true
-        openWindow(tab: .status)
+        openWindow(tab: .setup)
     }
 
     /// Everything `app.py: main()` does between the lock and `NSApp.run()`.
@@ -400,6 +440,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
             self.polishUnavailableReason = await polisher.unavailableReason
         }
         refreshLiveTypingStatus()
+        // A permission granted in System Settings has to clear the menu-bar
+        // warning icon without waiting for the user to open the menu.
+        statusMenu?.refreshIcon()
     }
 
     /// Cheap enough to re-read on every menu open: one `TISCreateInputSourceList`
@@ -430,6 +473,16 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
     // MARK: - menu wiring
 
+    /// Something on the checklist is stopping dictation outright.
+    ///
+    /// Read from the window model's last probe rather than probed here: the menu
+    /// samples this on every state change and every open, and a TCC read per
+    /// sample would put syscalls on the main thread while the key is held. The
+    /// model already re-probes on its own 2-second cadence.
+    private var needsSetup: Bool {
+        windowModel?.items.contains(where: \.isBlocking) ?? false
+    }
+
     private func makeMenuActions() -> StatusMenu.Actions {
         StatusMenu.Actions(
             state: { [weak self] in
@@ -445,9 +498,16 @@ public final class AppController: NSObject, NSApplicationDelegate {
                     polishUnavailableReason: self.polishUnavailableReason,
                     polishModes: PolishMenu.modeItems,
                     liveTyping: self.liveTypingStatus,
-                    liveTypingDetail: self.liveTypingDetail)
+                    liveTypingDetail: self.liveTypingDetail,
+                    needsSetup: self.needsSetup)
             },
             openWindow: { [weak self] in self?.openWindow() },
+            openSetup: { [weak self] in self?.openWindow(tab: .setup) },
+            iconState: { [weak self] in
+                guard let self else { return StatusIconState() }
+                return StatusIconState(dictationEnabled: self.settings.enabled,
+                                       needsSetup: self.needsSetup)
+            },
             toggleDictation: { [weak self] in
                 guard let self else { return }
                 self.settings.set(SettingsKey.enabled, !self.settings.enabled)
@@ -587,7 +647,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
             // window …`, or the Input Monitoring surface during `launch`).
             // Yanking it to the Status page would undo the user's own request.
             guard !self.windowController.isVisible, model.shouldAutoOpenWindow else { return }
-            self.openWindow(tab: .status)
+            self.openWindow(tab: .setup)
             model.beginOnboarding()
         }
     }
@@ -618,21 +678,36 @@ public final class AppController: NSObject, NSApplicationDelegate {
 /// `@unchecked Sendable` box; only the main-thread block ever dereferences it.
 final class MainThreadPill: PillPort, @unchecked Sendable {
     private let pill: Pill
+    /// `pill_hidden`, read live. The 20 Hz level tick is the one pill call
+    /// frequent enough that hopping it to main only to be dropped there is
+    /// worth avoiding — and reading the setting here rather than at
+    /// construction is what makes the Settings toggle take effect without a
+    /// relaunch.
+    private let isSuppressed: @Sendable () -> Bool
 
-    init(_ pill: Pill) { self.pill = pill }
+    init(_ pill: Pill, isSuppressed: @escaping @Sendable () -> Bool = { false }) {
+        self.pill = pill
+        self.isSuppressed = isSuppressed
+    }
 
     private func onMain(_ work: @escaping @Sendable @MainActor (Pill) -> Void) {
         WispritUI.callOnMain { [self] in work(self.pill) }
     }
 
     func showRecording() { onMain { $0.showRecording() } }
-    func updateLevel(_ level: Double) { onMain { $0.updateLevel(level) } }
+    func updateLevel(_ level: Double) {
+        guard !isSuppressed() else { return }
+        onMain { $0.updateLevel(level) }
+    }
     func livePartial(_ text: String) { onMain { $0.livePartial(text) } }
     func showFinalizing() { onMain { $0.showFinalizing() } }
     func flashSuccess() { onMain { $0.flashSuccess() } }
     func flashError(_ message: String) { onMain { $0.flashError(message) } }
     func transientNotice(_ text: String) { onMain { $0.transientNotice(text) } }
     func hide() { onMain { $0.hide() } }
+    func showPrewarming() { onMain { $0.showPrewarming() } }
+    func showRefining() { onMain { $0.showRefining() } }
+    func flashBlockedSecure() { onMain { $0.flashBlockedSecure() } }
 }
 
 /// Stand-in when FoundationModels is not linkable; the cage treats it as an

@@ -3,8 +3,9 @@ import Foundation
 /// Every way an utterance can leave the refine stage. The first thirteen values
 /// are the Python `wisprit/refine.py` vocabulary, byte-identical because they are
 /// written into `metrics.log`'s `ai` field and must stay one comparable stream
-/// across the Python→Swift cutover. `hasLetterRun` is the one addition (the new
-/// spelled-run bypass, research §correction-detection).
+/// across the Python→Swift cutover. Two values are additions: `hasLetterRun`
+/// (the spelled-run bypass, research §correction-detection) and `obeyed` (the
+/// eval harness caught the model executing the dictation).
 ///
 /// Everything except `applied` returns the verbatim transcript: refinement can
 /// only ever *win*.
@@ -25,9 +26,21 @@ public enum RefineOutcome: String, Sendable, CaseIterable {
     /// NEW (not in the Python vocabulary): utterance contains a spelled letter
     /// run, which the model measurably corrupts (S-H-A-R-I-Q-U-E → "Sharifue").
     case hasLetterRun = "has_letter_run"
+    /// NEW (not in the Python vocabulary): the reply is evidence that the model
+    /// OBEYED the dictation instead of cleaning it — it wrote the code the
+    /// utterance asked for, or it executed the utterance's opening instruction
+    /// and returned only the object. Distinct from `implausible`, which is the
+    /// word-count band and the assistant-opener check: an obedient reply is
+    /// often exactly utterance-sized, so the band never sees it.
+    case obeyed
 
     /// True for the thirteen outcomes `wisprit/refine.py` can emit.
-    public var isPythonVocabulary: Bool { self != .hasLetterRun }
+    public var isPythonVocabulary: Bool {
+        switch self {
+        case .hasLetterRun, .obeyed: return false
+        default: return true
+        }
+    }
 }
 
 /// What the session wants the refiner to do while the model is generating.

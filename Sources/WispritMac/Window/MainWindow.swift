@@ -53,16 +53,24 @@ public final class MainWindowController: NSObject, NSWindowDelegate {
         }
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 900, height: 640),
+            contentRect: NSRect(x: 0, y: 0, width: 1040, height: 700),
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false)
+        // The window's identity is the app, not the page: Mission Control, the
+        // Window menu and ⌘-Tab all show this string, and a window called
+        // "Settings" is not the one the user is looking for. The title is set
+        // and then hidden — the Hub draws its own header (§3.1).
         window.title = "Wisprit"
-        window.titlebarAppearsTransparent = false
+        window.titleVisibility = .hidden
+        window.titlebarAppearsTransparent = true
+        // The 52 pt band above the sidebar and the card is not chrome, so
+        // dragging it moves the window like chrome would.
+        window.isMovableByWindowBackground = true
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 780, height: 540)
+        window.minSize = NSSize(width: 900, height: 600)
         window.delegate = self
-        window.contentView = NSHostingView(rootView: RootView(model: model))
+        window.contentView = NSHostingView(rootView: HubShell(model: model))
         window.center()
         window.setFrameAutosaveName("WispritMainWindow")
         self.window = window
@@ -73,7 +81,7 @@ public final class MainWindowController: NSObject, NSWindowDelegate {
 
     /// Open straight into the first-run wizard.
     public func showOnboarding() {
-        show(tab: .status)
+        show(tab: .setup)
         model.beginOnboarding()
     }
 

@@ -318,18 +318,78 @@ final class SessionControllerTests: XCTestCase {
 
     // MARK: - insertion failures
 
-    func testBlockedSecureFlashesTheAmberRemedy() {
+    /// `blocked_secure` gets its own pill state (§2.4) rather than an error
+    /// flash: nothing failed, the text is in history, and ⌘⌃V is a remedy the
+    /// user can still act on — which needs longer on screen than an alarm.
+    func testBlockedSecureRaisesItsOwnPillStateNotAnError() {
         let h = Harness()
         h.inserter.result = InsertResult(ok: false, method: .blockedSecure,
                                          detail: "Secure Keyboard Entry is active")
 
         h.utterance()
 
-        XCTAssertEqual(h.pill.errors, ["secure field — press ⌘⌃V to paste"])
+        XCTAssertTrue(h.pill.snapshot().contains("flashBlockedSecure"))
+        XCTAssertTrue(h.pill.errors.isEmpty, "a blocked paste is not a failure to report")
         XCTAssertFalse(h.pill.snapshot().contains("flashSuccess"))
         XCTAssertEqual(h.metrics.last?.outcome, "blocked_secure")
         XCTAssertEqual(h.history.added.count, 1,
                        "the transcript survives in history even when insertion is blocked")
+    }
+
+    // MARK: - the two new stage states (§2.4)
+
+    /// The pill goes up on key-down, before the microphone opens: `audio.start()`
+    /// plus the analyzer's prepare is tens of milliseconds in which the user has
+    /// pressed a key and seen nothing at all.
+    func testPrewarmingIsShownBeforeAudioStarts() {
+        let h = Harness()
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+
+        let calls = h.pill.snapshot()
+        guard let prewarm = calls.firstIndex(of: "showPrewarming"),
+              let recording = calls.firstIndex(of: "showRecording") else {
+            return XCTFail("both states must appear: \(calls)")
+        }
+        XCTAssertLessThan(prewarm, recording, "prewarming precedes the recording state")
+        XCTAssertEqual(h.audio.startCount, 1)
+    }
+
+    /// A microphone that will not open must not leave a pill hanging in
+    /// prewarming — the error flash takes over.
+    func testAFailedMicrophoneReplacesPrewarmingWithTheError() {
+        let h = Harness()
+        h.audio.startSucceeds = false
+
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+
+        XCTAssertEqual(h.pill.snapshot(), ["showPrewarming", "flashError"])
+        XCTAssertEqual(h.pill.errors, ["microphone unavailable"])
+    }
+
+    func testRefiningIsShownForTheAiStageAndOnlyWhenThereIsOne() {
+        let withAi = Harness()
+        withAi.utterance()
+        let calls = withAi.pill.snapshot()
+        guard let finalizing = calls.firstIndex(of: "showFinalizing"),
+              let refining = calls.firstIndex(of: "showRefining") else {
+            return XCTFail("both stages must appear: \(calls)")
+        }
+        XCTAssertLessThan(finalizing, refining, "refine runs after the final lands")
+
+        let withoutAi = Harness(useRefiner: false)
+        withoutAi.utterance()
+        XCTAssertFalse(withoutAi.pill.snapshot().contains("showRefining"),
+                       "no refine pass, no refining state")
+    }
+
+    /// A tap under the debounce writes no metrics row and leaves no pill: the
+    /// prewarm flash must not survive an utterance that never happened.
+    func testASubDebounceTapTakesThePrewarmBackDown() {
+        let h = Harness(debounceMs: 150)
+        h.utterance(heldSeconds: 0.05)
+
+        XCTAssertEqual(h.pill.snapshot(), ["showPrewarming", "showRecording", "hide"])
+        XCTAssertTrue(h.metrics.records.isEmpty)
     }
 
     func testInsertErrorSurfacesTheDetail() {

@@ -26,24 +26,42 @@ public struct DictionaryRow: Identifiable, Sendable, Equatable {
     public var hitCount: Int
     public var learnedAt: Date?
     public var lastUsed: Date?
+    /// Quarantined (`pending: true`): believable, seen once, and excluded from
+    /// every derived structure until a second sighting promotes it. Not
+    /// vocabulary yet — bookkeeping the window is the only place to act on.
+    public var isPending: Bool
+    /// Sightings recorded while pending. They become the `hear` phrases on
+    /// promotion, so to a reader of the row they ARE its heard phrases.
+    public var observations: [String]
 
     public var id: String { term.lowercased() }
 
     public init(term: String, hear: [String] = [], source: String? = nil,
-                hitCount: Int = 0, learnedAt: Date? = nil, lastUsed: Date? = nil) {
+                hitCount: Int = 0, learnedAt: Date? = nil, lastUsed: Date? = nil,
+                isPending: Bool = false, observations: [String] = []) {
         self.term = term
         self.hear = hear
         self.source = source
         self.hitCount = hitCount
         self.learnedAt = learnedAt
         self.lastUsed = lastUsed
+        self.isPending = isPending
+        self.observations = observations
     }
 
     /// Wisprit taught itself this one, from "actually it's S-H-A-R-I-Q-U-E".
     public var isLearned: Bool { source == "spoken_spelling" }
 
+    /// What the row shows under "hears". A pending entry has no `hear` array
+    /// at all — the store moves its phrases to `observations` — so the two are
+    /// one list to everything that only wants to read them.
+    public var phrases: [String] { hear.isEmpty ? observations : hear }
+
     /// Short labels shown next to the term.
     public var badges: [String] {
+        // A quarantined entry corrects nothing and has never been used, so
+        // "learned"/"used" would both be lies. Pending is the whole story.
+        if isPending { return ["pending"] }
         var out: [String] = []
         if isLearned { out.append("learned") }
         if hitCount > 0 { out.append("used \(hitCount)×") }
@@ -51,12 +69,14 @@ public struct DictionaryRow: Identifiable, Sendable, Equatable {
     }
 
     /// Search over the canonical spelling AND the misrecognitions — the phrase
-    /// the user remembers is usually the wrong one they keep getting.
+    /// the user remembers is usually the wrong one they keep getting. A pending
+    /// entry's misrecognitions live in `observations`, and searching only `hear`
+    /// would make exactly the rows that need a decision unfindable.
     public func matches(_ query: String) -> Bool {
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !needle.isEmpty else { return true }
         if term.lowercased().contains(needle) { return true }
-        return hear.contains { $0.lowercased().contains(needle) }
+        return phrases.contains { $0.lowercased().contains(needle) }
     }
 }
 
@@ -145,16 +165,25 @@ public final class DictionaryEditor: @unchecked Sendable {
 
     /// Fresh rows, file order preserved. Reloads first so a term the learn loop
     /// added while the window was open shows up.
+    ///
+    /// `learnedEntries()` rather than `terms()` because it is the one read that
+    /// reports quarantined entries: `terms()` — like the compiled corrections,
+    /// `isKnownTerm` and the biasing list — deliberately excludes them, which is
+    /// right for the engine and wrong for the only surface where a human can
+    /// accept or dismiss one. It is also per-entry, so a file with the same term
+    /// twice gets two rows with their own stats instead of two copies of the
+    /// first one's.
     public func rows() -> [DictionaryRow] {
         store.maybeReload()
-        return store.terms().map { term in
-            let stats = store.stats(for: term)
-            return DictionaryRow(term: term,
-                                 hear: store.heardPhrases(for: term),
-                                 source: stats?.source,
-                                 hitCount: stats?.hitCount ?? 0,
-                                 learnedAt: stats?.learnedAt,
-                                 lastUsed: stats?.lastUsed)
+        return store.learnedEntries().map { entry in
+            DictionaryRow(term: entry.term,
+                          hear: entry.hear,
+                          source: entry.stats.source,
+                          hitCount: entry.stats.hitCount,
+                          learnedAt: entry.stats.learnedAt,
+                          lastUsed: entry.stats.lastUsed,
+                          isPending: entry.isPending,
+                          observations: entry.observations)
         }
     }
 
@@ -186,5 +215,27 @@ public final class DictionaryEditor: @unchecked Sendable {
 
     public func delete(_ term: String) {
         store.removeTerm(term)
+    }
+
+    /// Accept a quarantined entry: it becomes live vocabulary now, without
+    /// waiting for the second sighting.
+    ///
+    /// Routed through `DictionaryStore.addPending` — the *same* call the second
+    /// sighting makes — rather than through a plan, because promotion is the
+    /// store's own transition: `observations` fold into `hear`, `pending` and
+    /// `observations` drop out, and the entry starts ranking like any other
+    /// learn. A `.merge` plan would leave `pending: true` in place and the term
+    /// still invisible to the engine, which is exactly the bug this avoids.
+    ///
+    /// - Returns: true once the term is live vocabulary.
+    @discardableResult
+    public func promote(_ row: DictionaryRow) -> Bool {
+        guard row.isPending else { return false }
+        // Passing back one of its own observations is a no-op for the merged
+        // `hear` list (the store de-duplicates case-insensitively), so the only
+        // effect is the promotion itself.
+        return store.addPending(term: row.term,
+                                observation: row.observations.first ?? "",
+                                source: row.source ?? DictionaryEdit.defaultSource)
     }
 }

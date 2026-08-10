@@ -1,142 +1,142 @@
 {
-  "records" : [
+ "records": [
+  {
+   "bands": [
     {
-      "bands" : [
-        {
-          "accepted" : 0.142857,
-          "metric" : "wer",
-          "stage" : "raw",
-          "tolerance" : 0.015
-        },
-        {
-          "accepted" : 0.135468,
-          "metric" : "wer",
-          "stage" : "final",
-          "tolerance" : 0.015
-        },
-        {
-          "accepted" : 0.084777,
-          "metric" : "cer",
-          "stage" : "final",
-          "tolerance" : 0.015
-        },
-        {
-          "accepted" : 0.055556,
-          "metric" : "termRecall",
-          "stage" : "final",
-          "tolerance" : 0.03
-        },
-        {
-          "accepted" : 0.295455,
-          "metric" : "zeroEdit",
-          "stage" : "final",
-          "tolerance" : 0.05
-        }
-      ],
-      "config" : "refine=off,dict=off",
-      "corpus" : "tts-samantha"
+     "accepted": 0.142857,
+     "metric": "wer",
+     "stage": "raw",
+     "tolerance": 0.015
     },
     {
-      "bands" : [
-        {
-          "accepted" : 0.098522,
-          "metric" : "wer",
-          "stage" : "final",
-          "tolerance" : 0.015
-        },
-        {
-          "accepted" : 0.074294,
-          "metric" : "cer",
-          "stage" : "final",
-          "tolerance" : 0.015
-        },
-        {
-          "accepted" : 0.444444,
-          "metric" : "termRecall",
-          "stage" : "final",
-          "tolerance" : 0.06
-        },
-        {
-          "accepted" : 0.340909,
-          "metric" : "zeroEdit",
-          "stage" : "final",
-          "tolerance" : 0.05
-        }
-      ],
-      "config" : "refine=off,dict=on",
-      "corpus" : "tts-samantha"
+     "accepted": 0.135468,
+     "metric": "wer",
+     "stage": "final",
+     "tolerance": 0.015
     },
     {
-      "bands" : [
-        {
-          "accepted" : 0.128079,
-          "metric" : "wer",
-          "stage" : "final",
-          "tolerance" : 0.035
-        },
-        {
-          "accepted" : 0.097995,
-          "metric" : "cer",
-          "stage" : "final",
-          "tolerance" : 0.035
-        },
-        {
-          "accepted" : 0.222222,
-          "metric" : "termRecall",
-          "stage" : "final",
-          "tolerance" : 0.09
-        },
-        {
-          "accepted" : 0.363636,
-          "metric" : "zeroEdit",
-          "stage" : "final",
-          "tolerance" : 0.09
-        }
-      ],
-      "config" : "refine=on,dict=off",
-      "corpus" : "tts-samantha"
+     "accepted": 0.084777,
+     "metric": "cer",
+     "stage": "final",
+     "tolerance": 0.015
     },
     {
-      "bands" : [
-        {
-          "accepted" : 0.098522,
-          "metric" : "wer",
-          "stage" : "final",
-          "tolerance" : 0.035
-        },
-        {
-          "accepted" : 0.092525,
-          "metric" : "cer",
-          "stage" : "final",
-          "tolerance" : 0.035
-        },
-        {
-          "accepted" : 0.555556,
-          "metric" : "termRecall",
-          "stage" : "final",
-          "tolerance" : 0.09
-        },
-        {
-          "accepted" : 0.386364,
-          "metric" : "zeroEdit",
-          "stage" : "final",
-          "tolerance" : 0.09
-        }
-      ],
-      "config" : "refine=on,dict=on",
-      "corpus" : "tts-samantha"
+     "accepted": 0.055556,
+     "metric": "termRecall",
+     "stage": "final",
+     "tolerance": 0.03
     },
     {
-      "bands" : [
-        {
-          "accepted" : 0.856280,
-          "metric" : "battery",
-          "stage" : "battery",
-          "tolerance" : 0.06
-        }
-      ],
-      "config" : "cases",
-      "corpus" : "refine-battery"
+     "accepted": 0.295455,
+     "metric": "zeroEdit",
+     "stage": "final",
+     "tolerance": 0.05
     }
-  ]
+   ],
+   "config": "refine=off,dict=off",
+   "corpus": "tts-samantha"
+  },
+  {
+   "bands": [
+    {
+     "accepted": 0.098522,
+     "metric": "wer",
+     "stage": "final",
+     "tolerance": 0.015
+    },
+    {
+     "accepted": 0.074294,
+     "metric": "cer",
+     "stage": "final",
+     "tolerance": 0.015
+    },
+    {
+     "accepted": 0.444444,
+     "metric": "termRecall",
+     "stage": "final",
+     "tolerance": 0.06
+    },
+    {
+     "accepted": 0.340909,
+     "metric": "zeroEdit",
+     "stage": "final",
+     "tolerance": 0.05
+    }
+   ],
+   "config": "refine=off,dict=on",
+   "corpus": "tts-samantha"
+  },
+  {
+   "bands": [
+    {
+     "accepted": 0.098522,
+     "metric": "wer",
+     "stage": "final",
+     "tolerance": 0.035
+    },
+    {
+     "accepted": 0.0561,
+     "metric": "cer",
+     "stage": "final",
+     "tolerance": 0.035
+    },
+    {
+     "accepted": 0.222222,
+     "metric": "termRecall",
+     "stage": "final",
+     "tolerance": 0.09
+    },
+    {
+     "accepted": 0.386364,
+     "metric": "zeroEdit",
+     "stage": "final",
+     "tolerance": 0.06
+    }
+   ],
+   "config": "refine=on,dict=off",
+   "corpus": "tts-samantha"
+  },
+  {
+   "bands": [
+    {
+     "accepted": 0.068966,
+     "metric": "wer",
+     "stage": "final",
+     "tolerance": 0.035
+    },
+    {
+     "accepted": 0.0506,
+     "metric": "cer",
+     "stage": "final",
+     "tolerance": 0.035
+    },
+    {
+     "accepted": 0.555556,
+     "metric": "termRecall",
+     "stage": "final",
+     "tolerance": 0.09
+    },
+    {
+     "accepted": 0.409091,
+     "metric": "zeroEdit",
+     "stage": "final",
+     "tolerance": 0.06
+    }
+   ],
+   "config": "refine=on,dict=on",
+   "corpus": "tts-samantha"
+  },
+  {
+   "bands": [
+    {
+     "accepted": 0.972222,
+     "metric": "battery",
+     "stage": "battery",
+     "tolerance": 0.06
+    }
+   ],
+   "config": "cases",
+   "corpus": "refine-battery"
+  }
+ ]
 }

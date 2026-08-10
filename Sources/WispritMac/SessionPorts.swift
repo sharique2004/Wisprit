@@ -60,6 +60,33 @@ public protocol PillPort: Sendable {
     func flashError(_ message: String)
     func transientNotice(_ text: String)
     func hide()
+
+    // The three states `docs/design/ui-redesign.md` §2.4 adds. All three are
+    // additive with a default implementation, so no conformer breaks and each
+    // one degrades to what the pill did before it existed.
+
+    /// Key-down accepted, audio not open yet: the pill fades in at floor, grey,
+    /// so the panel is already on screen when the first level tick lands.
+    func showPrewarming()
+    /// The Apple Intelligence pass has started — the longest stage, and the one
+    /// the user could otherwise read as a hang.
+    func showRefining()
+    /// The `blocked_secure` outcome: a lock, and the ⌘⌃V remedy.
+    ///
+    /// Deliberately argument-free where §6.6 sketches `flashBlockedSecure(detail)`:
+    /// the copy is `PillGeometry.blockedSecureMessage` (§2.4), which lives in
+    /// `WispritMacUI`, and the session names the *state*, not the words — that is
+    /// what keeps `SessionController` free of any UI import.
+    func flashBlockedSecure()
+}
+
+public extension PillPort {
+    func showPrewarming() {}
+    /// Without a pill that knows the state, refining looks exactly like
+    /// finalizing — which is what it did before, and is still true.
+    func showRefining() { showFinalizing() }
+    /// The message this state replaced, for a pill that predates it.
+    func flashBlockedSecure() { flashError("secure field — press ⌘⌃V to paste") }
 }
 
 public protocol HistoryPort: Sendable {

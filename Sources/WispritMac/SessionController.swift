@@ -249,6 +249,11 @@ public final class SessionController: @unchecked Sendable {
         _ = vocabulary?.maybeReload()
 
         setPressTimestamp(timestamp)
+        // Before the microphone opens, not after: `audio.start()` plus the
+        // analyzer's prepareToAnalyze is tens of milliseconds in which the user
+        // has pressed a key and seen nothing. The pill fades in grey and at
+        // floor here, and turns orange on the first real level tick (§2.4).
+        pill?.showPrewarming()
         guard audio.start() else {
             flashError("microphone unavailable")
             return
@@ -366,6 +371,9 @@ public final class SessionController: @unchecked Sendable {
         if let refiner {
             let events = self.events
             let corrected = correction.text
+            // The pill says which stage is running: refine is the longest one in
+            // the pipeline and the only one a user can mistake for a hang (§2.4).
+            pill?.showRefining()
             let outcome = runBlocking {
                 await refiner.refine(corrected, interrupt: {
                     SessionController.interruptSignal(for: events.pollInterrupt())
@@ -439,7 +447,11 @@ public final class SessionController: @unchecked Sendable {
         if insertion.ok {
             pill?.flashSuccess()
         } else if insertion.blockedSecure {
-            flashError("secure field — press ⌘⌃V to paste")
+            // Its own pill state (§2.4): a lock rather than an alarm, held long
+            // enough to read, because the text is safe in history and ⌘⌃V is a
+            // remedy the user can still act on.
+            log.warning("insertion blocked by Secure Keyboard Entry — text is in history")
+            pill?.flashBlockedSecure()
         } else {
             flashError(insertion.detail.isEmpty ? "insert failed" : insertion.detail)
         }

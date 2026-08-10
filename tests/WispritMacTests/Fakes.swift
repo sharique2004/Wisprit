@@ -261,6 +261,14 @@ final class FakePill: PillPort, @unchecked Sendable {
     }
     func hide() { record("hide") }
 
+    // The three states §2.4 adds. Recorded separately from `errors` on purpose:
+    // `blockedSecure` is a distinct outcome with its own copy and its own
+    // dwell, and folding it back into an error flash is what the redesign
+    // undid.
+    func showPrewarming() { record("showPrewarming") }
+    func showRefining() { record("showRefining") }
+    func flashBlockedSecure() { record("flashBlockedSecure") }
+
     func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return calls }
 }
 

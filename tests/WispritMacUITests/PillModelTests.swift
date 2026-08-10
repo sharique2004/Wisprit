@@ -2,8 +2,13 @@ import XCTest
 @testable import WispritMacUI
 
 /// Headless pill state-machine tests. `PillModel` owns every decision; the
-/// NSPanel/NSView edge in `Pill.swift` owns nothing but drawing and a Timer, so
-/// none of this needs a window server, an event tap or a TCC grant.
+/// NSPanel/NSHostingView edge in `Pill.swift` owns nothing but hosting and a
+/// Timer, so none of this needs a window server, an event tap or a TCC grant.
+///
+/// The constants moved when the dot became a waveform (`ui-redesign.md` §2.2);
+/// the *behaviour* — suppression, quantisation, monotone width, the auto-hide
+/// timings — is the same contract it was under `pill.py` and is asserted the
+/// same way.
 final class PillModelTests: XCTestCase {
 
     /// Recorder for the model's three output channels.
@@ -23,47 +28,99 @@ final class PillModelTests: XCTestCase {
         return (model, sink)
     }
 
-    // MARK: - geometry & palette constants (pill.py, verbatim)
+    // MARK: - geometry (§2.2)
 
-    func testPillGeometryMatchesPython() {
-        XCTAssertEqual(PillGeometry.width, 26.0)
-        XCTAssertEqual(PillGeometry.height, 26.0)
-        XCTAssertEqual(PillGeometry.bottomMargin, 90.0)
-        XCTAssertEqual(PillGeometry.haloAlpha, 0.28)
-        XCTAssertEqual(PillGeometry.dotBaseRadius, 6.0)
-        XCTAssertEqual(PillGeometry.dotLevelGain, 5.0)
+    func testPillGeometryMatchesTheSpec() {
+        XCTAssertEqual(PillGeometry.height, 28.0)
+        XCTAssertEqual(PillGeometry.radius, 14.0, "a full capsule: h/2")
+        XCTAssertEqual(PillGeometry.widthListening, 96.0)
+        XCTAssertEqual(PillGeometry.barCount, 15, "odd, so there is a true centre bar")
+        XCTAssertEqual(PillGeometry.barWidth, 2.5)
+        XCTAssertEqual(PillGeometry.barPitch, 5.0)
+        XCTAssertEqual(PillGeometry.barPeak, 14.0)
+        XCTAssertEqual(PillGeometry.barFloor, PillGeometry.barWidth,
+                       "silence must be a perfect dot")
+        XCTAssertEqual(PillGeometry.barFieldWidth,
+                       Double(PillGeometry.barCount) * PillGeometry.barPitch - PillGeometry.barWidth)
+        XCTAssertEqual(PillGeometry.barFieldCompact,
+                       Double(PillGeometry.barCountCompact) * PillGeometry.barPitch - PillGeometry.barWidth)
+        XCTAssertEqual(PillGeometry.sideInset,
+                       (PillGeometry.widthListening - PillGeometry.barFieldWidth) / 2)
+    }
+
+    /// The timings are the one thing the user has felt for months.
+    func testHideDelaysAreUnchangedAndTheNewOneIsLonger() {
         XCTAssertEqual(PillGeometry.successHideDelay, 0.6)
         XCTAssertEqual(PillGeometry.errorHideDelay, 1.6)
+        XCTAssertEqual(PillGeometry.noticeDuration, 1.6)
+        XCTAssertEqual(PillGeometry.bottomMargin, 90.0)
+        XCTAssertEqual(PillGeometry.blockedSecureHideDelay, 2.6,
+                       "a keystroke instruction has to outlive an error flash")
     }
 
-    func testPaletteMatchesPython() {
-        XCTAssertEqual(PillPalette.dot(for: .recording), PillColor(0.93, 0.26, 0.28))
-        XCTAssertEqual(PillPalette.dot(for: .finalizing), PillColor(0.60, 0.62, 0.66))
-        XCTAssertEqual(PillPalette.dot(for: .success), PillColor(0.30, 0.78, 0.45))
-        XCTAssertEqual(PillPalette.dot(for: .error), PillColor(0.95, 0.66, 0.22))
-        XCTAssertEqual(PillPalette.dot(for: .hidden), PillColor(0.6, 0.6, 0.6))
+    func testClampLevelStillTreatsNaNAsSilence() {
+        XCTAssertEqual(PillGeometry.clampLevel(0.5), 0.5)
+        XCTAssertEqual(PillGeometry.clampLevel(-3.0), 0.0)
+        XCTAssertEqual(PillGeometry.clampLevel(42.0), 1.0)
+        XCTAssertEqual(PillGeometry.clampLevel(.nan), 0.0)
+        XCTAssertEqual(PillGeometry.clampLevel(.infinity), 0.0)
     }
 
-    func testDotRadiusIsSixPlusLevelTimesFiveWithClamping() {
-        XCTAssertEqual(PillGeometry.dotRadius(forLevel: 0.0), 6.0)
-        XCTAssertEqual(PillGeometry.dotRadius(forLevel: 1.0), 11.0)
-        XCTAssertEqual(PillGeometry.dotRadius(forLevel: 0.5), 8.5)
-        XCTAssertEqual(PillGeometry.dotRadius(forLevel: -3.0), 6.0)     // max(0, …)
-        XCTAssertEqual(PillGeometry.dotRadius(forLevel: 42.0), 11.0)    // min(1, …)
-        XCTAssertEqual(PillGeometry.dotRadius(forLevel: .nan), 6.0)
+    // MARK: - palette (§1.6, the orange rule)
+
+    /// The pill takes the dark side of every token: its body is near-black in
+    /// both appearances, which is exactly what the dark palette was tuned for.
+    func testPaletteSourcesFromTheme() {
+        XCTAssertEqual(PillPalette.hot, PillColor(hex: Theme.Token.hot.dark))
+        XCTAssertEqual(PillPalette.ink, PillColor(hex: Theme.Token.studioInk.dark))
+        XCTAssertEqual(PillPalette.muted, PillColor(hex: Theme.Token.studioMuted.dark))
+        XCTAssertEqual(PillPalette.body, PillColor(hex: Theme.Token.studio.dark))
+        XCTAssertEqual(PillPalette.bodyAlpha, 0.92)
+    }
+
+    /// The load-bearing rule: orange if and only if the microphone is open.
+    func testOnlyTheListeningStateIsOrange() {
+        for state in PillState.allCases {
+            let isListening = (state == .recording)
+            XCTAssertEqual(PillPalette.isLive(state), isListening, "\(state)")
+            XCTAssertEqual(PillPalette.tint(for: state) == PillPalette.hot, isListening,
+                           "\(state) must not borrow the tally colour")
+        }
+    }
+
+    func testAlarmStatesSwapTheBody() {
+        for state in [PillState.error, .blockedSecure] {
+            let fill = PillPalette.bodyFill(for: state)
+            XCTAssertEqual(fill.color, PillPalette.alarmBody, "\(state)")
+            XCTAssertEqual(fill.alpha, 0.94)
+        }
+        XCTAssertEqual(PillPalette.bodyFill(for: .recording).color, PillPalette.body)
+    }
+
+    /// The five original raw values are frozen — the session's state names and
+    /// the older tests both ride on them.
+    func testExistingStateRawValuesAreFrozen() {
+        XCTAssertEqual(PillState.hidden.rawValue, "hidden")
+        XCTAssertEqual(PillState.recording.rawValue, "recording")
+        XCTAssertEqual(PillState.finalizing.rawValue, "finalizing")
+        XCTAssertEqual(PillState.success.rawValue, "success")
+        XCTAssertEqual(PillState.error.rawValue, "error")
+        XCTAssertEqual(PillState.allCases.count, 8, "five original + three new")
     }
 
     // MARK: - state transitions
 
-    func testShowRecordingGoesRedVisibleAndZeroLevel() {
+    func testShowRecordingGoesOrangeVisibleAndZeroLevel() {
         let (model, sink) = makeModel()
         model.updateLevel(0.8)
         model.showRecording()
         XCTAssertEqual(model.state, .recording)
         XCTAssertTrue(sink.last.isVisible)
-        XCTAssertEqual(sink.last.dot, PillPalette.recording)
+        XCTAssertEqual(sink.last.tint, PillPalette.hot)
         XCTAssertEqual(sink.last.level, 0.0)
-        XCTAssertEqual(sink.last.totalWidth, 26.0)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening)
+        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount),
+                       "a fresh press starts from a row of dots")
     }
 
     func testFullUtteranceHappyPath() {
@@ -72,11 +129,16 @@ final class PillModelTests: XCTestCase {
         model.updateLevel(0.4)
         model.showFinalizing()
         XCTAssertEqual(model.state, .finalizing)
-        XCTAssertEqual(sink.last.dot, PillPalette.finalizing)
+        XCTAssertEqual(sink.last.tint, PillPalette.muted)
         XCTAssertEqual(sink.last.level, 0.0, "finalizing resets the level meter")
+        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount),
+                       "and collapses the waveform — a held one would be a lie")
 
         model.flashSuccess()
         XCTAssertEqual(model.state, .success)
+        XCTAssertEqual(sink.last.glyph, .checkmark)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthCommitted,
+                       "committed contracts to a circle")
         XCTAssertEqual(sink.scheduled.last?.seconds, 0.6)
         XCTAssertEqual(sink.scheduled.last?.action, .hide)
 
@@ -89,7 +151,8 @@ final class PillModelTests: XCTestCase {
         let (model, sink) = makeModel()
         model.flashError("secure field — press ⌘⌃V to paste")
         XCTAssertEqual(model.state, .error)
-        XCTAssertEqual(sink.last.dot, PillPalette.error)
+        XCTAssertEqual(sink.last.tint, PillPalette.critical)
+        XCTAssertEqual(sink.last.glyph, .warning)
         XCTAssertEqual(sink.scheduled.last?.seconds, 1.6)
         XCTAssertEqual(sink.scheduled.last?.action, .hide)
     }
@@ -112,19 +175,138 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(model.state, .hidden)
         XCTAssertFalse(sink.last.isVisible)
         XCTAssertEqual(sink.last.bubble, "")
-        XCTAssertEqual(sink.last.totalWidth, 26.0)
+        XCTAssertEqual(sink.last.message, "")
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening)
         XCTAssertGreaterThan(sink.cancels, 0)
+    }
+
+    // MARK: - the three new states (§2.4)
+
+    /// `prewarming` is deliberately not orange: the key is down but the mic is
+    /// not open yet, and the tally never lies.
+    func testPrewarmingIsMutedAndFullOfDots() {
+        let (model, sink) = makeModel()
+        model.showPrewarming()
+        XCTAssertEqual(model.state, .prewarming)
+        XCTAssertTrue(sink.last.isVisible)
+        XCTAssertEqual(sink.last.tint, PillPalette.muted)
+        XCTAssertNotEqual(sink.last.tint, PillPalette.hot)
+        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount))
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening)
+        XCTAssertEqual(sink.last.glyph, .none)
+    }
+
+    /// The first level tick is what proves the mic is open, so it is what ends
+    /// `prewarming` — even a silent one.
+    func testFirstLevelTickEndsPrewarming() {
+        let (model, sink) = makeModel()
+        model.showPrewarming()
+        let count = sink.frames.count
+        model.updateLevel(0.0)
+        XCTAssertEqual(model.state, .recording)
+        XCTAssertEqual(sink.frames.count, count + 1, "the tint crossfade needs one frame")
+        XCTAssertEqual(sink.last.tint, PillPalette.hot)
+    }
+
+    /// A session that never calls the new entry points behaves exactly as it
+    /// did — that is what lets the pill land ahead of the session wiring.
+    func testAppUnawareOfPrewarmingIsUnaffected() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.updateLevel(0.5)
+        XCTAssertEqual(model.state, .recording)
+        XCTAssertEqual(sink.last.tint, PillPalette.hot)
+    }
+
+    func testRefiningKeepsTheMeterAndAddsTheSparklesGlyph() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.showRefining()
+        XCTAssertEqual(model.state, .refining)
+        XCTAssertEqual(sink.last.glyph, .sparkles)
+        XCTAssertEqual(sink.last.tint, PillPalette.muted)
+        XCTAssertEqual(sink.last.bars.count, PillGeometry.barCount)
+        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount))
+    }
+
+    func testBlockedSecureCarriesItsOwnMessageAndTiming() {
+        let (model, sink) = makeModel()
+        model.flashBlockedSecure()
+        XCTAssertEqual(model.state, .blockedSecure)
+        XCTAssertEqual(sink.last.glyph, .lock)
+        XCTAssertEqual(sink.last.tint, PillPalette.attention)
+        XCTAssertEqual(sink.last.message, PillGeometry.blockedSecureMessage)
+        XCTAssertEqual(sink.last.bubble, PillGeometry.blockedSecureMessage)
+        XCTAssertEqual(sink.scheduled.last?.seconds, PillGeometry.blockedSecureHideDelay)
+        XCTAssertEqual(sink.scheduled.last?.action, .hide)
+    }
+
+    func testAlarmStatesHaveAFloorWidth() {
+        let (short, shortSink) = makeModel()
+        short.flashError("x")
+        XCTAssertEqual(shortSink.last.totalWidth, PillGeometry.errorMinWidth)
+
+        let (blocked, blockedSink) = makeModel()
+        blocked.flashBlockedSecure("no")
+        XCTAssertEqual(blockedSink.last.totalWidth, PillGeometry.blockedSecureMinWidth)
+    }
+
+    // MARK: - the retained error message (§2.7)
+
+    /// The old `PillView` took the message and drew nothing with it. It is the
+    /// difference between "something went wrong" and "here is what to do".
+    func testErrorMessageIsRetainedAndRendered() {
+        let (model, sink) = makeModel()
+        model.flashError("secure field — press ⌘⌃V to paste")
+        XCTAssertEqual(model.message, "secure field — press ⌘⌃V to paste")
+        XCTAssertEqual(sink.last.message, model.message)
+        XCTAssertEqual(sink.last.bubble, model.message)
+        XCTAssertGreaterThan(sink.last.bubbleWidth, 0)
+    }
+
+    func testErrorMessageIsCappedAtFortyCharacters() {
+        let (model, sink) = makeModel()
+        model.flashError(String(repeating: "e", count: 120))
+        XCTAssertEqual(sink.last.message.count, PillGeometry.errorMessageCharacters)
+        XCTAssertTrue(sink.last.message.hasSuffix("…"))
+    }
+
+    func testASucceedingUtteranceClearsTheStaleMessage() {
+        let (model, _) = makeModel()
+        model.flashError("boom")
+        model.showRecording()
+        XCTAssertEqual(model.message, "")
+        XCTAssertEqual(model.bubble, "")
+    }
+
+    // MARK: - width held (§2.4)
+
+    /// A pill that shrinks and regrows between "you stopped talking" and "here
+    /// is the result" reads as two events, not one.
+    func testFinalizingHoldsTheWidthTheUtteranceEarned() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.livePartial("some long text here")
+        let recording = sink.last.totalWidth
+        XCTAssertGreaterThan(recording, PillGeometry.widthListening)
+
+        model.showFinalizing()
+        XCTAssertEqual(model.bubble, "", "the tail still collapses")
+        XCTAssertEqual(sink.last.totalWidth, recording, "but the width it bought is held")
     }
 
     // MARK: - pill_hidden suppression
 
     func testSuppressedPillNeverShowsOrRenders() {
         let (model, sink) = makeModel(suppressed: { true })
+        model.showPrewarming()
         model.showRecording()
         model.updateLevel(0.9)
         model.livePartial("some words here")
         model.showFinalizing()
+        model.showRefining()
         model.transientNotice("Learned Sharique")
+        model.flashBlockedSecure()
         XCTAssertTrue(sink.frames.isEmpty, "no frame should be emitted while pill_hidden")
         XCTAssertEqual(model.state, .hidden)
     }
@@ -138,22 +320,63 @@ final class PillModelTests: XCTestCase {
         XCTAssertTrue(sink.frames.isEmpty)
     }
 
-    // MARK: - level meter
+    // MARK: - the meter
 
-    func testUpdateLevelDoesNotChangeVisibilityAndSkipsUnchangedFrames() {
+    func testUpdateLevelScrollsTheWaveformAndNeverChangesVisibility() {
         let (model, sink) = makeModel()
         model.updateLevel(0.5)
         XCTAssertFalse(sink.last.isVisible)
+
         model.showRecording()
-        let count = sink.frames.count
         model.updateLevel(0.5)
-        XCTAssertEqual(sink.frames.count, count + 1)
+        XCTAssertEqual(sink.last.bars.last, WaveformBuffer.shaped(0.5))
         model.updateLevel(0.5)
-        XCTAssertEqual(sink.frames.count, count + 1, "an unchanged level must not redraw")
-        XCTAssertEqual(sink.last.dotRadius, 8.5)
+        XCTAssertEqual(Array(sink.last.bars.suffix(2)),
+                       [WaveformBuffer.shaped(0.5), WaveformBuffer.shaped(0.5)],
+                       "an unchanged level still scrolls — that is what makes it a waveform")
     }
 
-    // MARK: - livePartial (NEW)
+    /// The non-negotiable one: the main thread carries the CGEventTap, so an
+    /// idle-but-visible pill must cost zero redraws (§2.3).
+    func testSilenceCostsNoFrames() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        let count = sink.frames.count
+        for _ in 0..<40 { model.updateLevel(0) }
+        XCTAssertEqual(sink.frames.count, count, "a silent pill must not redraw")
+    }
+
+    /// …and it converges: a loud burst drains through the buffer in at most
+    /// `barCount` ticks and then silence is free again.
+    func testSilenceBecomesFreeOnceTheBurstScrollsOut() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.updateLevel(0.8)
+        var emitted = 0
+        for _ in 0..<(PillGeometry.barCount * 3) {
+            let before = sink.frames.count
+            model.updateLevel(0)
+            if sink.frames.count > before { emitted += 1 }
+        }
+        XCTAssertLessThanOrEqual(emitted, PillGeometry.barCount)
+        let settled = sink.frames.count
+        for _ in 0..<20 { model.updateLevel(0) }
+        XCTAssertEqual(sink.frames.count, settled)
+    }
+
+    /// A text tail halves the meter so the pill stays a pill.
+    func testTheMeterGoesCompactWhenATailSharesTheCapsule() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.updateLevel(0.6)
+        XCTAssertEqual(sink.last.bars.count, PillGeometry.barCount)
+        model.livePartial("hello there world")
+        XCTAssertEqual(sink.last.bars.count, PillGeometry.barCountCompact)
+        XCTAssertEqual(sink.last.bars.last, WaveformBuffer.shaped(0.6),
+                       "the compact meter keeps the newest slots")
+    }
+
+    // MARK: - livePartial
 
     func testLivePartialOnlyRendersWhileRecording() {
         let (model, sink) = makeModel()
@@ -163,12 +386,12 @@ final class PillModelTests: XCTestCase {
         model.showRecording()
         model.livePartial("hello there world")
         XCTAssertEqual(model.bubble, "hello there world")
-        XCTAssertTrue(sink.last.totalWidth > PillGeometry.width)
+        XCTAssertTrue(sink.last.totalWidth > PillGeometry.widthListening)
 
         model.showFinalizing()
         XCTAssertEqual(model.bubble, "", "the tail collapses when recording ends")
         model.livePartial("late arrival")
-        XCTAssertEqual(model.bubble, "", "a late partial must not reopen the bubble")
+        XCTAssertEqual(model.bubble, "", "a late partial must not reopen the tail")
     }
 
     func testLivePartialShowsOnlyTheTail() {
@@ -190,7 +413,7 @@ final class PillModelTests: XCTestCase {
     }
 
     /// Flicker control #2 + #3: quantised, and monotone within an utterance.
-    func testBubbleWidthIsQuantisedAndNeverShrinksMidUtterance() {
+    func testTailWidthIsQuantisedAndNeverShrinksMidUtterance() {
         let (model, _) = makeModel()
         model.showRecording()
         var widths: [Double] = []
@@ -200,33 +423,41 @@ final class PillModelTests: XCTestCase {
         }
         XCTAssertEqual(widths, widths.sorted(), "width must be non-decreasing while recording")
         for w in widths {
-            XCTAssertEqual(w.truncatingRemainder(dividingBy: PillBubbleGeometry.widthStep), 0,
-                           "widths snap to the \(PillBubbleGeometry.widthStep) pt step")
-            XCTAssertLessThanOrEqual(w, PillBubbleGeometry.maxWidth)
-            XCTAssertGreaterThanOrEqual(w, PillBubbleGeometry.minWidth)
+            XCTAssertLessThanOrEqual(w, PillTailGeometry.maxWidth)
+            XCTAssertGreaterThanOrEqual(w, PillTailGeometry.minWidth)
         }
         // A fresh press resets the floor.
         model.showRecording()
         XCTAssertEqual(model.bubbleWidth, 0)
     }
 
-    func testBubbleWidthGeometry() {
-        XCTAssertEqual(PillBubbleGeometry.width(forCharacters: 0), 0)
-        XCTAssertEqual(PillBubbleGeometry.totalWidth(bubbleWidth: 0), 26.0)
-        let w = PillBubbleGeometry.width(forCharacters: 12)
-        XCTAssertEqual(PillBubbleGeometry.totalWidth(bubbleWidth: w),
-                       26.0 + PillBubbleGeometry.gap + w)
-        XCTAssertEqual(PillBubbleGeometry.width(forCharacters: 400), PillBubbleGeometry.maxWidth)
+    /// The quantisation itself, retuned but not rewritten (§2.7). The clamps
+    /// are deliberately off the 8 pt grid — they come from the panel widths
+    /// §2.2 names — but everything between them is on it.
+    func testTailGeometry() {
+        XCTAssertEqual(PillTailGeometry.widthStep, 8.0)
+        XCTAssertEqual(PillTailGeometry.minWidth, 44.0)
+        XCTAssertEqual(PillTailGeometry.maxWidth, 196.0)
+        XCTAssertEqual(PillTailGeometry.width(forCharacters: 0), 0)
+        XCTAssertEqual(PillTailGeometry.width(forCharacters: 400), PillTailGeometry.maxWidth)
+
+        let unclamped = PillTailGeometry.width(forCharacters: 12)
+        XCTAssertEqual(unclamped.truncatingRemainder(dividingBy: PillTailGeometry.widthStep), 0)
+
+        XCTAssertEqual(PillTailGeometry.totalWidth(tailWidth: 0), PillGeometry.widthListening)
+        XCTAssertEqual(PillTailGeometry.totalWidth(tailWidth: PillTailGeometry.minWidth), 108.5)
+        XCTAssertEqual(PillTailGeometry.totalWidth(tailWidth: PillTailGeometry.maxWidth), 260.5)
     }
 
-    // MARK: - transientNotice (NEW)
+    // MARK: - transientNotice
 
-    func testNoticeFromIdleIsAGreenFlashThatTakesThePillWithIt() {
+    func testNoticeFromIdleIsAFlashThatTakesThePillWithIt() {
         let (model, sink) = makeModel()
         model.transientNotice("Learned Sharique")
         XCTAssertEqual(model.state, .success)
         XCTAssertTrue(sink.last.isVisible)
         XCTAssertEqual(sink.last.bubble, "Learned Sharique")
+        XCTAssertEqual(sink.last.glyph, .sparkle, "a notice is a text row, not a check mark")
         XCTAssertEqual(sink.scheduled.last?.seconds, PillGeometry.noticeDuration)
         XCTAssertEqual(sink.scheduled.last?.action, .hide)
 
@@ -261,5 +492,16 @@ final class PillModelTests: XCTestCase {
         let count = sink.frames.count
         model.fireDeferred(.clearNotice)
         XCTAssertEqual(sink.frames.count, count)
+    }
+
+    // MARK: - glyph mapping
+
+    func testGlyphSymbolNames() {
+        XCTAssertNil(PillGlyph.none.symbolName)
+        XCTAssertEqual(PillGlyph.checkmark.symbolName, "checkmark")
+        XCTAssertEqual(PillGlyph.warning.symbolName, "exclamationmark.triangle")
+        XCTAssertEqual(PillGlyph.lock.symbolName, "lock.fill")
+        XCTAssertEqual(PillGlyph.sparkles.symbolName, "sparkles")
+        XCTAssertEqual(PillGlyph.sparkle.symbolName, "sparkle")
     }
 }

@@ -14,6 +14,11 @@ public enum MenuAction: Equatable, Sendable {
     /// Bring up the main window. First row of the menu, because a menu-bar-only
     /// app with a notch-hidden icon otherwise offers no way back to itself.
     case openWindow
+    /// The same window, routed to the Setup page (§5.2). A separate case rather
+    /// than a payload on `openWindow`: the pure model must stay `Equatable`
+    /// against a bare `.openWindow`, and the shell is the only layer that knows
+    /// what a "page" is.
+    case openSetup
     case toggleDictation
     case toggleAiCleanup
     /// One of the four "Polish Last" submenu rows. The payload is the mode's
@@ -52,10 +57,21 @@ public struct MenuItemModel: Equatable, Sendable {
     public var representedText: String?
     /// Child rows. A row with a submenu carries no action of its own.
     public var submenu: [MenuItemModel]?
+    /// ⌘-equivalent, applied with `.command` (§5.2 gives `⌘0` to Open Wisprit —
+    /// there is no other way back into an `LSUIElement` app whose icon is behind
+    /// the notch). Empty means none.
+    public var keyEquivalent: String
+    /// An SF Symbol drawn on the row, tinted by `symbolTint`.
+    public var symbolName: String?
+    /// Which token the row's symbol is tinted with. The model cannot name a
+    /// `Color` (it is compared in tests), so it names the intent.
+    public var symbolTint: MenuSymbolTint
 
     public init(title: String, action: MenuAction? = nil, isSeparator: Bool = false,
                 isEnabled: Bool = true, isChecked: Bool = false,
-                representedText: String? = nil, submenu: [MenuItemModel]? = nil) {
+                representedText: String? = nil, submenu: [MenuItemModel]? = nil,
+                keyEquivalent: String = "", symbolName: String? = nil,
+                symbolTint: MenuSymbolTint = .none) {
         self.title = title
         self.action = action
         self.isSeparator = isSeparator
@@ -63,9 +79,20 @@ public struct MenuItemModel: Equatable, Sendable {
         self.isChecked = isChecked
         self.representedText = representedText
         self.submenu = submenu
+        self.keyEquivalent = keyEquivalent
+        self.symbolName = symbolName
+        self.symbolTint = symbolTint
     }
 
     public static let separator = MenuItemModel(title: "", isSeparator: true, isEnabled: false)
+
+    /// The row's tint, named rather than coloured — `MenuItemModel` is compared
+    /// in tests and a `Color` is opaque.
+    public enum MenuSymbolTint: String, Equatable, Sendable {
+        case none
+        /// `Theme.attention` — the doctor's ochre, glyph-only (§1.6).
+        case attention
+    }
 
     /// A visible but non-clickable row (`item.setEnabled_(False)`).
     public static func label(_ title: String) -> MenuItemModel {
@@ -134,6 +161,10 @@ public struct StatusMenuState: Equatable, Sendable {
     public var liveTyping: LiveTypingMenuStatus
     /// Remedy / explanation for the live-typing row's inert states.
     public var liveTypingDetail: String
+    /// Some `SetupItem.isBlocking` — dictation cannot work until the user
+    /// finishes setup. Adds the "Finish setup…" row (§5.2) and takes priority
+    /// over every other menu-bar icon state (§5.1).
+    public var needsSetup: Bool
 
     public init(dictationEnabled: Bool = true, aiCleanupEnabled: Bool = true,
                 aiAvailability: Bool? = nil, recents: [String] = [],
@@ -141,7 +172,8 @@ public struct StatusMenuState: Equatable, Sendable {
                 polishUnavailableReason: String = "",
                 polishModes: [PolishModeItem] = [],
                 liveTyping: LiveTypingMenuStatus = .notInstalled,
-                liveTypingDetail: String = "") {
+                liveTypingDetail: String = "",
+                needsSetup: Bool = false) {
         self.dictationEnabled = dictationEnabled
         self.aiCleanupEnabled = aiCleanupEnabled
         self.aiAvailability = aiAvailability
@@ -151,6 +183,41 @@ public struct StatusMenuState: Equatable, Sendable {
         self.polishModes = polishModes
         self.liveTyping = liveTyping
         self.liveTypingDetail = liveTypingDetail
+        self.needsSetup = needsSetup
+    }
+}
+
+/// What the menu-bar button draws — `docs/design/ui-redesign.md` §5.1.
+///
+/// A pair, not an image: the decision stays pure (and tested in
+/// `WispritMacUITests`) while the AppKit layer owns `NSImage`.
+public struct MenuIconSpec: Equatable, Sendable {
+    public var symbolName: String
+    /// `true` for every state but recording. macOS tints a template image for
+    /// the menu-bar appearance; the recording icon is the one image in the app
+    /// that must stay `hot` in both appearances (§1.6 site 2).
+    public var isTemplate: Bool
+
+    public init(symbolName: String, isTemplate: Bool) {
+        self.symbolName = symbolName
+        self.isTemplate = isTemplate
+    }
+}
+
+/// Everything `iconSpec(for:)` needs: the session state plus the two flags that
+/// outrank it.
+public struct StatusIconState: Equatable, Sendable {
+    public var state: AppState
+    /// The `enabled` setting — master dictation toggle.
+    public var dictationEnabled: Bool
+    /// Some `SetupItem.isBlocking`.
+    public var needsSetup: Bool
+
+    public init(state: AppState = .idle, dictationEnabled: Bool = true,
+                needsSetup: Bool = false) {
+        self.state = state
+        self.dictationEnabled = dictationEnabled
+        self.needsSetup = needsSetup
     }
 }
 
@@ -179,6 +246,39 @@ public enum StatusMenuModel {
         return glyph(for: state)
     }
 
+    // MARK: - the menu-bar icon (§5.1)
+
+    /// The image the status button draws, by state.
+    ///
+    /// Priority when states collide is fixed and total:
+    /// `needsSetup > disabled > recording > working > idle`. A Mac that cannot
+    /// dictate says so before it says anything else, and the orange recording
+    /// icon is never shown for a run that is not actually recording.
+    ///
+    /// `glyph(for:)` above is kept — the emoji is still the title fallback when
+    /// a symbol cannot be made — but `StatusMenu` reads this.
+    public static func iconSpec(for icon: StatusIconState) -> MenuIconSpec {
+        if icon.needsSetup {
+            return MenuIconSpec(symbolName: "exclamationmark.circle", isTemplate: true)
+        }
+        if !icon.dictationEnabled {
+            return MenuIconSpec(symbolName: "mic.slash", isTemplate: true)
+        }
+        switch icon.state {
+        case .recording:
+            // The one non-template status image in the app (§1.6 site 2): the
+            // mic is open, so the tally is lit.
+            return MenuIconSpec(symbolName: "mic.fill", isTemplate: false)
+        case .finalizing, .inserting:
+            return MenuIconSpec(symbolName: "mic.fill", isTemplate: true)
+        case .idle:
+            return MenuIconSpec(symbolName: "mic", isTemplate: true)
+        }
+    }
+
+    /// Point size and weight for the status image (§5.1).
+    public static let iconPointSize: Double = 16
+
     /// `preview = row["text"].replace("\n", " ")`, then a 48-character budget
     /// with an ellipsis in the 48th slot.
     public static func elide(_ text: String, limit: Int = previewLimit) -> String {
@@ -191,8 +291,18 @@ public enum StatusMenuModel {
     public static func build(_ state: StatusMenuState) -> [MenuItemModel] {
         var items: [MenuItemModel] = []
 
-        // First, and above the separator: the way back to a visible app.
-        items.append(MenuItemModel(title: "Open Wisprit…", action: .openWindow))
+        // First, and above the separator: the way back to a visible app. ⌘0
+        // because an `LSUIElement` app whose icon sits behind the notch has no
+        // other route home (§5.2).
+        items.append(MenuItemModel(title: "Open Wisprit", action: .openWindow,
+                                   keyEquivalent: "0"))
+        // Directly under it, and only while something is actually blocking:
+        // the same window, opened on the page that can fix it.
+        if state.needsSetup {
+            items.append(MenuItemModel(title: "Finish setup…", action: .openSetup,
+                                       symbolName: "exclamationmark.circle",
+                                       symbolTint: .attention))
+        }
         items.append(.separator)
 
         items.append(MenuItemModel(

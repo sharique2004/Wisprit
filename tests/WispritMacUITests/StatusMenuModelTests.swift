@@ -55,7 +55,7 @@ final class StatusMenuModelTests: XCTestCase {
             dictationEnabled: true, aiCleanupEnabled: true, aiAvailability: nil, recents: [],
             polishModes: StatusMenuModelTests.modes))
         XCTAssertEqual(titles(items), [
-            "Open Wisprit…",
+            "Open Wisprit",
             "---",
             "Dictation On",
             "AI Cleanup (Apple Intelligence)",
@@ -79,9 +79,11 @@ final class StatusMenuModelTests: XCTestCase {
     /// to itself, and it has to be the first thing in the menu.
     func testOpenWindowIsTheFirstRow() {
         let items = StatusMenuModel.build(StatusMenuState())
-        XCTAssertEqual(items[0].title, "Open Wisprit…")
+        XCTAssertEqual(items[0].title, "Open Wisprit")
         XCTAssertEqual(items[0].action, .openWindow)
         XCTAssertTrue(items[0].isEnabled)
+        XCTAssertEqual(items[0].keyEquivalent, "0",
+                       "⌘0 is the only route home for an icon hidden behind the notch")
         XCTAssertTrue(items[1].isSeparator)
         XCTAssertEqual(items.compactMap(\.action).filter { $0 == .openWindow }.count, 1)
     }
@@ -283,5 +285,85 @@ final class StatusMenuModelTests: XCTestCase {
 
     func testThreeSeparators() {
         XCTAssertEqual(StatusMenuModel.build(StatusMenuState()).filter(\.isSeparator).count, 4)
+    }
+
+    // MARK: - Finish setup (§5.2)
+
+    /// The row exists if and only if something is actually blocking. A
+    /// permanent "Finish setup…" on a healthy install is a nag, and a missing
+    /// one on a broken install is the reason a menu-bar app looks dead.
+    func testFinishSetupRowAppearsOnlyWhileSomethingIsBlocking() {
+        let healthy = StatusMenuModel.build(StatusMenuState(needsSetup: false))
+        XCTAssertFalse(titles(healthy).contains("Finish setup…"))
+        XCTAssertFalse(healthy.contains { $0.action == .openSetup })
+
+        let blocked = StatusMenuModel.build(StatusMenuState(needsSetup: true))
+        XCTAssertEqual(blocked[1].title, "Finish setup…")
+        XCTAssertEqual(blocked[1].action, .openSetup)
+        XCTAssertTrue(blocked[1].isEnabled)
+        XCTAssertEqual(blocked[1].symbolName, "exclamationmark.circle")
+        XCTAssertEqual(blocked[1].symbolTint, .attention)
+        XCTAssertTrue(blocked[2].isSeparator, "it sits above the first separator")
+    }
+
+    /// Everything below the new row keeps its index, so a `needsSetup` install
+    /// gets the same menu with one row inserted — not a reshuffled one.
+    func testTheRestOfTheMenuIsUnchangedByTheFinishSetupRow() {
+        let healthy = titles(StatusMenuModel.build(
+            StatusMenuState(polishModes: StatusMenuModelTests.modes)))
+        let blocked = titles(StatusMenuModel.build(
+            StatusMenuState(polishModes: StatusMenuModelTests.modes, needsSetup: true)))
+        XCTAssertEqual(blocked.count, healthy.count + 1)
+        XCTAssertEqual(Array(blocked.dropFirst(2)), Array(healthy.dropFirst(1)))
+    }
+
+    // MARK: - the menu-bar icon (§5.1)
+
+    func testIconSpecPerState() {
+        func spec(_ state: AppState) -> MenuIconSpec {
+            StatusMenuModel.iconSpec(for: StatusIconState(state: state))
+        }
+        XCTAssertEqual(spec(.idle), MenuIconSpec(symbolName: "mic", isTemplate: true))
+        XCTAssertEqual(spec(.finalizing), MenuIconSpec(symbolName: "mic.fill", isTemplate: true))
+        XCTAssertEqual(spec(.inserting), MenuIconSpec(symbolName: "mic.fill", isTemplate: true))
+    }
+
+    /// The one non-template image in the app, and the second sanctioned orange:
+    /// the mic is open, so the tally is lit (§1.6).
+    func testOnlyRecordingIsNonTemplate() {
+        for state in AppState.allCases {
+            let spec = StatusMenuModel.iconSpec(for: StatusIconState(state: state))
+            XCTAssertEqual(spec.isTemplate, state != .recording, "\(state)")
+        }
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: StatusIconState(state: .recording)),
+                       MenuIconSpec(symbolName: "mic.fill", isTemplate: false))
+    }
+
+    /// `needsSetup > disabled > recording > working > idle`, total and in that
+    /// order — a Mac that cannot dictate says so before it says anything else.
+    func testIconPriorityWhenStatesCollide() {
+        let everything = StatusIconState(state: .recording,
+                                         dictationEnabled: false,
+                                         needsSetup: true)
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: everything).symbolName,
+                       "exclamationmark.circle")
+
+        var disabled = everything
+        disabled.needsSetup = false
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: disabled).symbolName, "mic.slash")
+        XCTAssertTrue(StatusMenuModel.iconSpec(for: disabled).isTemplate,
+                      "a switched-off app is not recording, whatever the state says")
+
+        var enabled = disabled
+        enabled.dictationEnabled = true
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: enabled).symbolName, "mic.fill")
+        XCTAssertFalse(StatusMenuModel.iconSpec(for: enabled).isTemplate)
+    }
+
+    /// Retired from the button, kept as the title fallback — and still the only
+    /// thing a caller holding a raw state string can ask for.
+    func testTheEmojiGlyphsSurviveAsTheFallback() {
+        XCTAssertEqual(StatusMenuModel.glyph(for: .recording), "🔴")
+        XCTAssertEqual(StatusMenuModel.iconPointSize, 16)
     }
 }

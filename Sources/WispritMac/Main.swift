@@ -48,8 +48,8 @@ enum WispritMacMain {
         Wisprit \(WispritVersion.string) — fully-local push-to-talk dictation.
 
           Wisprit                 run the menu-bar app
-          Wisprit window [page]   run it with the window open (status|dictionary|
-                                  history|settings|setup)
+          Wisprit window [page]   run it with the window open (home|dictionary|
+                                  insights|settings|setup)
           Wisprit doctor          permission + engine checklist (exit 0 when ready)
           Wisprit stats [--days N]
                                   what metrics.log says: outcomes, empty
@@ -70,12 +70,21 @@ enum WispritMacMain {
         case page(WispritWindowModel.Tab)
         case setupGuide
 
+        /// The redesign renamed two pages (`status → setup`, `history → home`).
+        /// Both old spellings keep working: they are in shell history, in
+        /// scripts, and in a usage string people have read.
+        ///
+        /// `setup` stays the *guide* rather than the page, which it has always
+        /// been — and the guide opens on the Setup page anyway, so nothing that
+        /// worked stops working.
         static func parse(_ arguments: [String]) -> WindowLaunch {
             switch arguments.first?.lowercased() {
-            case nil, "": return .page(.status)
+            case nil, "": return .page(.setup)
             case "setup", "onboarding", "guide": return .setupGuide
+            case "status": return .page(.setup)
+            case "history": return .page(.home)
             case let name?:
-                return .page(WispritWindowModel.Tab(rawValue: name) ?? .status)
+                return .page(WispritWindowModel.Tab(rawValue: name) ?? .setup)
             }
         }
     }

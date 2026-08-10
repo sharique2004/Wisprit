@@ -18,6 +18,12 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         public var state: () -> StatusMenuState
         /// Show the main window (and flip the app to a Dock-visible policy).
         public var openWindow: () -> Void
+        /// The same window, opened on the Setup page (§5.2).
+        public var openSetup: () -> Void
+        /// The two flags the menu-bar icon needs beyond the session state
+        /// (§5.1). Sampled on every state change, so it must stay cheap — no
+        /// disk, no probe.
+        public var iconState: () -> StatusIconState
         public var toggleDictation: () -> Void
         public var toggleAiCleanup: () -> Void
         /// One of the four polish modes, by key (`clean`/`formal`/…).
@@ -40,6 +46,8 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
 
         public init(state: @escaping () -> StatusMenuState,
                     openWindow: @escaping () -> Void = {},
+                    openSetup: @escaping () -> Void = {},
+                    iconState: @escaping () -> StatusIconState = { StatusIconState() },
                     toggleDictation: @escaping () -> Void,
                     toggleAiCleanup: @escaping () -> Void,
                     polishLast: @escaping (String) -> Void = { _ in },
@@ -54,6 +62,8 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
                     quit: @escaping () -> Void) {
             self.state = state
             self.openWindow = openWindow
+            self.openSetup = openSetup
+            self.iconState = iconState
             self.toggleDictation = toggleDictation
             self.toggleAiCleanup = toggleAiCleanup
             self.polishLast = polishLast
@@ -75,6 +85,10 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
     private var menu: NSMenu?
     /// Built rows, indexed by `NSMenuItem.tag`.
     private var rows: [MenuItemModel] = []
+    /// Last session state the app reported. Held because the icon is a function
+    /// of that *plus* two flags that change without a state transition (§5.1),
+    /// so every icon refresh needs both halves.
+    private var sessionState: AppState = .idle
 
     public init(actions: Actions) {
         self.actions = actions
@@ -84,24 +98,68 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
     /// `_build_menu`: claim the status item, attach a delegate-driven menu.
     public func install() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        item.button?.title = StatusMenuModel.glyph(for: .idle)
         let menu = NSMenu()
         menu.delegate = self
         menu.autoenablesItems = false
         item.menu = menu
         self.statusItem = item
         self.menu = menu
+        refreshIcon()
         rebuild()
     }
 
-    /// `update_state`: swap the menu-bar glyph.
+    /// `update_state`: swap the menu-bar image (§5.1).
     public func update(state: AppState) {
-        statusItem?.button?.title = StatusMenuModel.glyph(for: state)
+        sessionState = state
+        refreshIcon()
     }
 
     /// String-keyed variant for callers whose state enum lives elsewhere.
     public func update(stateNamed name: String) {
-        statusItem?.button?.title = StatusMenuModel.glyph(forStateNamed: name)
+        update(state: AppState(rawValue: name) ?? .idle)
+    }
+
+    /// Re-draw the button from `iconSpec(for:)`.
+    ///
+    /// Called on every state change *and* on every menu open, because
+    /// `needsSetup` and the master toggle both move without a session
+    /// transition — a permission granted in System Settings has to clear the
+    /// warning icon on its own.
+    public func refreshIcon() {
+        guard let button = statusItem?.button else { return }
+        var icon = actions.iconState()
+        icon.state = sessionState
+        let spec = StatusMenuModel.iconSpec(for: icon)
+        guard let image = Self.image(for: spec) else {
+            // The emoji title is the fallback the model still owns: a status
+            // item with neither image nor title is an invisible menu bar.
+            button.image = nil
+            button.title = StatusMenuModel.glyph(for: icon.state)
+            return
+        }
+        button.title = ""
+        button.image = image
+        // Only the recording icon carries its own colour; every other state is a
+        // template macOS tints for the menu bar's appearance.
+        button.contentTintColor = spec.isTemplate ? nil : Self.dynamic(Theme.Token.hot)
+    }
+
+    /// A token as a dynamic `NSColor`, so a menu bar that flips appearance flips
+    /// with it (§6.2 — the same discipline the SwiftUI side uses).
+    private static func dynamic(_ token: ColorToken) -> NSColor {
+        NSColor(name: nil) { appearance in
+            let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            return NSColor(hex: token.hex(dark: isDark), alpha: token.alpha)
+        }
+    }
+
+    private static func image(for spec: MenuIconSpec) -> NSImage? {
+        guard let image = NSImage(systemSymbolName: spec.symbolName,
+                                  accessibilityDescription: "Wisprit") else { return nil }
+        let configured = image.withSymbolConfiguration(
+            .init(pointSize: StatusMenuModel.iconPointSize, weight: .regular)) ?? image
+        configured.isTemplate = spec.isTemplate
+        return configured
     }
 
     /// `_rebuild_menu`: throw the menu away and rebuild it from fresh state.
@@ -113,6 +171,7 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         rows = []
         menu.removeAllItems()
         append(StatusMenuModel.build(actions.state()), to: menu)
+        refreshIcon()
     }
 
     private func append(_ models: [MenuItemModel], to menu: NSMenu) {
@@ -124,13 +183,17 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
             let isClickable = row.action != nil
             let item = NSMenuItem(title: row.title,
                                   action: isClickable ? #selector(itemFired(_:)) : nil,
-                                  keyEquivalent: "")
+                                  keyEquivalent: row.keyEquivalent)
+            if !row.keyEquivalent.isEmpty { item.keyEquivalentModifierMask = [.command] }
             item.tag = rows.count
             rows.append(row)
             item.isEnabled = row.isEnabled && (isClickable || row.isSubmenu)
             item.state = row.isChecked ? .on : .off
             if isClickable { item.target = self }
             if let text = row.representedText { item.representedObject = text }
+            if let symbol = row.symbolName {
+                item.image = Self.rowImage(symbol, tint: row.symbolTint)
+            }
             menu.addItem(item)
             if let children = row.submenu {
                 let sub = NSMenu(title: row.title)
@@ -155,6 +218,8 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         switch action {
         case .openWindow:
             actions.openWindow()
+        case .openSetup:
+            actions.openSetup()
         case .toggleDictation:
             actions.toggleDictation()
             rebuild()
@@ -191,6 +256,22 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         }
     }
 
+    /// A row's leading glyph. 13 pt, the list-row size (§1.8); `attention` is a
+    /// glyph tint and never a fill (§1.6).
+    private static func rowImage(_ symbol: String,
+                                 tint: MenuItemModel.MenuSymbolTint) -> NSImage? {
+        guard let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil),
+              let configured = image.withSymbolConfiguration(
+                .init(pointSize: 13, weight: .medium)) else { return nil }
+        switch tint {
+        case .none:
+            configured.isTemplate = true
+            return configured
+        case .attention:
+            return configured.tinted(with: dynamic(Theme.Token.attention))
+        }
+    }
+
     /// Default `copyToClipboard`: `clearContents` + `setString_forType_`.
     /// `nonisolated` because `NSPasteboard` is one of the few AppKit types the
     /// Python already treated as thread-safe enough (see INTERFACES.md's
@@ -200,6 +281,21 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         let pb = NSPasteboard.general
         pb.clearContents()
         pb.setString(text, forType: .string)
+    }
+}
+
+private extension NSImage {
+    /// A coloured copy. The draw block re-runs on every draw, so a dynamic
+    /// `NSColor` still resolves against the appearance in effect at that moment.
+    func tinted(with color: NSColor) -> NSImage {
+        let tinted = NSImage(size: size, flipped: false) { [self] rect in
+            draw(in: rect)
+            color.set()
+            rect.fill(using: .sourceAtop)
+            return true
+        }
+        tinted.isTemplate = false
+        return tinted
     }
 }
 #endif

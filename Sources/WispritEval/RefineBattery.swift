@@ -16,7 +16,8 @@ public struct RefineCase: Sendable, Equatable {
     /// Substrings the output must contain. An all-lowercase needle is matched
     /// case-insensitively (the semantics the original 8-case shell battery had);
     /// a needle carrying any uppercase is matched case-SENSITIVELY, which is how
-    /// casing expectations like `iPhone` and `PostgreSQL` are expressed.
+    /// casing expectations like `iPhone` and `PostgreSQL` are expressed. A needle
+    /// without a hyphen also matches hyphenated text — see `contains`.
     public var must: [String]
     /// Substrings the output must not contain, same matching rule.
     public var mustNot: [String]
@@ -129,7 +130,31 @@ public enum RefineBattery {
         return total > 0 ? weighted / total : 0
     }
 
+    /// The needle rule, plus a hyphen fold.
+    ///
+    /// A needle written WITHOUT a hyphen also matches text that hyphenates the
+    /// same words: "seventeen times twenty three" is satisfied by "seventeen
+    /// times twenty-three", which is a spelling the model picks freely and which
+    /// no case is trying to assert. A needle that CARRIES a hyphen is matched
+    /// strictly, so "write-heavy" and "S-H-A-R-I-Q-U-E" keep asserting exactly
+    /// what they say — the fold can only ever make a `mustNot` stricter and a
+    /// `must` blind to a hyphen it never mentioned.
     static func contains(_ needle: String, in output: String) -> Bool {
+        if occurs(needle, in: output) { return true }
+        guard !needle.contains(where: { hyphens.contains($0) }) else { return false }
+        return occurs(needle, in: dehyphenated(output))
+    }
+
+    /// ASCII hyphen plus the Unicode hyphens a text-cleanup model reaches for.
+    static let hyphens: Set<Character> = ["-", "\u{2010}", "\u{2011}", "\u{2013}"]
+
+    static func dehyphenated(_ text: String) -> String {
+        String(text.map { hyphens.contains($0) ? " " : $0 })
+    }
+
+    /// An all-lowercase needle is matched case-insensitively; a needle carrying
+    /// any uppercase is matched case-SENSITIVELY.
+    static func occurs(_ needle: String, in output: String) -> Bool {
         needle.contains(where: { $0.isUppercase })
             ? output.contains(needle)
             : output.lowercased().contains(needle)

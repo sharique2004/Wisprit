@@ -420,8 +420,12 @@ final class WindowModelTests: XCTestCase {
         XCTAssertEqual(model.onboardingStep, .welcome)
 
         model.acknowledgeWelcome()
+        XCTAssertEqual(model.onboardingStep, .micTest,
+                       "the grant is green, but nothing has proved the input carries sound")
+
+        model.noteMicTestPassed()
         XCTAssertEqual(model.onboardingStep, .accessibility,
-                       "mic and Input Monitoring are already granted")
+                       "mic, the mic test, 🌐 and Input Monitoring are all settled")
     }
 
     func testFinishingPersistsCompletionSoTheNextLaunchStaysQuiet() async {
@@ -471,6 +475,7 @@ final class WindowModelTests: XCTestCase {
         await model.refreshFull()
         model.beginOnboarding()
         model.acknowledgeWelcome()
+        model.noteMicTestPassed()
         model.noteDictationObserved()
 
         XCTAssertTrue(model.isOnboarding, "the user has not seen a finish line yet")
@@ -525,17 +530,27 @@ private final class ProbeCounter: @unchecked Sendable {
 /// rather than in a bare string comparison inside `main`.
 final class WindowLaunchArgumentTests: XCTestCase {
 
-    func testBareWindowOpensTheStatusPage() {
-        XCTAssertEqual(WispritMacMain.WindowLaunch.parse([]), .page(.status))
-        XCTAssertEqual(WispritMacMain.WindowLaunch.parse([""]), .page(.status))
+    func testBareWindowOpensTheSetupPage() {
+        XCTAssertEqual(WispritMacMain.WindowLaunch.parse([]), .page(.setup))
+        XCTAssertEqual(WispritMacMain.WindowLaunch.parse([""]), .page(.setup))
     }
 
+    /// `setup` is the one exception, and it predates the page of that name: it
+    /// has always opened the *guide*, which itself lands on the Setup page. See
+    /// `testTheSetupGuideHasThreeObviousSpellings`.
     func testEveryTabIsAddressableByItsOwnName() {
-        for tab in WispritWindowModel.Tab.allCases {
+        for tab in WispritWindowModel.Tab.allCases where tab != .setup {
             XCTAssertEqual(WispritMacMain.WindowLaunch.parse([tab.rawValue]), .page(tab))
             XCTAssertEqual(WispritMacMain.WindowLaunch.parse([tab.rawValue.uppercased()]),
                            .page(tab))
         }
+    }
+
+    /// The redesign renamed two pages. Both old spellings are in shell history
+    /// and in a usage string people have read, so both keep working.
+    func testTheRenamedPagesKeepTheirOldSpellings() {
+        XCTAssertEqual(WispritMacMain.WindowLaunch.parse(["status"]), .page(.setup))
+        XCTAssertEqual(WispritMacMain.WindowLaunch.parse(["HISTORY"]), .page(.home))
     }
 
     func testTheSetupGuideHasThreeObviousSpellings() {
@@ -544,7 +559,7 @@ final class WindowLaunchArgumentTests: XCTestCase {
         }
     }
 
-    func testAnUnknownPageFallsBackToStatusRatherThanFailing() {
-        XCTAssertEqual(WispritMacMain.WindowLaunch.parse(["nonsense"]), .page(.status))
+    func testAnUnknownPageFallsBackToSetupRatherThanFailing() {
+        XCTAssertEqual(WispritMacMain.WindowLaunch.parse(["nonsense"]), .page(.setup))
     }
 }

@@ -3,6 +3,7 @@ import Combine
 import Foundation
 import WispritDictionary
 import WispritKit
+import WispritMacUI
 import WispritPersistence
 
 /// The window's single source of truth.
@@ -41,6 +42,16 @@ public final class WispritWindowModel: ObservableObject {
         public var recents: @Sendable (Int) -> [HistoryEntry]
         public var purgeHistory: @Sendable () -> Void
         public var copy: @Sendable (String) -> Void
+        /// Put one stored transcript back at the cursor — Home's `text.insert`
+        /// row action (§3.3). Optional because it is the one row action that
+        /// cannot degrade to something harmless: with no port wired the button
+        /// is **absent**, exactly as `trash` is until `History.delete(id:)`
+        /// exists (§6.6). Never call it while a dictation is in flight; the
+        /// model gates that.
+        ///
+        /// Main-actor, like `performFix`: it hands the window front back to the
+        /// app underneath before it posts anything.
+        public var pasteAtCursor: ((String) -> Void)?
         /// Apps where the insertion ladder has already learned it cannot stream
         /// live text. In-memory and per-launch — this is the ladder's own cache,
         /// not a probe.
@@ -55,6 +66,7 @@ public final class WispritWindowModel: ObservableObject {
                     recents: @escaping @Sendable (Int) -> [HistoryEntry] = { _ in [] },
                     purgeHistory: @escaping @Sendable () -> Void = {},
                     copy: @escaping @Sendable (String) -> Void = { _ in },
+                    pasteAtCursor: ((String) -> Void)? = nil,
                     liveTypingFallbacks: @escaping @Sendable () -> [BundleVerdict] = { [] },
                     performFix: @escaping (SetupFixKind) -> Void = { _ in }) {
             self.fullProbe = fullProbe
@@ -63,30 +75,74 @@ public final class WispritWindowModel: ObservableObject {
             self.recents = recents
             self.purgeHistory = purgeHistory
             self.copy = copy
+            self.pasteAtCursor = pasteAtCursor
             self.liveTypingFallbacks = liveTypingFallbacks
             self.performFix = performFix
         }
     }
 
+    /// The Hub's five pages — `docs/design/ui-redesign.md` §3.2.
+    ///
+    /// `allCases` is the sidebar's order, and the raw values are what
+    /// `Wisprit window <page>` parses (`WindowLaunch.parse`, which also keeps
+    /// the pre-redesign spellings working: `status → .setup`, `history → .home`).
     public enum Tab: String, Sendable, Equatable, CaseIterable, Identifiable {
-        case status, dictionary, history, settings
+        case home, dictionary, insights, setup, settings
         public var id: String { rawValue }
 
         public var title: String {
             switch self {
-            case .status: return "Status"
+            case .home: return "Home"
             case .dictionary: return "Dictionary"
-            case .history: return "History"
+            case .insights: return "Insights"
+            case .setup: return "Setup"
             case .settings: return "Settings"
             }
         }
 
         public var symbol: String {
             switch self {
-            case .status: return "waveform.circle"
+            case .home: return "house"
             case .dictionary: return "character.book.closed"
-            case .history: return "clock.arrow.circlepath"
+            case .insights: return "chart.bar.xaxis"
+            case .setup: return "checklist"
             case .settings: return "gearshape"
+            }
+        }
+
+        /// The two pinned to the bottom of the sidebar, under the hairline.
+        public var isPinnedToBottom: Bool {
+            switch self {
+            case .setup, .settings: return true
+            case .home, .dictionary, .insights: return false
+            }
+        }
+
+        public static var primary: [Tab] { allCases.filter { !$0.isPinnedToBottom } }
+        public static var pinned: [Tab] { allCases.filter(\.isPinnedToBottom) }
+    }
+
+    /// The 6 pt dot the `setup` nav row carries (§3.2). Absent is a real state:
+    /// a checklist with nothing to say wears no badge at all.
+    public enum SetupBadge: String, Sendable, Equatable {
+        /// Something is blocking dictation outright.
+        case blocking
+        /// An essential row wants attention but dictation still works.
+        case attention
+    }
+
+    /// The sidebar footer's dot + label (§3.2). Ordered by what the user most
+    /// needs to know: a live microphone first, then a broken chain, then a
+    /// switched-off app, then the quiet good news.
+    public enum SidebarStatus: String, Sendable, Equatable {
+        case listening, needsSetup, dictationOff, ready
+
+        public var label: String {
+            switch self {
+            case .listening: return "Listening"
+            case .needsSetup: return "Needs setup"
+            case .dictationOff: return "Dictation off"
+            case .ready: return "Ready"
             }
         }
     }
@@ -107,14 +163,34 @@ public final class WispritWindowModel: ObservableObject {
     @Published public private(set) var liveTypingFallbacks: [BundleVerdict] = []
     @Published public private(set) var dictionaryRows: [DictionaryRow] = []
     @Published public var dictionarySearch = ""
-    @Published public var selectedTab: Tab = .status
+    @Published public var selectedTab: Tab = .setup
     /// The try-it scratch field. Held here so switching tabs does not lose it.
     @Published public var playgroundText = ""
+    /// When the last full probe landed — "Checked 4 seconds ago." on the Setup
+    /// page (§3.7). nil until the first one finishes.
+    @Published public private(set) var lastProbeAt: Date?
+    /// The session's own state, forwarded by the app. The sidebar's status dot
+    /// is the only thing that reads it; nothing here drives dictation.
+    @Published public private(set) var sessionState: SessionController.State = .idle
 
     // History page — its own list, its own limit.
     @Published public private(set) var history: [HistoryEntry] = []
     /// The last fetch came back full, so there is very likely more behind it.
     @Published public private(set) var historyHasMore = false
+
+    // Home (§3.3).
+    /// The same page of history in the neutral shape `HomeModel` groups,
+    /// filters and counts. Mapped once, off the main actor, next to the fetch
+    /// that produced it — not per render.
+    @Published public private(set) var homeItems: [TranscriptItem] = []
+    /// The right-hand stat rail. Derived from the whole retained table rather
+    /// than the page on screen (a lifetime count is not in the newest fifty
+    /// rows), so it has its own read. Nil until that read lands, which is also
+    /// what tells the page apart from a genuinely empty history.
+    @Published public private(set) var homeStats: HomeStats?
+    /// Home's search box (§3.3). Not a filter the model applies: `HomeModel`
+    /// owns the matching rule and the page calls it.
+    @Published public var historySearch = ""
 
     // Onboarding
     @Published public private(set) var isOnboarding = false
@@ -123,6 +199,8 @@ public final class WispritWindowModel: ObservableObject {
     @Published public private(set) var liveTypingSettled = false
     /// A transcript has landed since the window opened.
     @Published public private(set) var didDictate = false
+    /// The onboarding mic test has heard a voiced peak (§4.2 step 3).
+    @Published public private(set) var micTestPassed = false
 
     // Settings mirrors — written straight through to `Settings` on change.
     @Published public private(set) var hotkey: WindowSettings.HotkeyOption = .fn
@@ -135,6 +213,21 @@ public final class WispritWindowModel: ObservableObject {
     @Published public private(set) var historyEnabled = true
     @Published public private(set) var holdDebounceMs = 150
     @Published public private(set) var pasteRestoreDelayMs = 500
+    // Surfaced for the first time by the redesigned Settings page (§3.6). Same
+    // shape as the ones above: a read-only mirror, one explicit setter, one
+    // `Settings.set` per call.
+    @Published public private(set) var locale = "en-US"
+    @Published public private(set) var ensureSentencePeriod = false
+    @Published public private(set) var terminalBundleIDs: [String] = []
+    @Published public private(set) var aiCleanupMaxWords = 350
+    @Published public private(set) var aiCleanupTimeoutMs = 12000
+    @Published public private(set) var imSelectionPolicy: WindowSettings.SelectionPolicyOption = .warm
+    @Published public private(set) var historyLimit = 1000
+    @Published public private(set) var finalizeTimeoutMs = 1500
+    @Published public private(set) var engine: WindowSettings.EngineOption = .auto
+    /// The pill has been dragged somewhere. "Reset its position" is disabled
+    /// when it has not.
+    @Published public private(set) var hasPillPosition = false
 
     // MARK: - Collaborators
 
@@ -151,13 +244,20 @@ public final class WispritWindowModel: ObservableObject {
     public static let recentsPreviewLimit = 5
     /// One History page. "Load more" adds another.
     public static let historyPageSize = 50
-    private var historyLimit = WispritWindowModel.historyPageSize
+    /// How many rows the Home page has asked for so far. Named for the *page*,
+    /// not the setting: `historyLimit` is the user's `history_limit` cap.
+    private var historyPageLimit = WispritWindowModel.historyPageSize
     /// Newest history timestamp when the window opened — the baseline the try-it
     /// step compares against when the session never reports directly. Set once,
     /// and reset only when the setup guide is re-run: reopening the window is
     /// not a reason to un-prove a dictation that already worked.
     private var dictationBaseline: Double = 0
     private var hasTakenDictationBaseline = false
+    /// Newest timestamp the stat rail was computed from. The 5-row preview the
+    /// tick already fetches is enough to notice a transcript the rail has not
+    /// seen — including one written while the window was on another page — so
+    /// the rail stays live without a second query every two seconds.
+    private var statsNewestTs: Double = 0
     /// The window is on screen, so the tick has something to keep up to date.
     private var isWindowVisible = false
     /// A dictation is in flight. The timer is off for the duration: the hotkey
@@ -189,6 +289,7 @@ public final class WispritWindowModel: ObservableObject {
         reloadDictionary()
         refreshRecents()
         loadHistory(reset: true)
+        refreshHomeStats()
         Task { await refreshFull() }
         startPolling()
     }
@@ -203,6 +304,7 @@ public final class WispritWindowModel: ObservableObject {
     /// Anything but `.idle` means the user is mid-utterance, and the window's
     /// job for that stretch is to do nothing at all.
     public func noteSessionState(_ state: SessionController.State) {
+        sessionState = state
         let busy = state != .idle
         guard busy != isDictating else { return }
         isDictating = busy
@@ -250,10 +352,10 @@ public final class WispritWindowModel: ObservableObject {
             Task { await refreshFast() }
         }
         refreshRecents()
-        // The History page is the only one that would otherwise go stale while
-        // the user watched it, and re-fetching its page is worth a query only
-        // while it is the page on screen.
-        if selectedTab == .history { loadHistory() }
+        // Home is the only page that would otherwise go stale while the user
+        // watched it, and re-fetching its page is worth a query only while it is
+        // the page on screen.
+        if selectedTab == .home { loadHistory() }
     }
 
     /// The whole picture. Safe to call from anywhere; it awaits off the main
@@ -266,6 +368,7 @@ public final class WispritWindowModel: ObservableObject {
         // Order matters: `apply` builds the hero, and the hero is "Checking…"
         // until `hasProbed` says a real probe has landed.
         hasProbed = true
+        lastProbeAt = Date()
         globeKey = usage
         reloadSettings()
         apply(facts: gathered)
@@ -302,6 +405,40 @@ public final class WispritWindowModel: ObservableObject {
         advanceOnboardingIfNeeded()
     }
 
+    // MARK: - Sidebar (§3.2)
+
+    /// The dot on the `setup` nav row. Pure, so the three-way rule is a property
+    /// a test can pin rather than a condition buried in a view body.
+    ///
+    /// `attention` reads only *essential* rows: an optional feature the user has
+    /// not set up is not a warning, and badging the sidebar for one is how a
+    /// permanent dot gets learned as background noise.
+    public nonisolated static func setupBadge(_ items: [SetupItem]) -> SetupBadge? {
+        if items.contains(where: \.isBlocking) { return .blocking }
+        if items.contains(where: { $0.isEssential && $0.mark == .warn }) { return .attention }
+        return nil
+    }
+
+    public var setupBadge: SetupBadge? { Self.setupBadge(items) }
+
+    /// The footer's dot + label.
+    public nonisolated static func sidebarStatus(sessionState: SessionController.State,
+                                     items: [SetupItem],
+                                     dictationEnabled: Bool) -> SidebarStatus {
+        // Recording outranks everything, including a broken checklist: if audio
+        // is open the dot is the tally, and the tally never lies (§1.6).
+        if sessionState == .recording { return .listening }
+        if items.contains(where: \.isBlocking) { return .needsSetup }
+        if !dictationEnabled { return .dictationOff }
+        return .ready
+    }
+
+    public var sidebarStatus: SidebarStatus {
+        Self.sidebarStatus(sessionState: sessionState,
+                           items: items,
+                           dictationEnabled: dictationEnabled)
+    }
+
     /// Non-nil while macOS's Secure Keyboard Entry is held by some app: the one
     /// condition under which a fully green checklist still cannot dictate.
     /// Recomputed from `facts`, which the 2-second tick re-reads, so the banner
@@ -324,29 +461,67 @@ public final class WispritWindowModel: ObservableObject {
 
     private func publish(recents rows: [HistoryEntry]) {
         recents = rows
-        if let newest = rows.first?.ts, newest > dictationBaseline {
+        guard let newest = rows.first?.ts else { return }
+        if newest > dictationBaseline {
             didDictate = true
+        }
+        // A transcript the rail has not counted yet. One comparison against a
+        // query that was already going to run, rather than re-reading the whole
+        // table on the 2-second tick.
+        if newest > statsNewestTs {
+            refreshHomeStats()
+        }
+    }
+
+    /// Home's stat rail (§3.3): lifetime words, today, the speaking-rate median
+    /// and the streak grid, over every transcript the retention limit keeps.
+    ///
+    /// One SQLite read plus the derivation, both on a detached task and
+    /// published back on the main actor — the pattern `refreshRecents` and
+    /// `loadHistory` already set (§6.4). The rail is not on the 2-second tick:
+    /// it re-reads when the window opens, when a dictation lands, when history
+    /// is purged, and when the cheap preview notices a row it has not counted.
+    public func refreshHomeStats() {
+        let fetch = ports.recents
+        let limit = max(historyLimit, Self.historyPageSize)
+        Task { [weak self] in
+            let result = await Task.detached(priority: .utility) {
+                let entries = fetch(limit)
+                return (HomeSource.stats(entries, now: Date(), calendar: .current),
+                        entries.first?.ts ?? 0)
+            }.value
+            guard let self else { return }
+            self.homeStats = result.0
+            self.statsNewestTs = result.1
         }
     }
 
     /// The History page's own list. `reset` starts again at one page; otherwise
     /// this re-fetches whatever the user has already loaded.
     public func loadHistory(reset: Bool = false) {
-        if reset { historyLimit = Self.historyPageSize }
+        if reset { historyPageLimit = Self.historyPageSize }
         let fetch = ports.recents
-        let limit = historyLimit
+        let limit = historyPageLimit
         Task { [weak self] in
-            let rows = await Task.detached(priority: .utility) { fetch(limit) }.value
+            // Mapped where it is fetched, on the same detached task: Home reads
+            // `homeItems`, and a per-render `map` over a thousand transcripts
+            // would re-split every one of them for a word count that never
+            // changes.
+            let page = await Task.detached(priority: .utility) { () -> ([HistoryEntry], [TranscriptItem]) in
+                let rows = fetch(limit)
+                return (rows, HomeSource.items(rows))
+            }.value
             guard let self else { return }
-            self.history = rows
+            self.history = page.0
+            self.homeItems = page.1
             // A full page is the only evidence available without a count query:
             // it means the limit, not the table, decided where the list stopped.
-            self.historyHasMore = rows.count >= limit
+            self.historyHasMore = page.0.count >= limit
         }
     }
 
     public func loadMoreHistory() {
-        historyLimit += Self.historyPageSize
+        historyPageLimit += Self.historyPageSize
         loadHistory()
     }
 
@@ -405,10 +580,28 @@ public final class WispritWindowModel: ObservableObject {
         ports.copy(text)
     }
 
+    /// Whether Home draws the `text.insert` row action at all. Absent, not
+    /// disabled: a paste button that cannot paste is worse than no button
+    /// (§3.3's rule for `trash`, applied to the same class of missing seam).
+    public var canPasteAtCursor: Bool { ports.pasteAtCursor != nil }
+
+    /// Put one stored transcript back at the cursor.
+    ///
+    /// Refused mid-utterance. The insertion path swaps the clipboard and posts
+    /// ⌘V, and the session is doing exactly that with the text the user just
+    /// spoke — two of them interleaved is how a transcript lands in the wrong
+    /// app with the wrong clipboard restored after it.
+    public func pasteAtCursor(_ text: String) {
+        guard sessionState == .idle, !text.isEmpty else { return }
+        ports.pasteAtCursor?(text)
+    }
+
     public func purgeHistory() {
         ports.purgeHistory()
         refreshRecents()
         loadHistory(reset: true)
+        statsNewestTs = 0
+        refreshHomeStats()
     }
 
     // MARK: - Dictionary
@@ -433,6 +626,15 @@ public final class WispritWindowModel: ObservableObject {
         reloadDictionary()
     }
 
+    /// Accept a quarantined term (§3.4's Pending badge). Dismissing one is just
+    /// `deleteTerm` — the store's own removal, not a second kind of delete.
+    @discardableResult
+    public func promoteTerm(_ row: DictionaryRow) -> Bool {
+        let promoted = dictionary.promote(row)
+        reloadDictionary()
+        return promoted
+    }
+
     public var dictionaryPath: URL { dictionary.path }
 
     // MARK: - Settings
@@ -449,6 +651,17 @@ public final class WispritWindowModel: ObservableObject {
         historyEnabled = settings.historyEnabled
         holdDebounceMs = WindowSettings.clampHoldDebounce(settings.holdDebounceMs)
         pasteRestoreDelayMs = WindowSettings.clampPasteRestore(settings.pasteRestoreDelayMs)
+        locale = settings.locale
+        ensureSentencePeriod = settings.ensureSentencePeriod
+        terminalBundleIDs = settings.terminalBundleIDs
+        aiCleanupMaxWords = WindowSettings.clampAiCleanupMaxWords(settings.aiCleanupMaxWords)
+        aiCleanupTimeoutMs = WindowSettings.clampAiCleanupTimeout(settings.aiCleanupTimeoutMs)
+        imSelectionPolicy = WindowSettings.SelectionPolicyOption.parse(
+            settings.string(SettingsKey.imSelectionPolicy) ?? "")
+        historyLimit = WindowSettings.clampHistoryLimit(settings.historyLimit)
+        finalizeTimeoutMs = WindowSettings.clampFinalizeTimeout(settings.finalizeTimeoutMs)
+        engine = WindowSettings.EngineOption.parse(settings.engine)
+        hasPillPosition = settings.pillPosition != nil
     }
 
     public func setHotkey(_ value: WindowSettings.HotkeyOption) {
@@ -512,7 +725,73 @@ public final class WispritWindowModel: ObservableObject {
         settings.set(SettingsKey.pasteRestoreDelayMs, clamped)
     }
 
+    public func setLocale(_ value: String) {
+        locale = value
+        settings.set(SettingsKey.locale, value)
+    }
+
+    public func setEnsureSentencePeriod(_ value: Bool) {
+        ensureSentencePeriod = value
+        settings.set(SettingsKey.ensureSentencePeriod, value)
+    }
+
+    /// The apps that get typed text instead of a paste. Blank lines and
+    /// duplicates are dropped here rather than written to the file — the field
+    /// is free text and the ladder reads this list on every insertion.
+    public func setTerminalBundleIDs(_ value: [String]) {
+        var seen = Set<String>()
+        let cleaned = value
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+        terminalBundleIDs = cleaned
+        settings.set(SettingsKey.terminalBundleIDs, cleaned)
+    }
+
+    public func setAiCleanupMaxWords(_ value: Int) {
+        let clamped = WindowSettings.clampAiCleanupMaxWords(value)
+        aiCleanupMaxWords = clamped
+        settings.set(SettingsKey.aiCleanupMaxWords, clamped)
+    }
+
+    public func setAiCleanupTimeoutMs(_ value: Int) {
+        let clamped = WindowSettings.clampAiCleanupTimeout(value)
+        aiCleanupTimeoutMs = clamped
+        settings.set(SettingsKey.aiCleanupTimeoutMs, clamped)
+    }
+
+    public func setImSelectionPolicy(_ value: WindowSettings.SelectionPolicyOption) {
+        imSelectionPolicy = value
+        settings.set(SettingsKey.imSelectionPolicy, value.rawValue)
+    }
+
+    public func setHistoryLimit(_ value: Int) {
+        let clamped = WindowSettings.clampHistoryLimit(value)
+        historyLimit = clamped
+        settings.set(SettingsKey.historyLimit, clamped)
+    }
+
+    public func setFinalizeTimeoutMs(_ value: Int) {
+        let clamped = WindowSettings.clampFinalizeTimeout(value)
+        finalizeTimeoutMs = clamped
+        settings.set(SettingsKey.finalizeTimeoutMs, clamped)
+    }
+
+    /// Only the two engines that exist. `mlx_whisper` / `faster_whisper` are
+    /// unbuilt and are never offered (§3.6).
+    public func setEngine(_ value: WindowSettings.EngineOption) {
+        engine = value
+        settings.set(SettingsKey.engine, value.rawValue)
+    }
+
+    /// Put the pill back at the default bottom-centre spot. Writing `null` is
+    /// what `Pill.restorePosition` reads as "no saved position".
+    public func resetPillPosition() {
+        settings.set(SettingsKey.pillPosition, .null)
+        hasPillPosition = false
+    }
+
     public var configPath: URL { settings.configPath }
+    public var metricsPath: URL { WispritPaths.metricsPath }
 
     private func refreshSummaryOnly() {
         summary = SetupChecklist.summary(
@@ -529,7 +808,24 @@ public final class WispritWindowModel: ObservableObject {
                          globeKey: globeKey,
                          didDictate: didDictate,
                          welcomeAcknowledged: welcomeAcknowledged,
-                         liveTypingSettled: liveTypingSettled)
+                         liveTypingSettled: liveTypingSettled,
+                         micTestPassed: micTestPassed,
+                         hotkey: hotkey)
+    }
+
+    /// The mic test heard a voiced peak (§4.2 step 3). Deliberately not
+    /// persisted: it proves the input worked *now*, and a machine whose mic has
+    /// since been unplugged should be asked again.
+    public func noteMicTestPassed() {
+        guard !micTestPassed else { return }
+        micTestPassed = true
+        advanceOnboardingIfNeeded()
+    }
+
+    /// Re-arm the mic test — the setup guide, re-run from the top, has to see it
+    /// work again.
+    public func resetMicTest() {
+        micTestPassed = false
     }
 
     /// True on a first run, or when a required permission has gone missing.
@@ -544,8 +840,12 @@ public final class WispritWindowModel: ObservableObject {
         welcomeAcknowledged = false
         isOnboarding = true
         // Re-running the guide from the top is a request to see it work again,
-        // so the try-it step has to be re-proved. Resuming is not.
-        if !resuming { resetDictationProof() }
+        // so the try-it step and the mic test both have to be re-proved.
+        // Resuming is not.
+        if !resuming {
+            resetDictationProof()
+            resetMicTest()
+        }
         if resuming,
            let saved = settings.string(OnboardingSettings.stepKey),
            let step = OnboardingStep(rawValue: saved),

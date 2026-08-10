@@ -99,9 +99,20 @@ cat > "$CONTENTS/Info.plist" <<PLIST
     <string>Wisprit records only while you hold the dictation key. The audio is transcribed on this Mac and is never uploaded or saved to disk.</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>Wisprit uses Apple's on-device speech recognition to turn what you say into text. Nothing is sent to a server.</string>
+    <!-- Bundled display face (SIL OFL) — Theme.resolveSerif() falls back to the
+         system serif when the family is missing, so this key is additive. -->
+    <key>ATSApplicationFontsPath</key><string>Fonts</string>
 </dict>
 </plist>
 PLIST
+
+# --- fonts ------------------------------------------------------------------
+# Instrument Serif (SIL OFL 1.1) — the design's display face for numerals.
+mkdir -p "$CONTENTS/Resources/Fonts"
+cp "$REPO_DIR"/packaging/fonts/InstrumentSerif-*.ttf "$CONTENTS/Resources/Fonts/" 2>/dev/null \
+    && cp "$REPO_DIR/packaging/fonts/OFL.txt" "$CONTENTS/Resources/Fonts/" \
+    && echo "  fonts: embedded Instrument Serif (OFL)" \
+    || echo "  fonts: skipped (packaging/fonts missing) — system serif fallback"
 
 # --- embed the palette input method -----------------------------------------
 # Built and signed FIRST, with its own sandbox entitlements, because a nested

@@ -86,6 +86,26 @@ final class RefineBatteryTests: XCTestCase {
         XCTAssertFalse(RefineBattery.contains("iPhone", in: "the Iphone"))
     }
 
+    /// A needle that does not mention a hyphen must not care whether the model
+    /// hyphenated: "twenty three" ≡ "twenty-three" is a spelling choice, not the
+    /// behaviour under test. A needle that DOES carry a hyphen keeps asserting
+    /// exactly what it says, which is what "write-heavy" and "S-H-A-R-I-Q-U-E"
+    /// are for.
+    func testHyphenFoldDoesNotWeakenNeedles() {
+        XCTAssertTrue(RefineBattery.contains("seventeen times twenty three",
+                                             in: "What's seventeen times twenty-three?"))
+        XCTAssertTrue(RefineBattery.contains("seventeen times twenty three",
+                                             in: "What's seventeen times twenty three?"))
+        // Hyphenated needles stay strict in both directions.
+        XCTAssertTrue(RefineBattery.contains("write-heavy", in: "the workload is write-heavy"))
+        XCTAssertFalse(RefineBattery.contains("write-heavy", in: "the workload is write heavy"))
+        XCTAssertFalse(RefineBattery.contains("S-H-A-R-I-Q-U-E", in: "my name is S H A R I Q U E"))
+        // …and the fold can only make a mustNot needle catch MORE.
+        XCTAssertTrue(RefineBattery.contains("right heavy", in: "the workload is right-heavy"))
+        // The case-sensitivity rule survives the fold.
+        XCTAssertFalse(RefineBattery.contains("PostgreSQL", in: "post-gresql"))
+    }
+
     func testAggregateIsWeightWeighted() {
         let cases = [
             RefineCase(id: "heavy", category: "c", input: "i", must: ["x"], weight: 1.0),

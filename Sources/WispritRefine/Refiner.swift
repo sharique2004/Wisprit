@@ -10,13 +10,16 @@ import WispritKit
 /// measured), voice commands, and email/URL joining all keep working, and any
 /// refinement failure simply degrades to the deterministic behavior.
 ///
-/// Trust rules (the model is small and occasionally answers/summarizes instead
-/// of cleaning — all observed in testing):
+/// Trust rules (the model is small and occasionally answers, obeys, or
+/// summarizes instead of cleaning — all observed in testing):
 ///
 /// - output stripped of leaked meta-preambles ("here's the cleaned transcript:")
 ///   and invented wrappers (fences, echoed tags, full quoting);
 /// - output must be plausibly the same utterance (word-count band + assistant
 ///   opener check);
+/// - output must not be code the utterance did not contain, and must not be the
+///   utterance minus its opening instruction — the two ways an obedient reply
+///   slips through the word-count band (`RefineGuards` §obedience evidence);
 /// - any error, timeout, or crash keeps the verbatim text. Refinement can only
 ///   ever *win* — it must never lose words or block insertion.
 ///
@@ -180,9 +183,25 @@ public actor Refiner {
 
         case .produced(let generated):
             let refined = RefineGuards.stripWrappers(generated)
+            // The accept path, in order. `plausible` stays FIRST: it is the
+            // broadest check and the one every previously recorded metrics row
+            // was attributed to, so anything the word-count band or the
+            // assistant-opener check already caught keeps reporting
+            // `implausible` and the stream stays comparable. The two obedience
+            // detectors run after it because they catch precisely what the band
+            // cannot — a reply whose LENGTH is unremarkable but whose CONTENT is
+            // the dictation carried out.
             guard RefineGuards.plausible(raw: raw, refined: refined) else {
                 log.warning("refined text implausible; keeping verbatim")
                 return RefineResult(text: raw, outcome: .implausible)
+            }
+            guard !RefineGuards.obeyedWithCode(raw: raw, refined: refined) else {
+                log.warning("refined text is code the utterance did not contain; keeping verbatim")
+                return RefineResult(text: raw, outcome: .obeyed)
+            }
+            guard !RefineGuards.droppedLeadingInstruction(raw: raw, refined: refined) else {
+                log.warning("refined text dropped the leading instruction; keeping verbatim")
+                return RefineResult(text: raw, outcome: .obeyed)
             }
             return RefineResult(text: refined, outcome: .applied)
         }

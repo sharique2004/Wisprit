@@ -234,7 +234,7 @@ The Python package in [`wisprit/`](wisprit/) is the **legacy reference implement
 - **New: spoken-spelling correction and the learn loop**, plus the `has_letter_run` refine bypass they depend on.
 - **New: the insertion ladder and the embedded input method.** Rungs 3–5 are the Python `insert.py` cascade, kept byte-for-byte.
 - **Doctor's checks moved with the code**: the `apple_live` probe, the mlx-whisper import check, and the `swiftc`/helper-binary checks are replaced by `SpeechTranscriber` availability + installed locales, FoundationModels availability, and the three input-method checks. Every remedy string carried over unchanged.
-- **`metrics.log` is one continuous stream** across the cutover — same field names, same AI outcome vocabulary (plus `has_letter_run`), same `history.sqlite` schema and `config.json` keys. `wisprit.lock` is shared, so the two builds cannot run at once.
+- **`metrics.log` is one continuous stream** across the cutover — same field names, same AI outcome vocabulary (plus `has_letter_run` and `obeyed`), same `history.sqlite` schema and `config.json` keys. `wisprit.lock` is shared, so the two builds cannot run at once.
 
 ## Roadmap
 

@@ -34,20 +34,28 @@ final class OnboardingModelTests: XCTestCase {
                         globe: GlobeKeyUsage = .doNothing,
                         didDictate: Bool = true,
                         welcome: Bool = true,
-                        liveTypingSettled: Bool = false) -> OnboardingInputs {
+                        liveTypingSettled: Bool = false,
+                        micTestPassed: Bool = true,
+                        hotkey: WindowSettings.HotkeyOption = .fn) -> OnboardingInputs {
         OnboardingInputs(items: SetupChecklist.items(from: facts),
                          globeKey: globe,
                          didDictate: didDictate,
                          welcomeAcknowledged: welcome,
-                         liveTypingSettled: liveTypingSettled)
+                         liveTypingSettled: liveTypingSettled,
+                         micTestPassed: micTestPassed,
+                         hotkey: hotkey)
     }
 
     // MARK: - ordering
 
+    /// Two orderings are load-bearing (§4.2): the mic test sits straight after
+    /// the grant it verifies, and the 🌐 key comes BEFORE Input Monitoring —
+    /// a user whose 🌐 opens the emoji picker cannot pass `.tryIt` no matter
+    /// what they grant, and it is the only step resolvable without a prompt.
     func testStepsAreOrderedToMinimiseRelaunches() {
         XCTAssertEqual(OnboardingStep.allCases,
-                       [.welcome, .microphone, .inputMonitoring, .accessibility,
-                        .globeKey, .tryIt, .liveTyping])
+                       [.welcome, .microphone, .micTest, .globeKey, .inputMonitoring,
+                        .accessibility, .tryIt, .liveTyping])
     }
 
     func testWelcomeIsWhereAFreshRunStarts() {
@@ -61,17 +69,48 @@ final class OnboardingModelTests: XCTestCase {
                                  microphone: "undetermined"))
         XCTAssertEqual(OnboardingModel.firstIncomplete(state), .microphone)
 
+        state = inputs(facts(accessibility: false, inputMonitoring: "undetermined"),
+                       micTestPassed: false)
+        XCTAssertEqual(OnboardingModel.firstIncomplete(state), .micTest)
+
+        state = inputs(facts(accessibility: false, inputMonitoring: "undetermined"),
+                       globe: .showEmoji)
+        XCTAssertEqual(OnboardingModel.firstIncomplete(state), .globeKey)
+
         state = inputs(facts(accessibility: false, inputMonitoring: "undetermined"))
         XCTAssertEqual(OnboardingModel.firstIncomplete(state), .inputMonitoring)
 
         state = inputs(facts(accessibility: false))
         XCTAssertEqual(OnboardingModel.firstIncomplete(state), .accessibility)
 
-        state = inputs(facts(), globe: .showEmoji)
-        XCTAssertEqual(OnboardingModel.firstIncomplete(state), .globeKey)
-
         state = inputs(facts(), didDictate: false)
         XCTAssertEqual(OnboardingModel.firstIncomplete(state), .tryIt)
+    }
+
+    /// The one thing TCC cannot answer: a granted microphone can still be a
+    /// muted or wrong input. The step is not optional, and nothing past it is
+    /// offered until a voiced peak lands.
+    func testTheMicTestGatesOnAHeardPeakAndIsNotOptional() {
+        XCTAssertFalse(OnboardingStep.micTest.isOptional)
+        let silent = inputs(facts(), micTestPassed: false)
+        XCTAssertFalse(OnboardingModel.isSatisfied(.micTest, silent))
+        XCTAssertEqual(OnboardingModel.firstIncomplete(silent), .micTest)
+        XCTAssertFalse(OnboardingModel.isComplete(silent))
+
+        XCTAssertTrue(OnboardingModel.isSatisfied(.micTest, inputs(facts())))
+    }
+
+    /// "I use an external keyboard" resolves the 🌐 step by making it moot:
+    /// there is no 🌐 press to intercept on the right ⌥ key.
+    func testChoosingTheRightOptionHotkeySettlesTheGlobeKeyStep() {
+        let stuck = inputs(facts(), globe: .showEmoji)
+        XCTAssertFalse(OnboardingModel.isSatisfied(.globeKey, stuck))
+
+        let switched = inputs(facts(), globe: .showEmoji, hotkey: .rightOption)
+        XCTAssertTrue(OnboardingModel.isSatisfied(.globeKey, switched))
+        XCTAssertNil(OnboardingModel.firstIncomplete(
+            inputs(facts(), globe: .showEmoji, liveTypingSettled: true,
+                   hotkey: .rightOption)))
     }
 
     /// The doctor is deliberately lenient here (Accessibility standing in for a
@@ -129,7 +168,8 @@ final class OnboardingModelTests: XCTestCase {
         let none = OnboardingModel.progress(
             inputs(facts(accessibility: false, inputMonitoring: "denied",
                          microphone: "denied", liveTyping: false),
-                   globe: .showEmoji, didDictate: false, welcome: false))
+                   globe: .showEmoji, didDictate: false, welcome: false,
+                   micTestPassed: false))
         let some = OnboardingModel.progress(
             inputs(facts(accessibility: false, liveTyping: false),
                    globe: .showEmoji, didDictate: false))

@@ -1,0 +1,119 @@
+{
+  "battery" : 0.9722222222222223,
+  "categories" : [
+    {
+      "category" : "proper-nouns",
+      "termRecall" : 0.5,
+      "utterances" : 5,
+      "wer" : 0.14634146341463414
+    },
+    {
+      "category" : "control-names",
+      "termRecall" : 0.25,
+      "utterances" : 4,
+      "wer" : 0.12903225806451613
+    },
+    {
+      "category" : "tech-jargon",
+      "termRecall" : 0.75,
+      "utterances" : 6,
+      "wer" : 0.06779661016949153
+    },
+    {
+      "category" : "homophones",
+      "utterances" : 5,
+      "wer" : 0
+    },
+    {
+      "category" : "addresses",
+      "utterances" : 5,
+      "wer" : 0.10204081632653061
+    },
+    {
+      "category" : "spelled-runs",
+      "utterances" : 4,
+      "wer" : 0.08333333333333333
+    },
+    {
+      "category" : "numbers-dates",
+      "utterances" : 4,
+      "wer" : 0.029411764705882353
+    },
+    {
+      "category" : "postal-address",
+      "utterances" : 1,
+      "wer" : 0
+    },
+    {
+      "category" : "commands",
+      "utterances" : 4,
+      "wer" : 0
+    },
+    {
+      "category" : "disfluency",
+      "utterances" : 5,
+      "wer" : 0.0975609756097561
+    },
+    {
+      "category" : "long-form",
+      "termRecall" : 1,
+      "utterances" : 1,
+      "wer" : 0.05555555555555555
+    }
+  ],
+  "config" : "refine=on,dict=on",
+  "corpusId" : "tts-samantha",
+  "engine" : "apple_live",
+  "provenance" : {
+    "corpusSource" : "tts",
+    "dictionaryTerms" : 9,
+    "gitSha" : "3912dfe",
+    "osBuild" : "25F84",
+    "promptSha256" : "9f337b6cd87c093f694672f04327f794509631176edc26cd9fb639b93266b2ec",
+    "scorerVersion" : 1
+  },
+  "split" : "all",
+  "stages" : [
+    {
+      "cer" : 0.09161349134001823,
+      "errors" : 58,
+      "refWords" : 406,
+      "stage" : "raw",
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 44,
+      "wer" : 0.14285714285714285,
+      "zeroEdit" : 0.2727272727272727
+    },
+    {
+      "cer" : 0.08477666362807658,
+      "errors" : 55,
+      "refWords" : 406,
+      "stage" : "corrected",
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 44,
+      "wer" : 0.1354679802955665,
+      "zeroEdit" : 0.29545454545454547
+    },
+    {
+      "cer" : 0.05606198723792161,
+      "errors" : 40,
+      "refWords" : 406,
+      "stage" : "refined",
+      "termRecall" : 0.2222222222222222,
+      "utterances" : 44,
+      "wer" : 0.09852216748768473,
+      "zeroEdit" : 0.38636363636363635
+    },
+    {
+      "cer" : 0.050592525068368276,
+      "errors" : 28,
+      "refWords" : 406,
+      "stage" : "final",
+      "termRecall" : 0.5555555555555556,
+      "utterances" : 44,
+      "wer" : 0.06896551724137931,
+      "zeroEdit" : 0.4090909090909091
+    }
+  ],
+  "timestamp" : "2026-08-10T04:17:32Z"
+}
