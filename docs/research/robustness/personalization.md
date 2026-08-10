@@ -140,7 +140,8 @@ because the S1 verdict was "ship the whole dictionary, no 50-term cap." That
 verdict has an expiry date: it was measured at ~138 terms. Two consumers now
 have *measured* reasons to curate:
 
-- **Parakeet channel**: FluidAudio auto-tightens `minSimilarity` 0.55 → 0.60
+- **Parakeet channel**: FluidAudio auto-tightens `minSimilarity` 0.50 → 0.60
+  (corrected: the spike records 0.50, not 0.55 — `spikes-parakeet.md:117`)
   above 100 terms, and the 138-term spike run produced 41 false replacements,
   "mostly junk-alias collisions from the live dictionary ('better' → `Letta`,
   'email' → `RamAIn`)" (`spikes-parakeet.md` §Q2). Feeding the top-N terms by

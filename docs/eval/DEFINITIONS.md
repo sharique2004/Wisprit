@@ -178,6 +178,61 @@ reader actually saw, so `n` (`editObserved` in `MetricsSummary`, the tile's
 subtitle in Insights, the `x/n observed` cell in `Wisprit stats`) counts real
 re-reads and nothing else.
 
+## Empty-transcript rate
+
+    emptyRate(stage) = utterances whose hypothesis at that stage is empty
+                       (nothing but whitespace) / all scored utterances
+
+WER cannot see this failure mode — an empty hypothesis scores as deletions,
+indistinguishable from garbled text — and it is the failure the live path
+actually hits (`outcome: empty`). Reported per stage and per category;
+additive optional field, so rows recorded before it existed render `—`, never
+0. Deliberately not a normalization profile: an utterance that produced only
+punctuation still produced *something*.
+
+## The category table's stage (`--stage`)
+
+The per-category table is computed at **`final`** by default (the historical
+behaviour; `categoryStage` absent in the run JSON). `--stage
+raw|corrected|refined|final` on `score`/`report` moves it; the robustness deck
+records `raw`, because its axes attack the engine and a final-stage table
+conflates engine damage with pipeline repair. A non-default stage is stamped
+into the run JSON (`categoryStage`) and into the section header ("By category
+(raw stage)") — tables at different stages are not comparable.
+
+## Locale (`--locale`)
+
+The asr phase decodes under one recognizer locale (default `en-US`, the
+shipped default). `--locale` re-decodes the same audio under other installed
+locale assets — the locale bake-off and the real-speech accent cross
+(`tools/eval/import/README.md`). The locale is part of the settings hash (so
+runs never collide in the cache) and of the stages artifact name; a
+non-default-locale run says so in its notes and its rows are not comparable
+with default-locale ones.
+
+## The robustness deck (`eval deck`)
+
+Four regression-tripwire indices over a frozen cell list
+(`tts-accents-v1` + `tts-stress-v1` + `tts-corners-v1`), **raw stage**,
+deterministic per OS build — and **never accuracy claims** (every deck corpus
+is TTS; the banner discipline applies doubly):
+
+| component | definition |
+|---|---|
+| `ri-noise` | WER(wn5) − WER(g0) on `tts-stress-v1` |
+| `ri-accent` | max-over-voices WER − Samantha WER on `tts-accents-v1` (worst voice named) |
+| `ri-level` | max(WER(g−36), WER(clip+6)) − WER(g0) on `tts-stress-v1` |
+| `ri-empty` | empty rate over every clip in the whole deck |
+| tone | printed as `—` — synthetic audio cannot reach this axis; human-v1 pass 4 owns it |
+
+The components are reported separately, never blended — a blend hides which
+axis regressed. Their accepted values live in `BASELINE.json` under the
+pseudo-record `corpus: "robustness-deck", config: "v1"` (the
+`refine-battery`/`cases` precedent), with deliberately wider tolerances than
+clean corpora: the cells sit on the model's cliff edge, and wn5 moving across
+an OS model swap is signal, not flap. `eval deck` exits 3 on violation.
+Recipes, recorded baselines and the voice-tier caveat: `ROBUSTNESS-DECK.md`.
+
 ## Provenance stamped on every row
 
 An accuracy number without these is a rumour: the on-device model is replaced in
@@ -202,7 +257,11 @@ TTS number can never masquerade as an accuracy claim. A mixed corpus reports as
 | corpus | source | what it is for |
 |---|---|---|
 | `tts-samantha` | `tts` | plumbing and regression only. Carries the TTS banner on every row and can never be quoted as an accuracy claim. |
-| `human-v1` | `human` | 131 utterances × 13 categories, read by 3+ speakers. The corpus every real number comes from. |
+| `tts-accents-v1` | `tts` | robustness deck, accent axis: 8 accent voices × the tts-v1 pack, `category` = voice, tier recorded in `speaker`. Tripwire only. |
+| `tts-stress-v1` | `tts` | robustness deck, stress axes: gain / clipping / additive noise / babble / bandlimit / whisper-voice / rate, `category` = condition. Tripwire only. |
+| `tts-corners-v1` | `tts` | robustness deck, worst-case corner cells (accent × level × noise). Tripwire only. |
+| imported real speech (`ls-*`, `l2arctic-*`, `cv-*`) | `librispeech` | public real-speech rung (`tools/eval/import/`): the ordering check between the TTS deck and human-v1, and the locale-cross input. Raw stage, `.asr` profile only; never a Wisprit accuracy claim. |
+| `human-v1` | `human` | 135 utterances × 13 categories, read by 3+ speakers. The corpus every real number comes from. |
 
 The recording protocol — how many speakers, which microphone passes, the
 real-conditions pass, and how to read each category — is

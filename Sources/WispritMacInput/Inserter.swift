@@ -75,7 +75,13 @@ public final class Inserter: @unchecked Sendable {
 
     // --- public entry point ---------------------------------------------------
 
-    public func insert(_ text: String, config: InserterConfig) -> InsertResult {
+    /// `onDelivered` fires at the instant the text is in the target app —
+    /// after the last typed chunk on the terminal path, after ⌘V (and BEFORE
+    /// the restore sleep) on the clipboard path, never on a failure. It is the
+    /// session's hook for truth-in-feedback (R6): the success flash must land
+    /// with the words, not half a second after them.
+    public func insert(_ text: String, config: InserterConfig,
+                       onDelivered: () -> Void = {}) -> InsertResult {
         guard !text.isEmpty else {
             return InsertResult(ok: false, method: .error, detail: "empty text")
         }
@@ -116,10 +122,16 @@ public final class Inserter: @unchecked Sendable {
 
             case .typed(let bundle):
                 try typeUnicode(text)
-                return InsertResult(ok: true, method: .type, detail: "typed into \(bundle)")
+                // Typing IS the delivery; there is no post-delivery window on
+                // this rung, so the stamp and the return coincide.
+                let deliveredAt = MonotonicClock.now()
+                onDelivered()
+                return InsertResult(ok: true, method: .type, detail: "typed into \(bundle)",
+                                    deliveredAtMonotonic: deliveredAt)
 
             case .clipboard(let bundle):
-                return try pasteViaClipboard(text, config: config, bundle: bundle)
+                return try pasteViaClipboard(text, config: config, bundle: bundle,
+                                             onDelivered: onDelivered)
             }
         } catch {
             log.error("insert failed: \(String(describing: error), privacy: .public)")
@@ -148,7 +160,8 @@ public final class Inserter: @unchecked Sendable {
 
     private func pasteViaClipboard(_ text: String,
                                    config: InserterConfig,
-                                   bundle: String?) throws -> InsertResult {
+                                   bundle: String?,
+                                   onDelivered: () -> Void) throws -> InsertResult {
         let snapshot = ports.pasteboardSnapshot()
         ports.pasteboardClearContents()
         // Declare both the string type and the transient marker so clipboard
@@ -162,6 +175,12 @@ public final class Inserter: @unchecked Sendable {
         let ourChangeCount = ports.pasteboardChangeCount()
 
         try ports.postCommandV()
+        // ⌘V is posted: the text is visible in the user's document NOW. Stamp
+        // and notify BEFORE the restore sleep — everything below this line is
+        // clipboard custody hygiene, not delivery, and must never again be
+        // billed to `release_to_text_ms` or delay the success flash (R6).
+        let deliveredAt = MonotonicClock.now()
+        onDelivered()
         ports.sleep(config.effectiveRestoreDelayMs / 1000.0)
 
         var detail: String
@@ -174,6 +193,7 @@ public final class Inserter: @unchecked Sendable {
             log.warning("pasteboard changeCount moved during paste window; not restoring")
         }
         if let bundle { detail = "\(detail) (target \(bundle))" }
-        return InsertResult(ok: true, method: .paste, detail: detail)
+        return InsertResult(ok: true, method: .paste, detail: detail,
+                            deliveredAtMonotonic: deliveredAt)
     }
 }

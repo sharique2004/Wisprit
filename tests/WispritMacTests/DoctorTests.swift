@@ -59,6 +59,7 @@ final class DoctorTests: XCTestCase {
             "Live Typing bundle",
             "config.json",
             "dictionary.json",
+            "Data inventory",
             "Parakeet models",
             "Dictation health",
             "Learned terms",
@@ -200,6 +201,44 @@ final class DoctorTests: XCTestCase {
         XCTAssertEqual(denied.check("Microphone")?.mark, .bad)
         XCTAssertTrue(denied.check("Microphone")?.detail.contains("Privacy & Security ▸ Microphone") == true)
         XCTAssertFalse(denied.isReady)
+    }
+
+    /// R15/T4: the granted mic row carries the engine-evidence sentence — the
+    /// Setup mic test passes on words transcribed, never on a level proxy.
+    func testGrantedMicrophoneCopyPointsAtEngineEvidence() {
+        let check = Doctor.report(from: green()).check("Microphone")
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertTrue(check?.detail.contains("words transcribed") == true)
+        XCTAssertTrue(check?.detail.contains("never a level threshold") == true)
+    }
+
+    // MARK: - data inventory (R17)
+
+    func testDataInventoryRowCountsClassesAndBytes() {
+        var facts = green()
+        facts.dataStores = [
+            DataStoreStatus(id: .transcripts, title: "Transcripts", summary: "",
+                            byteSize: 2048, exists: true, deletable: true),
+            DataStoreStatus(id: .metrics, title: "Usage metrics", summary: "",
+                            byteSize: 0, exists: false, deletable: true),
+            DataStoreStatus(id: .settings, title: "Settings", summary: "",
+                            byteSize: 100, exists: true, deletable: false),
+        ]
+        let check = Doctor.report(from: facts).check("Data inventory")
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertEqual(check?.isRequired, false)
+        XCTAssertTrue(check?.detail.contains("3 store classes cataloged, 2 on disk") == true,
+                      check?.detail ?? "")
+        XCTAssertTrue(check?.detail.contains("Settings ▸ Data") == true)
+    }
+
+    /// A facts value built by hand (no probe ran) still renders the row — it
+    /// points at the page instead of claiming a count it never took.
+    func testDataInventoryRowWithoutGatherPointsAtThePage() {
+        let check = Doctor.report(from: green()).check("Data inventory")
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertTrue(check?.detail.contains("not enumerated") == true)
+        XCTAssertTrue(check?.detail.contains("Settings ▸ Data") == true)
     }
 
     func testMissingPostEventAccessWarnsWithTheRemedy() {

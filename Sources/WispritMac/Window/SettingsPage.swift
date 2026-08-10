@@ -21,9 +21,17 @@ import WispritMacUI
 struct SettingsPage: View {
     @ObservedObject var model: WispritWindowModel
 
-    @State private var confirmingDelete = false
+    /// Which delete is awaiting confirmation — one dialog serves every store
+    /// class plus delete-everything, so the copy and the destructive action
+    /// stay side by side in one place.
+    @State private var pendingPurge: PurgeRequest?
     @State private var terminalsExpanded = false
     @State private var terminalDraft = ""
+
+    enum PurgeRequest: Equatable {
+        case store(DataStoreID)
+        case everything
+    }
 
     var body: some View {
         HubPage(title: WispritWindowModel.Tab.settings.title) {
@@ -36,20 +44,80 @@ struct SettingsPage: View {
                     contextAwarenessSection
                     pill
                     historyAndPrivacy
+                    yourData
                     advanced
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
-        .onAppear { model.reloadSettings() }
-        .confirmationDialog("Delete all transcripts?",
-                            isPresented: $confirmingDelete,
-                            titleVisibility: .visible) {
-            Button("Delete All Transcripts", role: .destructive) { model.purgeHistory() }
-            Button("Cancel", role: .cancel) {}
-        } message: {
-            Text(model.historyDeletionWarning)
+        .onAppear {
+            model.reloadSettings()
+            model.refreshDataInventory()
         }
+        .confirmationDialog(purgeTitle,
+                            isPresented: Binding(get: { pendingPurge != nil },
+                                                 set: { if !$0 { pendingPurge = nil } }),
+                            titleVisibility: .visible) {
+            Button(purgeActionTitle, role: .destructive) { performPendingPurge() }
+            Button("Cancel", role: .cancel) { pendingPurge = nil }
+        } message: {
+            Text(purgeMessage)
+        }
+    }
+
+    // MARK: - the purge dialog
+
+    private var purgeTitle: String {
+        switch pendingPurge {
+        case .store(let id): return "Delete \(DataInventory.title(for: id).lowercased())?"
+        case .everything: return "Delete everything Wisprit keeps?"
+        case nil: return ""
+        }
+    }
+
+    private var purgeActionTitle: String {
+        switch pendingPurge {
+        case .store(.transcripts): return "Delete All Transcripts"
+        case .store(let id): return "Delete \(DataInventory.title(for: id))"
+        case .everything: return "Delete Everything"
+        case nil: return "Delete"
+        }
+    }
+
+    private var purgeMessage: String {
+        switch pendingPurge {
+        case .store(.transcripts):
+            return model.historyDeletionWarning
+        case .store(.metrics):
+            return "Deletes the timing log the Insights page and `Wisprit stats` "
+                + "read. It holds durations and counters, never your words. "
+                + "This cannot be undone."
+        case .store(.dictionary):
+            return "Deletes your whole dictionary — your own terms and every "
+                + "spelling Wisprit learned from your corrections. This cannot "
+                + "be undone."
+        case .store(.learnLedger):
+            return "Deletes the pending-term evidence and your dismissals. "
+                + "Terms you said no to may be proposed again."
+        case .store(.models):
+            return "Deletes downloaded speech models. Dictation is unaffected; "
+                + "they can be downloaded again."
+        case .store(.settings), nil:
+            return ""
+        case .everything:
+            return "Transcripts, metrics, dictionary, learning ledger, and "
+                + "downloaded models — every store above, in one purge. Your "
+                + "settings stay. This cannot be undone."
+        }
+    }
+
+    private func performPendingPurge() {
+        switch pendingPurge {
+        case .store(let id): model.purgeDataStore(id)
+        case .everything: model.purgeAllData()
+        case nil: break
+        }
+        pendingPurge = nil
     }
 
     // MARK: - Dictation
@@ -380,12 +448,9 @@ struct SettingsPage: View {
                 .labelsHidden()
                 .frame(width: 120)
             }
-            SectionRow("Delete all transcripts…") {
-                Button("Delete All") { confirmingDelete = true }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .tint(Theme.critical)
-            }
+            // "Delete all transcripts" used to be a lone row here; it now lives
+            // in the inventory below, beside every other store — one delete
+            // surface, not a special case.
             // The one static row in the whole page, and the reason Wisprit
             // exists: there is no network call to switch off, because there is
             // no network code.
@@ -401,6 +466,42 @@ struct SettingsPage: View {
                 Spacer(minLength: 0)
             }
             .padding(.vertical, Theme.Space.s12)
+        }
+    }
+
+    // MARK: - Your data (the inventory, R17)
+
+    /// Every class of thing Wisprit keeps, with sizes, per-class delete, and
+    /// delete-everything — including `metrics.log`'s first delete surface.
+    /// The section renders only once the inventory port has answered; an empty
+    /// list here means "not wired" (tests), not "no data".
+    @ViewBuilder
+    private var yourData: some View {
+        if !model.dataStores.isEmpty {
+            SectionGroup("Your data", footnote: DataInventory.footnote) {
+                ForEach(model.dataStores) { store in
+                    SectionRow(store.title, description: store.summary) {
+                        HStack(spacing: Theme.Space.s8) {
+                            readout(DataInventory.sizeLabel(store))
+                            if store.deletable {
+                                Button("Delete…") { pendingPurge = .store(store.id) }
+                                    .buttonStyle(.bordered)
+                                    .controlSize(.small)
+                                    .tint(Theme.critical)
+                                    .disabled(!store.exists)
+                            }
+                        }
+                    }
+                }
+                SectionRow("Delete everything…",
+                           description: "Every store above, in one purge. "
+                               + "Settings stay.") {
+                    Button("Delete Everything…") { pendingPurge = .everything }
+                        .buttonStyle(.bordered)
+                        .controlSize(.small)
+                        .tint(Theme.critical)
+                }
+            }
         }
     }
 

@@ -131,6 +131,8 @@ final class EvalCommandTests: XCTestCase {
         }
         XCTAssertEqual(options.corpus, "tts-samantha")
         XCTAssertEqual(options.engine, .speech)
+        XCTAssertEqual(options.locale, "en-US")
+        XCTAssertNil(options.stage)
         XCTAssertNil(options.refine)
         XCTAssertNil(options.dict)
         XCTAssertNil(options.out)
@@ -138,6 +140,28 @@ final class EvalCommandTests: XCTestCase {
         XCTAssertNil(options.baseline)
         XCTAssertEqual(options.categories, [])
         XCTAssertFalse(options.realtime)
+    }
+
+    /// `--locale` is the locale bake-off / accent-cross enabler; `--stage raw`
+    /// is the robustness view. Both spellings, both flags.
+    func testLocaleAndStageFlags() {
+        guard case .run(let options) =
+                EvalCommand.parse(["score", "--locale", "en_IN", "--stage", "raw"]) else {
+            return XCTFail("should parse")
+        }
+        XCTAssertEqual(options.locale, "en_IN")
+        XCTAssertEqual(options.stage, "raw")
+
+        guard case .run(let equals) =
+                EvalCommand.parse(["asr", "--locale=en_GB"]) else {
+            return XCTFail("should parse")
+        }
+        XCTAssertEqual(equals.locale, "en_GB")
+
+        XCTAssertEqual(EvalCommand.parse(["score", "--stage", "engine"]),
+                       .invalid("--stage must be raw|corrected|refined|final"))
+        XCTAssertEqual(EvalCommand.parse(["score", "--locale"]),
+                       .invalid("--locale needs a value"))
     }
 
     func testCategoriesAreTrimmedAndCompacted() {
@@ -209,7 +233,7 @@ final class EvalCommandTests: XCTestCase {
             EvalPaths.asrCacheName(corpus: "tts-samantha", engine: "apple_live",
                                    settingsHash: "abc123"),
             EvalPaths.stagesDetailName(corpus: "tts-samantha", engine: "apple_live",
-                                       config: "refine=on,dict=off"),
+                                       locale: "en-US", config: "refine=on,dict=off"),
         ]
         for name in names {
             XCTAssertTrue(name.hasSuffix(".detail.jsonl"), name)
@@ -242,23 +266,34 @@ final class EvalCommandTests: XCTestCase {
 
     /// Every recognizer setting that can move a transcript has to move the hash;
     /// one that does not would serve a stale transcript under a key claiming to
-    /// describe it.
+    /// describe it. The OS build is in the list because macOS point releases
+    /// replace the recognizer model — before it was hashed, the first run after
+    /// an OS update stamped the new build on transcripts from the old model.
     func testSettingsHashCoversEverySettingThatMovesATranscript() {
         let base = EvalPaths.settingsHash(locale: "en-US", engine: "apple_live",
-                                          finalizeTimeoutMs: 1500, contextualTermLimit: nil)
+                                          finalizeTimeoutMs: 1500, contextualTermLimit: nil,
+                                          osBuild: "25F84")
         XCTAssertEqual(base, EvalPaths.settingsHash(locale: "en-US", engine: "apple_live",
                                                     finalizeTimeoutMs: 1500,
-                                                    contextualTermLimit: nil))
+                                                    contextualTermLimit: nil,
+                                                    osBuild: "25F84"))
         XCTAssertEqual(base.count, 8)
         let variants = [
             EvalPaths.settingsHash(locale: "en-GB", engine: "apple_live",
-                                   finalizeTimeoutMs: 1500, contextualTermLimit: nil),
+                                   finalizeTimeoutMs: 1500, contextualTermLimit: nil,
+                                   osBuild: "25F84"),
             EvalPaths.settingsHash(locale: "en-US", engine: "apple_dictation",
-                                   finalizeTimeoutMs: 1500, contextualTermLimit: nil),
+                                   finalizeTimeoutMs: 1500, contextualTermLimit: nil,
+                                   osBuild: "25F84"),
             EvalPaths.settingsHash(locale: "en-US", engine: "apple_live",
-                                   finalizeTimeoutMs: 3000, contextualTermLimit: nil),
+                                   finalizeTimeoutMs: 3000, contextualTermLimit: nil,
+                                   osBuild: "25F84"),
             EvalPaths.settingsHash(locale: "en-US", engine: "apple_live",
-                                   finalizeTimeoutMs: 1500, contextualTermLimit: 200),
+                                   finalizeTimeoutMs: 1500, contextualTermLimit: 200,
+                                   osBuild: "25F84"),
+            EvalPaths.settingsHash(locale: "en-US", engine: "apple_live",
+                                   finalizeTimeoutMs: 1500, contextualTermLimit: nil,
+                                   osBuild: "25G100"),
         ]
         for variant in variants { XCTAssertNotEqual(base, variant) }
     }
@@ -352,6 +387,50 @@ final class EvalCommandTests: XCTestCase {
         }
         XCTAssertTrue(text.contains("refine=off,dict=on"), text)
         XCTAssertTrue(text.contains("proper-nouns"), text)
+    }
+
+    // MARK: - the robustness additions (emptyRate, --stage)
+
+    /// An empty hypothesis is invisible to WER (it scores as deletions,
+    /// indistinguishable from garbled text) — `emptyRate` is the metric that
+    /// sees it, per stage and per category.
+    func testEmptyRateCountsEmptyHypothesesPerStageAndCategory() {
+        let hollow = StageRecord(id: "pn-01", engine: "apple_live", raw: "  ",
+                                 corrected: "  ", refined: "  ", final: "Hi Sharique.")
+        let full = Self.fixtureRecords()[1]
+        let run = EvalScoring.summary(
+            timestamp: "2026-08-10T00:00:00Z", corpus: Self.fixtureCorpus(),
+            records: [hollow, full], engine: "apple_live",
+            config: "refine=off,dict=on", provenance: Self.fixtureProvenance())
+        XCTAssertEqual(run.stages.first?.emptyRate, 0.5)
+        XCTAssertEqual(run.stages.last?.emptyRate, 0, "the final stage recovered it")
+
+        let raw = EvalScoring.summary(
+            timestamp: "2026-08-10T00:00:00Z", corpus: Self.fixtureCorpus(),
+            records: [hollow, full], engine: "apple_live",
+            config: "refine=off,dict=on", provenance: Self.fixtureProvenance(),
+            categoryStage: "raw")
+        XCTAssertEqual(raw.categories.first { $0.category == "proper-nouns" }?.emptyRate, 1.0)
+        XCTAssertEqual(raw.categories.first { $0.category == "spelled-runs" }?.emptyRate, 0)
+    }
+
+    /// `--stage raw` renders the per-category table before pipeline repair; the
+    /// default stays `final` and spells itself as nil so summaries recorded
+    /// before the flag existed compare equal.
+    func testCategoryTableFollowsTheRequestedStage() {
+        let final = Self.fixtureSummary()
+        XCTAssertNil(final.categoryStage)
+        XCTAssertEqual(final.categories.first?.wer, 0)
+
+        let raw = EvalScoring.summary(
+            timestamp: "2026-08-09T20:14:02Z", corpus: Self.fixtureCorpus(),
+            records: Self.fixtureRecords(), engine: "apple_live",
+            config: "refine=off,dict=on", provenance: Self.fixtureProvenance(),
+            categoryStage: "raw")
+        XCTAssertEqual(raw.categoryStage, "raw")
+        // "hi sharik" vs "Hi Sharique." at raw: 1 error in 2 ref words.
+        XCTAssertEqual(raw.categories.first?.wer ?? 0, 0.5, accuracy: 1e-9)
+        XCTAssertTrue(EvalScoring.renderTable(raw).contains("by category (raw stage)"))
     }
 
     // MARK: - fixtures

@@ -52,11 +52,21 @@ public struct PillRender: Equatable, Sendable {
     public var glyph: PillGlyph
     public var totalWidth: Double
     public var height: Double
+    /// NEW — true while the tail is the live dead-mic cue (R10): notice
+    /// styling, muted ink, never orange and never an alarm.
+    public var tailMuted: Bool
+    /// NEW — the meter levels as they stood the moment `finalizing`/`refining`
+    /// collapsed them (oldest first, full slot count), so the surface can play
+    /// the §2.5 staggered collapse from them. Empty when there is nothing to
+    /// collapse; `bars` itself already reads all-floor — a held waveform would
+    /// be a lie, and every existing assertion on `bars` stays true.
+    public var collapseFrom: [Double]
 
     public static let collapsed = PillRender(
         isVisible: false, state: .hidden, tint: PillPalette.tint(for: .hidden), level: 0,
         bars: [], bubble: "", bubbleWidth: 0, message: "", glyph: .none,
-        totalWidth: PillGeometry.widthListening, height: PillGeometry.height)
+        totalWidth: PillGeometry.widthListening, height: PillGeometry.height,
+        tailMuted: false, collapseFrom: [])
 }
 
 /// Work the view layer must schedule on a real timer. `pill.py` used
@@ -102,6 +112,24 @@ public final class PillModel {
     /// is the result" reads as two events, not one.
     private var heldWidth: Double?
 
+    // MARK: the live dead-mic cue (R10, amended trigger §1.1-T4)
+
+    /// Consecutive level ticks below `PillGeometry.deadMicFloor` while
+    /// `.recording`. A single voiced tick resets it.
+    private var subFloorTicks = 0
+    /// Any voiced tick this utterance disarms the cue for good: a microphone
+    /// that has delivered voice is not dead, and the quiet-speech class
+    /// belongs to the engine-evidence work (R15/R26), not to a nag.
+    private var voicedSeen = false
+    /// Engine evidence beats any proxy: one partial suppresses — and clears —
+    /// the cue for the rest of the utterance.
+    private var partialSeen = false
+    /// Whether the cue tail is currently showing.
+    private var deadMicCue = false
+
+    /// The §2.5 staggered-collapse source — see `PillRender.collapseFrom`.
+    private var collapseFrom: [Double] = []
+
     /// `pill.py._hidden()` — the `pill_hidden` setting. Injected so the UI
     /// target imports nothing from `WispritPersistence`.
     private let isSuppressed: () -> Bool
@@ -133,7 +161,9 @@ public final class PillModel {
             message: message,
             glyph: glyph,
             totalWidth: totalWidth,
-            height: PillGeometry.height)
+            height: PillGeometry.height,
+            tailMuted: deadMicCue,
+            collapseFrom: collapseFrom)
     }
 
     // MARK: - public API (main thread)
@@ -146,6 +176,7 @@ public final class PillModel {
         waveform.collapse()
         clearBubbleState()
         heldWidth = nil
+        resetDeadMicTracking()
         show(.prewarming)
     }
 
@@ -155,6 +186,7 @@ public final class PillModel {
         waveform.collapse()
         clearBubbleState()
         heldWidth = nil
+        resetDeadMicTracking()
         show(.recording)
     }
 
@@ -174,7 +206,38 @@ public final class PillModel {
         let opened = (state == .prewarming)
         if opened { state = .recording }
         let changed = waveform.push(level)
-        if changed || opened { emit() }
+        let cued = trackDeadMic()
+        if changed || opened || cued { emit() }
+    }
+
+    /// R10 — the live dead-mic cue, engine-evidence trigger (§1.1-T4).
+    ///
+    /// After strictly more than `deadMicTickCount` consecutive sub-floor ticks
+    /// (> 2 s) while `.recording`, and only when neither a voiced tick nor a
+    /// partial has arrived this utterance, the tail shows a muted notice —
+    /// "No audio — check mic". The first voiced tick or the first partial
+    /// clears it (and disarms it for the rest of the utterance: a channel that
+    /// has produced evidence is not dead). Returns true when the frame
+    /// changed. The cue costs exactly one frame to appear and one to clear —
+    /// the silence around it stays redraw-free.
+    private func trackDeadMic() -> Bool {
+        guard state == .recording else { return false }
+        if level < PillGeometry.deadMicFloor {
+            subFloorTicks += 1
+            guard subFloorTicks > PillGeometry.deadMicTickCount,
+                  !voicedSeen, !partialSeen, !deadMicCue, bubble.isEmpty
+            else { return false }
+            deadMicCue = true
+            message = PillGeometry.deadMicMessage
+            bubble = PillGeometry.deadMicMessage
+            bubbleWidth = PillTailGeometry.width(forCharacters: bubble.count)
+            return true
+        }
+        subFloorTicks = 0
+        voicedSeen = true
+        guard deadMicCue else { return false }
+        clearBubbleState()
+        return true
     }
 
     /// NEW — render the tail of the in-progress transcript.
@@ -188,6 +251,15 @@ public final class PillModel {
     /// within one utterance, so a word boundary can only ever widen the pill.
     public func livePartial(_ text: String) {
         guard !isSuppressed(), state == .recording else { return }
+        // Engine evidence: a partial is proof the pipeline hears something, so
+        // it suppresses the dead-mic cue for the rest of the utterance — and
+        // replaces it on screen if it was already up (§1.1-T4).
+        partialSeen = true
+        if deadMicCue {
+            deadMicCue = false
+            bubble = ""
+            message = ""
+        }
         let tail = PartialTail.tail(of: text)
         guard tail != bubble else { return }
         bubble = tail
@@ -207,6 +279,9 @@ public final class PillModel {
         let noticed = PartialTail.notice(text)
         guard !noticed.isEmpty else { return }
         cancelSchedule()
+        // A notice replaces the dead-mic cue on screen (and takes its muted
+        // styling with it); the cue re-fires afterwards if the silence holds.
+        deadMicCue = false
         message = noticed
         bubble = noticed
         bubbleWidth = PillTailGeometry.width(forCharacters: noticed.count)
@@ -223,6 +298,7 @@ public final class PillModel {
     public func showFinalizing() {
         holdWidth()
         level = 0
+        captureCollapse()
         waveform.collapse()
         clearBubbleState()
         show(.finalizing)
@@ -234,6 +310,7 @@ public final class PillModel {
     public func showRefining() {
         holdWidth()
         level = 0
+        captureCollapse()
         waveform.collapse()
         clearBubbleState()
         show(.refining)
@@ -279,6 +356,8 @@ public final class PillModel {
         waveform.collapse()
         clearBubbleState()
         heldWidth = nil
+        resetDeadMicTracking()
+        collapseFrom = []
         emit()
     }
 
@@ -348,13 +427,16 @@ public final class PillModel {
     }
 
     /// The shared body of the two message states: retain the message, lay it
-    /// out with the error character budget, show, and arm the auto-hide.
+    /// out with the error character budget — and the error width cap, so the
+    /// 40-character budget actually fits the frame (R9a) — show, and arm the
+    /// auto-hide.
     private func showMessageState(_ newState: PillState, _ text: String, hideAfter: Double) {
         if !isSuppressed() {
             let flat = PartialTail.notice(text, maxCharacters: PillGeometry.errorMessageCharacters)
             message = flat
             bubble = flat
-            bubbleWidth = PillTailGeometry.width(forCharacters: flat.count)
+            bubbleWidth = PillTailGeometry.errorWidth(forCharacters: flat.count)
+            deadMicCue = false
         }
         show(newState)
         schedule(hideAfter, .hide)
@@ -365,6 +447,9 @@ public final class PillModel {
     private func show(_ newState: PillState) {
         guard !isSuppressed() else { return }
         cancelSchedule()
+        // The collapse choreography belongs to the two states that own it;
+        // any other show means the meter's story is over.
+        if newState != .finalizing && newState != .refining { collapseFrom = [] }
         state = newState
         isVisible = true
         emit()
@@ -374,6 +459,23 @@ public final class PillModel {
         bubble = ""
         bubbleWidth = 0
         message = ""
+        deadMicCue = false
+    }
+
+    /// A fresh utterance re-arms the dead-mic cue.
+    private func resetDeadMicTracking() {
+        subFloorTicks = 0
+        voicedSeen = false
+        partialSeen = false
+        deadMicCue = false
+    }
+
+    /// Snapshot the meter for the §2.5 staggered collapse — taken just before
+    /// `waveform.collapse()`, and only when there is something to collapse
+    /// (re-entering via `showRefining` right after `showFinalizing` finds the
+    /// buffer already at floor and must not restart the choreography).
+    private func captureCollapse() {
+        collapseFrom = waveform.isSilent ? [] : waveform.normalized
     }
 
     private func schedule(_ seconds: Double, _ action: PillDeferredAction) {

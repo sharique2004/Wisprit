@@ -45,7 +45,6 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         public var pasteLast: () -> Void
         public var openDictionary: () -> Void
         public var openConfig: () -> Void
-        public var runDoctor: () -> Void
         public var purgeHistory: () -> Void
         public var quit: () -> Void
 
@@ -64,7 +63,6 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
                     pasteLast: @escaping () -> Void,
                     openDictionary: @escaping () -> Void,
                     openConfig: @escaping () -> Void,
-                    runDoctor: @escaping () -> Void,
                     purgeHistory: @escaping () -> Void,
                     quit: @escaping () -> Void) {
             self.state = state
@@ -82,7 +80,6 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
             self.pasteLast = pasteLast
             self.openDictionary = openDictionary
             self.openConfig = openConfig
-            self.runDoctor = runDoctor
             self.purgeHistory = purgeHistory
             self.quit = quit
         }
@@ -261,8 +258,6 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
             actions.openDictionary()
         case .openConfig:
             actions.openConfig()
-        case .runDoctor:
-            actions.runDoctor()
         case .purgeHistory:
             actions.purgeHistory()
             rebuild()

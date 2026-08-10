@@ -71,6 +71,16 @@ public final class HotkeyEventQueue: @unchecked Sendable {
         return storage.removeFirst()
     }
 
+    /// Non-consuming probe: is a press already waiting? Read by the session at
+    /// the end of the paste rung's clipboard-restore window — the one-line
+    /// counter R6 ships so the rejected skip-restore-on-re-press idea (R34,
+    /// §1.1-T5) has a measured firing rate instead of a hunch. Nothing is
+    /// dequeued; the press still starts the next utterance in order.
+    public var hasPendingPress: Bool {
+        cond.lock(); defer { cond.unlock() }
+        return storage.contains { $0.kind == .press }
+    }
+
     /// Non-blocking dequeue.
     public func getNowait() -> HotkeyEvent? {
         cond.lock(); defer { cond.unlock() }

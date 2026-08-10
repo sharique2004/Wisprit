@@ -492,6 +492,129 @@ final class WindowModelTests: XCTestCase {
             .bool(OnboardingSettings.completedKey, or: false))
     }
 
+    // MARK: - time-to-wow (R14)
+
+    /// Capture box for the ports fired from the main actor.
+    private final class PortRecorder: @unchecked Sendable {
+        var onboardingRows: [(ms: Double, skipped: Int, relaunches: Int)] = []
+        var purgedHistory = 0
+        var purgedStores: [DataStoreID] = []
+    }
+
+    /// One row, once, on the first dictation of a fresh install — the delta
+    /// from the very first launch, with the skips and relaunches that happened
+    /// on the way (both persisted across the mandatory mid-onboarding
+    /// relaunch, which is the cost the row measures).
+    func testTimeToWowWritesOneRowOnTheFirstDictationEver() {
+        let recorder = PortRecorder()
+        func launch() -> WispritWindowModel {
+            WispritWindowModel(
+                settings: settings,
+                dictionary: DictionaryEditor(
+                    store: DictionaryStore(path: root.appendingPathComponent("dictionary.json"))),
+                ports: WispritWindowModel.Ports(
+                    writeOnboardingRow: { ms, skipped, relaunches in
+                        recorder.onboardingRows.append((ms, skipped, relaunches))
+                    }))
+        }
+
+        // Launch 1: the clock starts; the user skips two steps and quits.
+        let first = launch()
+        XCTAssertNotNil(settings.double(OnboardingSettings.firstLaunchKey))
+        first.skipStep()
+        first.skipStep()
+
+        // Launch 2 (the Input Monitoring relaunch): the first dictation lands.
+        let second = launch()
+        XCTAssertEqual(settings.int(OnboardingSettings.relaunchCountKey, or: 0), 1)
+        XCTAssertTrue(recorder.onboardingRows.isEmpty, "no dictation, no row")
+        second.noteDictationObserved()
+
+        XCTAssertEqual(recorder.onboardingRows.count, 1)
+        XCTAssertEqual(recorder.onboardingRows[0].skipped, 2)
+        XCTAssertEqual(recorder.onboardingRows[0].relaunches, 1)
+        XCTAssertGreaterThanOrEqual(recorder.onboardingRows[0].ms, 0)
+
+        // Once means once: another dictation, another relaunch — nothing.
+        second.noteDictationObserved()
+        let third = launch()
+        third.noteDictationObserved()
+        XCTAssertEqual(recorder.onboardingRows.count, 1)
+        XCTAssertEqual(settings.int(OnboardingSettings.relaunchCountKey, or: 0), 1,
+                       "the counters go quiet once the row is written")
+    }
+
+    /// An install that finished onboarding before the clock existed must never
+    /// write a row — a delta measured from "whenever this build first ran" on
+    /// a years-old install would be a lie with four digits.
+    func testAnAlreadyOnboardedInstallNeverStartsTheClock() {
+        settings.set(OnboardingSettings.completedKey, true)
+        let recorder = PortRecorder()
+        let model = WispritWindowModel(
+            settings: settings,
+            dictionary: DictionaryEditor(
+                store: DictionaryStore(path: root.appendingPathComponent("dictionary.json"))),
+            ports: WispritWindowModel.Ports(
+                writeOnboardingRow: { ms, skipped, relaunches in
+                    recorder.onboardingRows.append((ms, skipped, relaunches))
+                }))
+        XCTAssertNil(settings.double(OnboardingSettings.firstLaunchKey))
+        model.noteDictationObserved()
+        XCTAssertTrue(recorder.onboardingRows.isEmpty)
+    }
+
+    // MARK: - the data inventory (R17)
+
+    private func makeInventoryModel(_ recorder: PortRecorder,
+                                    stores: [DataStoreStatus] = []) -> WispritWindowModel {
+        WispritWindowModel(
+            settings: settings,
+            dictionary: DictionaryEditor(
+                store: DictionaryStore(path: root.appendingPathComponent("dictionary.json"))),
+            ports: WispritWindowModel.Ports(
+                purgeHistory: { recorder.purgedHistory += 1 },
+                dataStores: { stores },
+                purgeDataStore: { recorder.purgedStores.append($0) }))
+    }
+
+    func testTheInventoryPublishesWhatThePortReports() async {
+        let row = DataStoreStatus(id: .metrics, title: "Usage metrics",
+                                  summary: "timings", byteSize: 42,
+                                  exists: true, deletable: true)
+        let model = makeInventoryModel(PortRecorder(), stores: [row])
+        XCTAssertTrue(model.dataStores.isEmpty, "nothing until asked")
+        model.refreshDataInventory()
+        await settle { model.dataStores == [row] }
+        XCTAssertEqual(model.dataStores, [row])
+    }
+
+    /// Transcripts go through the history store's own purge (a live SQLite
+    /// handle is not a file to unlink); settings never go anywhere; the rest
+    /// is the app's file purge. Delete-everything is exactly the union — the
+    /// one purge that reaches every store.
+    func testPurgeRoutingAndTheOnePurgeThatReachesEveryStore() {
+        let recorder = PortRecorder()
+        let model = makeInventoryModel(recorder)
+
+        model.purgeDataStore(.transcripts)
+        XCTAssertEqual(recorder.purgedHistory, 1)
+        XCTAssertTrue(recorder.purgedStores.isEmpty)
+
+        model.purgeDataStore(.metrics)
+        XCTAssertEqual(recorder.purgedStores, [.metrics])
+
+        model.purgeDataStore(.settings)
+        XCTAssertEqual(recorder.purgedStores, [.metrics], "settings are untouchable here")
+        XCTAssertEqual(recorder.purgedHistory, 1)
+
+        recorder.purgedStores = []
+        recorder.purgedHistory = 0
+        model.purgeAllData()
+        XCTAssertEqual(recorder.purgedHistory, 1)
+        XCTAssertEqual(Set(recorder.purgedStores),
+                       Set(DataInventory.deletableClasses).subtracting([.transcripts]))
+    }
+
     // MARK: - dictionary tab
 
     func testDictionaryEditsRepublishAndFilter() {

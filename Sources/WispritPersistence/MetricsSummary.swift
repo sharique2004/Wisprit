@@ -83,6 +83,25 @@ public struct MetricsSummary: Sendable, Equatable {
     /// (`docs/eval/DEFINITIONS.md` § Zero-edit rate); 0 when nothing was
     /// observed, and the renderer refuses to print a rate with no denominator.
     public var zeroEditRate: Double
+    /// The one-time `onboarding` row (R14): first launch → first successful
+    /// dictation on a fresh install. Newest such row in the window, nil when
+    /// none was written — which is every install that predates the row.
+    public var timeToWow: TimeToWow? = nil
+
+    /// What the time-to-wow row said. Kept as its own value (not three loose
+    /// optionals) because the three numbers were written together by
+    /// `MetricsWriter.writeOnboarding` and only mean anything together.
+    public struct TimeToWow: Sendable, Equatable {
+        public var onboardMs: Double
+        public var stepsSkipped: Int
+        public var relaunches: Int
+
+        public init(onboardMs: Double, stepsSkipped: Int, relaunches: Int) {
+            self.onboardMs = onboardMs
+            self.stepsSkipped = stepsSkipped
+            self.relaunches = relaunches
+        }
+    }
 
     /// Mirrors `SpeechAnalyzerEngine.voicedPeakThreshold`. WispritPersistence
     /// cannot import WispritEngine (WispritKit is the only shared seam), so the
@@ -104,10 +123,16 @@ public struct MetricsSummary: Sendable, Equatable {
     /// utterance, it just had nothing to insert.) `edit_observed` is the same
     /// shape one phase later: a reference-less line about text some earlier
     /// utterance inserted, written when a field re-read finally showed its fate.
-    public static let nonUtteranceOutcomes: Set<String> = ["vocab_retro", "edit_observed"]
+    /// `onboarding` (R14) is the one-time time-to-wow row — no utterance,
+    /// no engine, and a `finalize_ms` of 0 that must never anchor a percentile.
+    public static let nonUtteranceOutcomes: Set<String> =
+        ["vocab_retro", editObservedOutcome, onboardingOutcome]
 
     /// The Phase-5 observation row's `outcome`.
     public static let editObservedOutcome = "edit_observed"
+
+    /// The R14 time-to-wow row's `outcome`.
+    public static let onboardingOutcome = "onboarding"
 
     // MARK: - aggregation
 
@@ -122,6 +147,17 @@ public struct MetricsSummary: Sendable, Equatable {
         for row in inWindow where string(row, "outcome") == editObservedOutcome {
             editObserved += 1
             if let dist = double(row, "edit_dist"), dist == 0 { zeroEdit += 1 }
+        }
+
+        // Time-to-wow is the same shape: a non-utterance row read before the
+        // filter drops it. Rows are newest-last, so the last match wins —
+        // relevant only if a reinstall ever writes a second one.
+        var timeToWow: TimeToWow?
+        for row in inWindow where string(row, "outcome") == onboardingOutcome {
+            guard let onboardMs = double(row, "onboard_ms") else { continue }
+            timeToWow = TimeToWow(onboardMs: onboardMs,
+                                  stepsSkipped: Int(double(row, "steps_skipped") ?? 0),
+                                  relaunches: Int(double(row, "relaunches") ?? 0))
         }
 
         let rows = inWindow
@@ -179,7 +215,8 @@ public struct MetricsSummary: Sendable, Equatable {
             unexplainedEmptyRate: rate(unexplained, of: total),
             editObserved: editObserved,
             zeroEdit: zeroEdit,
-            zeroEditRate: rate(zeroEdit, of: editObserved))
+            zeroEditRate: rate(zeroEdit, of: editObserved),
+            timeToWow: timeToWow)
     }
 
     /// The rows `summarize` would have looked at — exposed so a caller can list
@@ -240,6 +277,13 @@ public struct MetricsSummary: Sendable, Equatable {
         if summary.editObserved > 0 {
             row("zero-edit", "\(summary.zeroEdit)/\(summary.editObserved) observed "
                 + "(\(percent(summary.zeroEditRate)))")
+        }
+        // Only on installs fresh enough to have written the R14 row: an
+        // absent line is "this install predates the metric", not a zero.
+        if let wow = summary.timeToWow {
+            row("time-to-wow", String(format: "%.1f s first launch → first dictation",
+                                      wow.onboardMs / 1000)
+                + " (\(wow.stepsSkipped) steps skipped, \(wow.relaunches) relaunches)")
         }
         return lines.joined(separator: "\n")
     }

@@ -336,6 +336,77 @@ keys across builds.
   forever. `learn_auto_accept` (string-key precedent, default false) turns the
   threshold event into the same silent add the Accept button makes.
 
+## Paste-rung metric correction — a DISCONTINUITY in metrics.log (R6, 2026-08-10)
+
+**What changed.** `Inserter.pasteViaClipboard` posts ⌘V — at which instant the
+text is visible in the user's document — and then sleeps
+`paste_restore_delay_ms` (500 ms) before restoring the clipboard. Until this
+change, `release_to_text_ms` and `insert_ms` were stamped after that sleep, and
+the success flash fired after it too: the metric billed the custody window as
+latency, and the pill confirmed the paste half a second after the user could
+see it (the feedback inversion, native-feel §1 — ~250 rows of the live log).
+Now the delivery instant is captured at `postCommandV` (`InsertResult.
+deliveredAtMonotonic`), the flash and commit cue fire from inside the delivery
+hook BEFORE the sleep, and the sleep + restore stay on the session thread after
+the flash — ordering and safety semantics unchanged, including the 500 ms floor
+and the changeCount check.
+
+**The honest reading of the numbers.** Live paste `release_to_text_ms` p50
+drops from ~770 ms to ~270 ms at this boundary **because the metric was
+overstating, not because anything got faster**. This is a METRIC CORRECTION,
+not a speedup, and no comparison of `release_to_text_ms` (or `insert_ms`, which
+now also stops at delivery) may straddle rows written before and after this
+build without saying so. RESULTS.md must carry the same annotation wherever the
+paste-rung number is quoted (handed to Track A; the discontinuity is
+append-only history — old rows are not rewritten).
+
+**Two additive fields** (append-only tail, after every existing key):
+
+- `restore_ms` — delivery → `insert()` return: the sleep plus the clipboard
+  restore, on paste rows only. What used to be silently inside the headline
+  number now has its own honest column.
+- `repress_queued` — `true` when a press was already queued at the moment the
+  restore window closed (omitted otherwise). This is the free counter from the
+  R34 ruling (§1.1-T5): **skip-clipboard-restore on fast re-press is REJECTED**
+  — the user's clipboard is never traded on an implicit signal — and this
+  one-line counter is the only thing that could ever justify revisiting it. If
+  it fires more than ~weekly, the sanctioned revival shape is *deferred
+  restore* (restore after the next utterance), which keeps the property
+  guarantee; the skip stays dead either way.
+
+## Telemetry completion + sound cues + onboarding row (R4/R11/R14, 2026-08-10)
+
+- **`noise_floor` + `first_voiced_ms`** join `peak_level`/`audio_ms` on every
+  utterance row (additive tail). `noise_floor` is the quietest ~300 ms window
+  on the meter's own scale (RMS×4 clamped, same statistic family as
+  `peak_level`, so the pair reads as an SNR proxy); `first_voiced_ms` is
+  mic-live → first chunk clearing the voiced threshold, the clipping-exposure
+  clock — its p5 owns the verdict on whether cold-start head-loss (closed by
+  the R7 replay, `AsrManager.begin`) was ever real exposure. Computed in
+  `MicCapture`, threaded through `AudioPort`, omitted when unmeasured.
+- **A fourth non-utterance `metrics.log` outcome, `"onboarding"` (R14).** One
+  reference-less time-to-wow row per fresh install — first launch → first
+  successful dictation, steps skipped, relaunch count (`onboard_ms`,
+  `steps_skipped`, `relaunches`) — written through
+  `MetricsWriter.writeOnboarding`, the entry point Track D's onboarding model
+  calls. `MetricsSummary.nonUtteranceOutcomes` drops it like `vocab_retro` /
+  `edit_observed`, or its `finalize_ms: 0` would anchor the latency
+  percentiles.
+- **Sound cues ship default-OFF (R11), the A-6 gate recorded.** Two synthesized
+  cues ≤ 100 ms at ≤ −20 dBFS (mic-open on show-recording, only after
+  `audio.start()` succeeded; commit at the delivery instant; no error sounds by
+  design), behind a string-keyed `sounds` toggle (`SoundCueSettings`, the
+  `LiveTypingSettings` precedent — never enters the golden defaults). The
+  plan's intended default is `pill_hidden`-keyed (on exactly when the pill is
+  hidden and the cues are the only feedback channel), but that flip is GATED on
+  the A-6 cue-bleed eval check — zero transcript delta with the cue PCM mixed
+  into matrix clip heads — which has not run; until it passes the fallback is
+  `false`, pinned by `SoundCueTests`. The assets are synthesized
+  (`SoundCueSynth`, deterministic 16 kHz mono Int16 — the pipeline format, so
+  A-6 can mix `samples(for:)` directly) rather than bundled: `Package.swift`
+  is orchestrator-owned and declares no resources for the target, and a
+  bundled asset would need one.
+
 ## Parakeet vocabulary channel (Phase 6, 2026-08-10)
 
 Fork (b) of the B-0 spike verdict (docs/research/spikes-parakeet.md), complete

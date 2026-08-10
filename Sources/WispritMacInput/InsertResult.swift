@@ -14,11 +14,19 @@ public struct InsertResult: Sendable, Equatable {
     public let ok: Bool
     public let method: Method
     public let detail: String
+    /// `MonotonicClock.now()` at the instant the text was actually in the
+    /// target app — for the paste rung, immediately after ⌘V was posted and
+    /// BEFORE the clipboard-restore sleep (R6: the restore window is custody
+    /// hygiene, not delivery latency, and the metric must stop billing it as
+    /// such). nil on failures and on rungs that deliver at return.
+    public let deliveredAtMonotonic: Double?
 
-    public init(ok: Bool, method: Method, detail: String = "") {
+    public init(ok: Bool, method: Method, detail: String = "",
+                deliveredAtMonotonic: Double? = nil) {
         self.ok = ok
         self.method = method
         self.detail = detail
+        self.deliveredAtMonotonic = deliveredAtMonotonic
     }
 }
 

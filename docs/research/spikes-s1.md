@@ -267,7 +267,7 @@ orders of magnitude are trustworthy; absolute WER and the biasing win need re-va
 human speech (spike S4).
 
 **S4 status: tooling ready — recording pending.** `Wisprit eval record` / `eval verify` and the
-131-utterance `human-v1` script set exist (`tools/eval/scripts/human-v1/`, protocol in its
+135-utterance `human-v1` script set exist (`tools/eval/scripts/human-v1/`, protocol in its
 README). Nothing above is re-validated until that audio is recorded and the held-split baseline
 is on the scoreboard.
 

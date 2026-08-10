@@ -1,0 +1,120 @@
+{
+  "categories" : [
+    {
+      "category" : "samantha",
+      "emptyRate" : 0,
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 54,
+      "wer" : 0.20867768595041322
+    },
+    {
+      "category" : "daniel",
+      "emptyRate" : 0,
+      "termRecall" : 0.16666666666666666,
+      "utterances" : 54,
+      "wer" : 0.2334710743801653
+    },
+    {
+      "category" : "karen",
+      "emptyRate" : 0,
+      "termRecall" : 0,
+      "utterances" : 54,
+      "wer" : 0.2396694214876033
+    },
+    {
+      "category" : "moira",
+      "emptyRate" : 0,
+      "termRecall" : 0.1111111111111111,
+      "utterances" : 54,
+      "wer" : 0.23140495867768596
+    },
+    {
+      "category" : "rishi",
+      "emptyRate" : 0,
+      "termRecall" : 0.1111111111111111,
+      "utterances" : 54,
+      "wer" : 0.23140495867768596
+    },
+    {
+      "category" : "aman",
+      "emptyRate" : 0,
+      "termRecall" : 0.2222222222222222,
+      "utterances" : 54,
+      "wer" : 0.22520661157024793
+    },
+    {
+      "category" : "tara",
+      "emptyRate" : 0,
+      "termRecall" : 0.2222222222222222,
+      "utterances" : 54,
+      "wer" : 0.22520661157024793
+    },
+    {
+      "category" : "tessa",
+      "emptyRate" : 0,
+      "termRecall" : 0.1111111111111111,
+      "utterances" : 54,
+      "wer" : 0.2334710743801653
+    }
+  ],
+  "categoryStage" : "raw",
+  "config" : "refine=off,dict=off",
+  "corpusId" : "tts-accents-v1",
+  "engine" : "apple_live",
+  "provenance" : {
+    "corpusSource" : "tts",
+    "dictionaryTerms" : 9,
+    "gitSha" : "6fd929f",
+    "osBuild" : "25F84",
+    "promptSha256" : "b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf",
+    "scorerVersion" : 1
+  },
+  "split" : "all",
+  "stages" : [
+    {
+      "cer" : 0.18662451361867705,
+      "emptyRate" : 0,
+      "errors" : 885,
+      "refWords" : 3872,
+      "stage" : "raw",
+      "termRecall" : 0.125,
+      "utterances" : 432,
+      "wer" : 0.22856404958677687,
+      "zeroEdit" : 0.16898148148148148
+    },
+    {
+      "cer" : 0.18297665369649804,
+      "emptyRate" : 0,
+      "errors" : 878,
+      "refWords" : 3872,
+      "stage" : "corrected",
+      "termRecall" : 0.125,
+      "utterances" : 432,
+      "wer" : 0.22675619834710745,
+      "zeroEdit" : 0.1736111111111111
+    },
+    {
+      "cer" : 0.18297665369649804,
+      "emptyRate" : 0,
+      "errors" : 878,
+      "refWords" : 3872,
+      "stage" : "refined",
+      "termRecall" : 0.125,
+      "utterances" : 432,
+      "wer" : 0.22675619834710745,
+      "zeroEdit" : 0.1736111111111111
+    },
+    {
+      "cer" : 0.08482490272373541,
+      "emptyRate" : 0,
+      "errors" : 546,
+      "refWords" : 3872,
+      "stage" : "final",
+      "termRecall" : 0.125,
+      "utterances" : 432,
+      "wer" : 0.14101239669421486,
+      "zeroEdit" : 0.24074074074074073
+    }
+  ],
+  "timestamp" : "2026-08-10T11:48:36Z"
+}

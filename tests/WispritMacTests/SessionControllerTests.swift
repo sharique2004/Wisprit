@@ -37,6 +37,7 @@ final class SessionControllerTests: XCTestCase {
         let vocabulary = FakeVocabulary()
         let gate = FakeGate()
         let dictionary = FakeDictionary()
+        let sound = FakeSound()
         let session: SessionController
 
         init(useRefiner: Bool = true,
@@ -51,6 +52,7 @@ final class SessionControllerTests: XCTestCase {
              pillPort: (any PillPort)? = nil) {
             inserter.history = history
             inserter.asr = asr
+            inserter.pill = pill
             session = SessionController(
                 events: events,
                 asr: asr,
@@ -65,6 +67,7 @@ final class SessionControllerTests: XCTestCase {
                 corrector: corrector,
                 gate: gate,
                 context: context,
+                sound: sound,
                 configuration: SessionController.Configuration(
                     holdDebounceMs: { debounceMs },
                     isEnabled: { enabled },
@@ -595,6 +598,34 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertTrue(h.inserter.inserted.isEmpty)
     }
 
+    /// R9d: the same condition gets the same state — paste-last under Secure
+    /// Keyboard Entry raises the lock (with its ⌘⌃V remedy and longer dwell),
+    /// never a differently-styled alarm.
+    func testPasteLastUnderSecureInputRaisesTheBlockedSecureState() {
+        let h = Harness()
+        h.history.last = "the previous transcript"
+        h.inserter.result = InsertResult(ok: false, method: .blockedSecure,
+                                         detail: "Secure Keyboard Entry is active")
+
+        h.session.dispatch(HotkeyEvent(.pasteLast, ts: 0))
+
+        XCTAssertTrue(h.pill.snapshot().contains("flashBlockedSecure"))
+        XCTAssertTrue(h.pill.errors.isEmpty, "one condition, one style — the lock, not an error")
+    }
+
+    /// R6 applies to the recovery path too: the paste-last flash rides the
+    /// delivery instant, once.
+    func testPasteLastFlashesAtTheDeliveryInstantExactlyOnce() {
+        let h = Harness()
+        h.history.last = "again"
+
+        h.session.dispatch(HotkeyEvent(.pasteLast, ts: 0))
+
+        XCTAssertEqual(h.inserter.pillCallsAtDelivery.count, 1)
+        XCTAssertTrue(h.inserter.pillCallsAtDelivery[0].contains("flashSuccess"))
+        XCTAssertEqual(h.pill.snapshot().filter { $0 == "flashSuccess" }.count, 1)
+    }
+
     func testPasteLastIsIgnoredWhileRecording() {
         let h = Harness()
         h.history.last = "something"
@@ -768,6 +799,142 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertEqual(SessionController.refineDelta(raw: "same", refined: "same"), 0)
         XCTAssertEqual(SessionController.refineDelta(raw: "teh cat", refined: "the cat"), 2)
         XCTAssertEqual(SessionController.refineDelta(raw: "", refined: "added"), 5)
+    }
+
+    // MARK: - R6: the feedback-inversion fix
+
+    /// The soul of R6: the checkmark lands at the delivery instant — inside
+    /// `insert`, before the paste rung's restore sleep would run — and exactly
+    /// once, never again at return.
+    func testSuccessFlashLandsAtTheDeliveryInstantNotAfterTheRestore() {
+        let h = Harness()
+
+        h.utterance()
+
+        XCTAssertEqual(h.inserter.pillCallsAtDelivery.count, 1)
+        XCTAssertTrue(h.inserter.pillCallsAtDelivery[0].contains("flashSuccess"),
+                      "the flash happened inside the delivery window")
+        XCTAssertEqual(h.pill.snapshot().filter { $0 == "flashSuccess" }.count, 1,
+                       "…and is never repeated after insert returns")
+    }
+
+    /// The metric side of the same fix: `release_to_text_ms` stamps at the
+    /// delivery timestamp and the custody window rides its own `restore_ms`.
+    func testPasteRowSplitsRestoreMsOutOfReleaseToText() {
+        let h = Harness()
+
+        h.utterance()
+
+        let record = try? XCTUnwrap(h.metrics.last)
+        guard let record else { return }
+        XCTAssertEqual(record.outcome, "paste")
+        XCTAssertNotNil(record.releaseToTextMs)
+        XCTAssertNotNil(record.restoreMs, "the paste rung reports its custody window")
+        XCTAssertGreaterThanOrEqual(record.restoreMs ?? -1, 0)
+        XCTAssertGreaterThanOrEqual(record.releaseToTextMs ?? -1, 0)
+    }
+
+    /// `restore_ms` is the paste rung's field alone — a typed delivery has no
+    /// post-delivery custody window to report.
+    func testTypedRowCarriesNoRestoreMs() {
+        let h = Harness()
+        h.inserter.result = InsertResult(ok: true, method: .type, detail: "typed into t")
+
+        h.utterance()
+
+        XCTAssertEqual(h.metrics.last?.outcome, "type")
+        XCTAssertNil(h.metrics.last?.restoreMs)
+    }
+
+    /// A conformer that predates the delivery hook (the default-implementation
+    /// path) still flashes exactly once, at return — feedback is never earlier
+    /// than delivery, merely no longer late.
+    func testAPreHookInserterStillFlashesExactlyOnce() {
+        let h = Harness()
+        h.inserter.stampsDelivery = false
+
+        h.utterance()
+
+        XCTAssertEqual(h.pill.snapshot().filter { $0 == "flashSuccess" }.count, 1)
+        XCTAssertNil(h.metrics.last?.restoreMs, "no stamp, no split — never a guessed one")
+    }
+
+    /// The R6 one-line counter (§1.1-T5): a press still queued when the
+    /// restore window closes is recorded on the row, and stays queued.
+    func testAPressQueuedDuringTheRestoreWindowIsCounted() {
+        let h = Harness(useRefiner: false)
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        h.events.put(HotkeyEvent(.press, ts: 0.9))   // queued behind the utterance
+
+        h.session.dispatch(HotkeyEvent(.release, ts: 1.0))
+
+        XCTAssertEqual(h.metrics.last?.repressQueued, true)
+        XCTAssertEqual(h.events.count, 1, "the counter consumes nothing")
+
+        let calm = Harness(useRefiner: false)
+        calm.utterance()
+        XCTAssertNil(calm.metrics.last?.repressQueued,
+                     "omitted, not false, when nobody was waiting")
+    }
+
+    // MARK: - R4: the acoustic pair rides every utterance row
+
+    func testNoiseFloorAndFirstVoicedRideSuccessAndEmptyRows() {
+        let h = Harness()
+        h.audio.noiseFloorValue = 0.0123
+        h.audio.firstVoicedMsValue = 181.4
+
+        h.utterance()
+
+        XCTAssertEqual(h.metrics.last?.noiseFloor ?? -1, 0.0123, accuracy: 1e-9)
+        XCTAssertEqual(h.metrics.last?.firstVoicedMs ?? -1, 181.4, accuracy: 1e-9)
+
+        let empty = Harness()
+        empty.audio.noiseFloorValue = 0.002
+        empty.audio.firstVoicedMsValue = nil
+        empty.asr.result = UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40)
+
+        empty.utterance()
+
+        XCTAssertEqual(empty.metrics.last?.outcome, "empty")
+        XCTAssertEqual(empty.metrics.last?.noiseFloor ?? -1, 0.002, accuracy: 1e-9,
+                       "the empty rows are exactly where the floor pair matters")
+        XCTAssertNil(empty.metrics.last?.firstVoicedMs,
+                     "no voiced chunk, no stamp — omitted, never zero")
+    }
+
+    // MARK: - R11: sound cues
+
+    /// Mic-open rides the show-recording event — only reachable once
+    /// `audio.start()` succeeded — and commit rides the delivery instant.
+    func testCuesPlayMicOpenThenCommitOnASuccessfulUtterance() {
+        let h = Harness()
+        h.utterance()
+        XCTAssertEqual(h.sound.cues, [.micOpen, .commit])
+    }
+
+    func testNoCueWhenTheMicrophoneFailsToOpen() {
+        let h = Harness()
+        h.audio.startSucceeds = false
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        XCTAssertEqual(h.sound.cues, [], "the cue may never claim a mic that did not open")
+    }
+
+    func testNoCommitCueOnEmptyBlockedOrFailedInsertion() {
+        let empty = Harness()
+        empty.asr.result = UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40)
+        empty.utterance()
+        XCTAssertEqual(empty.sound.cues, [.micOpen], "no error sounds, by design")
+
+        let blocked = Harness()
+        blocked.inserter.result = InsertResult(ok: false, method: .blockedSecure, detail: "")
+        blocked.utterance()
+        XCTAssertEqual(blocked.sound.cues, [.micOpen])
+
+        let failed = Harness()
+        failed.inserter.result = InsertResult(ok: false, method: .error, detail: "nope")
+        failed.utterance()
+        XCTAssertEqual(failed.sound.cues, [.micOpen])
     }
 
     // MARK: - retention race

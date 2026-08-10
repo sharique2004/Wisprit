@@ -1,0 +1,155 @@
+{
+  "categories" : [
+    {
+      "category" : "g0",
+      "emptyRate" : 0,
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 54,
+      "wer" : 0.20867768595041322
+    },
+    {
+      "category" : "g-12",
+      "emptyRate" : 0,
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 54,
+      "wer" : 0.21487603305785125
+    },
+    {
+      "category" : "g-24",
+      "emptyRate" : 0,
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 54,
+      "wer" : 0.2231404958677686
+    },
+    {
+      "category" : "g-36",
+      "emptyRate" : 0,
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 54,
+      "wer" : 0.22520661157024793
+    },
+    {
+      "category" : "clip+6",
+      "emptyRate" : 0,
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 54,
+      "wer" : 0.20454545454545456
+    },
+    {
+      "category" : "wn20",
+      "emptyRate" : 0,
+      "termRecall" : 0.16666666666666666,
+      "utterances" : 54,
+      "wer" : 0.24380165289256198
+    },
+    {
+      "category" : "wn10",
+      "emptyRate" : 0,
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 54,
+      "wer" : 0.27479338842975204
+    },
+    {
+      "category" : "wn5",
+      "emptyRate" : 0,
+      "termRecall" : 0,
+      "utterances" : 54,
+      "wer" : 0.3760330578512397
+    },
+    {
+      "category" : "bab10",
+      "emptyRate" : 0,
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 54,
+      "wer" : 0.22727272727272727
+    },
+    {
+      "category" : "bandlimit8k",
+      "emptyRate" : 0,
+      "termRecall" : 0.1111111111111111,
+      "utterances" : 54,
+      "wer" : 0.2334710743801653
+    },
+    {
+      "category" : "whisper-voice",
+      "emptyRate" : 0,
+      "termRecall" : 0,
+      "utterances" : 54,
+      "wer" : 0.6033057851239669
+    },
+    {
+      "category" : "r120",
+      "emptyRate" : 0,
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 54,
+      "wer" : 0.22107438016528927
+    },
+    {
+      "category" : "r240",
+      "emptyRate" : 0,
+      "termRecall" : 0.1111111111111111,
+      "utterances" : 54,
+      "wer" : 0.20867768595041322
+    }
+  ],
+  "categoryStage" : "raw",
+  "config" : "refine=off,dict=off",
+  "corpusId" : "tts-stress-v1",
+  "engine" : "apple_live",
+  "provenance" : {
+    "corpusSource" : "tts",
+    "dictionaryTerms" : 9,
+    "gitSha" : "6fd929f",
+    "osBuild" : "25F84",
+    "promptSha256" : "b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf",
+    "scorerVersion" : 1
+  },
+  "split" : "all",
+  "stages" : [
+    {
+      "cer" : 0.2167015863513918,
+      "emptyRate" : 0,
+      "errors" : 1677,
+      "refWords" : 6292,
+      "stage" : "raw",
+      "termRecall" : 0.0641025641025641,
+      "utterances" : 702,
+      "wer" : 0.2665289256198347,
+      "zeroEdit" : 0.19230769230769232
+    },
+    {
+      "cer" : 0.21164322059263693,
+      "emptyRate" : 0,
+      "errors" : 1665,
+      "refWords" : 6292,
+      "stage" : "corrected",
+      "termRecall" : 0.0641025641025641,
+      "utterances" : 702,
+      "wer" : 0.2646217418944692,
+      "zeroEdit" : 0.19515669515669515
+    },
+    {
+      "cer" : 0.21164322059263693,
+      "emptyRate" : 0,
+      "errors" : 1665,
+      "refWords" : 6292,
+      "stage" : "refined",
+      "termRecall" : 0.0641025641025641,
+      "utterances" : 702,
+      "wer" : 0.2646217418944692,
+      "zeroEdit" : 0.19515669515669515
+    },
+    {
+      "cer" : 0.11828793774319066,
+      "emptyRate" : 0,
+      "errors" : 1168,
+      "refWords" : 6292,
+      "stage" : "final",
+      "termRecall" : 0.0641025641025641,
+      "utterances" : 702,
+      "wer" : 0.1856325492689129,
+      "zeroEdit" : 0.2564102564102564
+    }
+  ],
+  "timestamp" : "2026-08-10T11:48:38Z"
+}

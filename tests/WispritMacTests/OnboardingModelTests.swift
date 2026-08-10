@@ -89,8 +89,9 @@ final class OnboardingModelTests: XCTestCase {
 
     /// The one thing TCC cannot answer: a granted microphone can still be a
     /// muted or wrong input. The step is not optional, and nothing past it is
-    /// offered until a voiced peak lands.
-    func testTheMicTestGatesOnAHeardPeakAndIsNotOptional() {
+    /// offered until the engine transcribes the user (R15 — evidence, not a
+    /// level threshold).
+    func testTheMicTestGatesOnTranscriptionEvidenceAndIsNotOptional() {
         XCTAssertFalse(OnboardingStep.micTest.isOptional)
         let silent = inputs(facts(), micTestPassed: false)
         XCTAssertFalse(OnboardingModel.isSatisfied(.micTest, silent))

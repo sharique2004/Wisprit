@@ -50,3 +50,37 @@ would light up automatically.
 `mlx-whisper large-v3-turbo` on the retained full-utterance PCM is the batch
 fallback (engine-agnostic `AsrManager`), used if apple_live is missing/unhealthy
 or finalize yields empty text. faster-whisper is the CPU tertiary.
+
+## SpeechDetector probe — gating-only IN PRACTICE on this build (2026-08-10)
+
+Probe: `docs/research/probes/speechdetector_probe.swift` (FINAL-PLAN B-6/R16,
+judge-feasibility §6.2). Question: can Apple's `SpeechDetector` module replace
+the hand-tuned `voicedPeakThreshold` with an engine-calibrated
+silent-vs-speech verdict over retained PCM? M4, macOS 26.5.
+
+The TYPE is verdict-shaped — the SDK swiftinterface declares
+`init(detectionOptions:reportResults:)` and a `results` stream of `Result`
+carrying `range: CMTimeRange` + `speechDetected: Bool`. The behaviour is not:
+
+- **Detector-only analyzer is not a supported topology.** The process TRAPS
+  (`Speech/SpeechDetector.swift:223: Fatal error: Cannot create
+  SpeechDetector-only worker; use with a transcriber module`) — a trap, not a
+  catchable error, so no off-path detector-only pass can even be attempted
+  safely. Reproduce: `./sdp --detector-only`.
+- **Co-located with a SpeechTranscriber, `reportResults: true`, results are
+  NEVER delivered.** All three sensitivity levels × {2 s digital silence,
+  clean `say` speech (meter peak 1.0), speech ×0.01 (peak 0.011), speech
+  ×0.003 (peak 0.003)}: the `results` stream yielded nothing on every speech
+  case and on silence at low/medium; at `sensitivity: .high` on silence it
+  errored (`SFSpeechErrorDomain Code=1 "RecogRejected"`). Meanwhile the
+  co-located transcriber transcribed every speech case perfectly — including
+  ×0.01 and ×0.003, an incidental third replication of the gain-invariance
+  result (robustness/acoustic.md §2).
+
+**Verdict for R16: gating-only in practice on this OS build.** The
+engine-calibrated-VAD shortcut does NOT open; the `EmptyReason` floor
+recalibration stays on the R26 path (derive the classification floor from p5
+of voiced-success `peak_level` once ~100 rows exist — the fields land with
+R4's telemetry completion). Keep the probe as the one-command per-OS re-probe:
+if a future build starts delivering `speechDetected` verdicts, R16 reopens
+and obsoletes the constant.

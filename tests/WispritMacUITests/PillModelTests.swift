@@ -279,6 +279,207 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(model.bubble, "")
     }
 
+    // MARK: - error truncation (FINAL-PLAN R9a, native-feel P3)
+
+    /// The bug this pins: errors got a 40-character budget but a 196 pt frame
+    /// (~30 characters), so the copy was truncated twice and the user lost the
+    /// diagnosis. Every string the session can flash must fit its frame.
+    func testErrorLayoutFitsEveryEmptyFlashString() {
+        // `SessionController.flashEmpty` / `flashError` copy, verbatim.
+        let messages = [
+            "Microphone delivered no audio",
+            "Didn't hear anything — is the right mic selected?",
+            "nothing recognized",
+            "microphone unavailable",
+            "insert failed",
+            "paste failed",
+            "no transcript to paste",
+            PillGeometry.blockedSecureMessage,
+        ]
+        for text in messages {
+            let (model, sink) = makeModel()
+            model.flashError(text)
+            let shown = sink.last.message
+            XCTAssertLessThanOrEqual(shown.count, PillGeometry.errorMessageCharacters)
+            let needed = 2 * PillTailGeometry.textInset
+                + Double(shown.count) * PillTailGeometry.characterWidth
+            XCTAssertGreaterThanOrEqual(sink.last.bubbleWidth, needed,
+                                        "\"\(text)\" would render truncated twice")
+        }
+    }
+
+    func testErrorWidthCapFitsTheFortyCharacterBudget() {
+        XCTAssertEqual(PillTailGeometry.errorMaxWidth, 288.0,
+                       "2 × 12 + 40 × 6.5 = 284, next widthStep multiple")
+        let budget = PillGeometry.errorMessageCharacters
+        let needed = 2 * PillTailGeometry.textInset
+            + Double(budget) * PillTailGeometry.characterWidth
+        XCTAssertGreaterThanOrEqual(PillTailGeometry.errorWidth(forCharacters: budget), needed)
+        // The live tail keeps its narrower cap — a scrolling partial is not a
+        // diagnosis — and below both caps the two layouts agree.
+        XCTAssertEqual(PillTailGeometry.width(forCharacters: budget), PillTailGeometry.maxWidth)
+        XCTAssertEqual(PillTailGeometry.errorWidth(forCharacters: 0), 0)
+        XCTAssertEqual(PillTailGeometry.errorWidth(forCharacters: 12),
+                       PillTailGeometry.width(forCharacters: 12))
+    }
+
+    func testBlockedSecureGetsTheErrorLayoutToo() {
+        let (model, sink) = makeModel()
+        model.flashBlockedSecure()
+        let shown = sink.last.message
+        let needed = 2 * PillTailGeometry.textInset
+            + Double(shown.count) * PillTailGeometry.characterWidth
+        XCTAssertGreaterThanOrEqual(sink.last.bubbleWidth, needed)
+    }
+
+    /// Head-truncation is right for a live tail (newest words win) and wrong
+    /// for a diagnosis (the head *is* the diagnosis). The alarm states cut at
+    /// the tail; everything else keeps the tail-of-speech behaviour.
+    func testAlarmStatesTruncateAtTheTailEverythingElseAtTheHead() {
+        for state in PillState.allCases {
+            let expected: PillTailTruncation =
+                (state == .error || state == .blockedSecure) ? .tail : .head
+            XCTAssertEqual(PillTailGeometry.truncation(for: state), expected, "\(state)")
+        }
+    }
+
+    // MARK: - the live dead-mic cue (FINAL-PLAN R10, amended trigger §1.1-T4)
+
+    private func silentTicks(_ model: PillModel, _ count: Int) {
+        for _ in 0..<count { model.updateLevel(0) }
+    }
+
+    /// ~2 s of sub-floor ticks with no engine evidence → a muted notice tail,
+    /// while the user can still act on it — not a posthumous flash.
+    func testTwoSecondsOfDeadMicShowsTheCue() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        silentTicks(model, PillGeometry.deadMicTickCount)
+        XCTAssertEqual(model.bubble, "", "the 2 s window itself stays clean")
+        model.updateLevel(0)   // the first tick past the window
+        XCTAssertEqual(model.state, .recording, "the cue is a notice, not a state change")
+        XCTAssertEqual(sink.last.bubble, PillGeometry.deadMicMessage)
+        XCTAssertEqual(sink.last.message, PillGeometry.deadMicMessage)
+        XCTAssertTrue(sink.last.tailMuted, "notice styling: muted ink, no alarm body")
+        XCTAssertEqual(sink.last.tint, PillPalette.hot,
+                       "the mic is open, so the bars keep the tally colour")
+        XCTAssertEqual(sink.last.glyph, .none)
+    }
+
+    /// The cue costs exactly one frame; the silence around it stays free —
+    /// the zero-redraw invariant survives the cue.
+    func testTheCueCostsOneFrameAndSilenceStaysFreeAfterIt() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        silentTicks(model, PillGeometry.deadMicTickCount + 1)
+        XCTAssertEqual(sink.last.bubble, PillGeometry.deadMicMessage)
+        let settled = sink.frames.count
+        silentTicks(model, 40)
+        XCTAssertEqual(sink.frames.count, settled, "a shown cue must not re-emit")
+    }
+
+    func testAVoicedTickClearsTheCueAndDisarmsIt() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        silentTicks(model, PillGeometry.deadMicTickCount + 1)
+        XCTAssertEqual(model.bubble, PillGeometry.deadMicMessage)
+
+        model.updateLevel(0.5)
+        XCTAssertEqual(sink.last.bubble, "")
+        XCTAssertEqual(sink.last.message, "")
+        XCTAssertFalse(sink.last.tailMuted)
+        // A channel that has produced voice is not dead: no re-fire this
+        // utterance, however long the silence that follows.
+        silentTicks(model, PillGeometry.deadMicTickCount * 3)
+        XCTAssertEqual(model.bubble, "")
+    }
+
+    /// Engine evidence beats the proxy (§1.1-T4): one partial replaces the cue
+    /// on screen and suppresses it for the rest of the utterance.
+    func testAPartialClearsAndSuppressesTheCue() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        silentTicks(model, PillGeometry.deadMicTickCount + 1)
+        XCTAssertEqual(model.bubble, PillGeometry.deadMicMessage)
+
+        model.livePartial("hello")
+        XCTAssertEqual(sink.last.bubble, "hello")
+        XCTAssertFalse(sink.last.tailMuted)
+        XCTAssertEqual(sink.last.message, "")
+    }
+
+    func testAnEarlyPartialSuppressesTheCueEntirely() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.livePartial("hi")
+        silentTicks(model, PillGeometry.deadMicTickCount * 3)
+        XCTAssertEqual(sink.last.bubble, "hi", "the tail stays a tail")
+        XCTAssertFalse(sink.last.tailMuted)
+    }
+
+    func testEarlySpeechDisarmsTheCueForTheWholeUtterance() {
+        let (model, _) = makeModel()
+        model.showRecording()
+        model.updateLevel(0.5)
+        silentTicks(model, PillGeometry.deadMicTickCount * 3)
+        XCTAssertEqual(model.bubble, "", "quiet-after-speech belongs to R15/R26, not a nag")
+    }
+
+    func testAFreshUtteranceRearmsTheCue() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.updateLevel(0.5)          // disarmed for this utterance
+        model.showFinalizing()
+        model.fireDeferred(.hide)
+
+        model.showRecording()           // next press
+        silentTicks(model, PillGeometry.deadMicTickCount + 1)
+        XCTAssertEqual(sink.last.bubble, PillGeometry.deadMicMessage)
+    }
+
+    func testTheCueNeverFiresOutsideRecording() {
+        let (model, _) = makeModel()
+        silentTicks(model, PillGeometry.deadMicTickCount * 2)
+        XCTAssertEqual(model.bubble, "", "hidden pill: level ticks are diagnostics only")
+        XCTAssertEqual(model.state, .hidden)
+    }
+
+    // MARK: - the staggered-collapse source (§2.5 row 6, FINAL-PLAN R13)
+
+    /// The surface needs the levels the collapse starts from; the model's
+    /// `bars` are already at floor — a held waveform would be a lie, and every
+    /// assertion above stays true.
+    func testFinalizingHandsTheSurfaceThePreCollapseBars() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.updateLevel(0.5)
+        model.showFinalizing()
+        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount))
+        XCTAssertEqual(sink.last.collapseFrom.count, PillGeometry.barCount)
+        XCTAssertEqual(sink.last.collapseFrom.last, WaveformBuffer.shaped(0.5))
+
+        model.showRefining()
+        XCTAssertEqual(sink.last.collapseFrom, [],
+                       "refining right after finalizing must not restart the choreography")
+    }
+
+    func testASilentReleaseHasNothingToCollapse() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.showFinalizing()
+        XCTAssertEqual(sink.last.collapseFrom, [])
+    }
+
+    func testTheCommitClearsTheCollapseSource() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.updateLevel(0.7)
+        model.showFinalizing()
+        XCTAssertFalse(sink.last.collapseFrom.isEmpty)
+        model.flashSuccess()
+        XCTAssertEqual(sink.last.collapseFrom, [])
+    }
+
     // MARK: - width held (§2.4)
 
     /// A pill that shrinks and regrows between "you stopped talking" and "here

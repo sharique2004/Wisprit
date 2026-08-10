@@ -106,8 +106,12 @@ enum EvalPaths {
         "asr.\(corpus).\(engine).\(settingsHash).cache.detail.jsonl"
     }
 
-    static func stagesDetailName(corpus: String, engine: String, config: String) -> String {
-        "stages.\(corpus).\(engine).\(slug(config)).detail.jsonl"
+    /// Locale is in the name because a replay is derived from a locale-specific
+    /// ASR pass: an en_IN stages file overwriting the en_US one would let a
+    /// locale bake-off silently score the wrong transcripts.
+    static func stagesDetailName(corpus: String, engine: String, locale: String,
+                                 config: String) -> String {
+        "stages.\(corpus).\(engine).\(locale).\(slug(config)).detail.jsonl"
     }
 
     static func runSummaryName(stamp: String, corpus: String, engine: String,
@@ -153,13 +157,21 @@ enum EvalPaths {
     /// Everything about the recognizer configuration that can move a transcript.
     /// Anything not listed here is asserted to be irrelevant to the text — add a
     /// field and every cached transcript is correctly invalidated.
+    ///
+    /// `osBuild` is in the material because the recognizer model arrives with
+    /// the OS and is replaced by it (DEFINITIONS.md: "26.4 rebuilt it"). Without
+    /// it, the first run after a macOS update serves every transcript from the
+    /// *old* model while `report` stamps the *new* build on the row — a
+    /// provenance lie. The cost of carrying it is one full re-transcribe per OS
+    /// update, about two minutes for the whole deck.
     static func settingsHash(locale: String, engine: String, finalizeTimeoutMs: Double,
-                             contextualTermLimit: Int?) -> String {
+                             contextualTermLimit: Int?, osBuild: String) -> String {
         let material = [
             "locale=\(locale)",
             "engine=\(engine)",
             "finalize_timeout_ms=\(Int(finalizeTimeoutMs))",
             "contextual_term_limit=\(contextualTermLimit.map(String.init) ?? "all")",
+            "os_build=\(osBuild)",
         ].joined(separator: "|")
         return String(sha256Hex(Data(material.utf8)).prefix(8))
     }

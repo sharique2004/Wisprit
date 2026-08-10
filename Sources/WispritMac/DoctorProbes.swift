@@ -58,6 +58,9 @@ public extension Doctor {
         facts.configValid = isValidJSON(WispritPaths.configPath)
         facts.dictionaryPath = WispritPaths.dictionaryPath.path
         facts.dictionaryValid = isValidJSON(WispritPaths.dictionaryPath)
+        // The same catalog the Settings ▸ Data page renders (R17): stat every
+        // class the stores own, so the terminal can see the inventory too.
+        facts.dataStores = DataInventory.status()
         facts.parakeetModelsPath = parakeetModelsDir.path
         facts.parakeetModels = parakeetModelsState(at: parakeetModelsDir)
 

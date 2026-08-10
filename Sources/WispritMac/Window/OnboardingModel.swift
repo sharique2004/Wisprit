@@ -72,9 +72,9 @@ public struct OnboardingInputs: Sendable, Equatable {
     public var welcomeAcknowledged: Bool
     /// `live_typing`, or the user explicitly said "not now".
     public var liveTypingSettled: Bool
-    /// The mic test heard a voiced peak — a level at or above
-    /// `MetricsSummary.voicedPeakThreshold`. The one thing TCC cannot tell us:
-    /// the grant can be green while macOS is handing us a muted input.
+    /// The mic test's engine transcribed the user (R15 — evidence, not a level
+    /// threshold). The one thing TCC cannot tell us: the grant can be green
+    /// while macOS is handing us a muted input.
     public var micTestPassed: Bool
     /// The configured dictation key. `.globeKey` is moot on `right_option`:
     /// there is no 🌐 press to intercept.
@@ -179,4 +179,20 @@ public enum OnboardingSettings {
     public static let stepKey = "onboarding_step"
     /// The user answered the optional Live Typing question, either way.
     public static let liveTypingSettledKey = "onboarding_live_typing_settled"
+
+    // Time-to-wow (R14): the raw material for the one-time `onboarding`
+    // metrics row. Persisted because the flow contains a MANDATORY relaunch
+    // (Input Monitoring binds at launch) — an in-memory clock would forget the
+    // exact cost the row exists to measure.
+
+    /// Epoch seconds of the very first launch on a fresh install. Absent on
+    /// machines that finished onboarding before this key existed, which is
+    /// what keeps them from ever writing a bogus row.
+    public static let firstLaunchKey = "onboarding_first_launch_ts"
+    /// Launches after the first, counted until the row is written.
+    public static let relaunchCountKey = "onboarding_relaunches"
+    /// Explicit Skip presses in the wizard, counted until the row is written.
+    public static let stepsSkippedKey = "onboarding_steps_skipped"
+    /// The row has been written; every counter above goes quiet for good.
+    public static let wowRecordedKey = "onboarding_wow_recorded"
 }

@@ -192,6 +192,72 @@ final class MetricsWriterTests: XCTestCase {
         }
     }
 
+    // MARK: the R6/R4 tail (2026-08-10) — restore split, acoustic pair
+
+    /// The four new utterance-row fields append after every existing key, in
+    /// on-disk order, with the family rounding rules (`round1` durations,
+    /// `round4` for the meter-scale floor) — and omit cleanly, so every row an
+    /// earlier build wrote remains a byte-prefix of this schema.
+    func testRestoreSplitAndAcousticPairAppendAfterEverythingInOrder() throws {
+        let with = MetricsRecord(
+            ts: 1.0, heldMs: 2.0, engine: "e", finalizeMs: 3.0, timedOut: false,
+            postMs: 4.0, insertMs: 5.0, outcome: "paste", chars: 6,
+            releaseToTextMs: 7.0, aiMs: 8.0, ai: "applied",
+            peakLevel: 0.5, audioMs: 9.0, rawChars: 10, refineDelta: 11,
+            ctx: "read", ctxMs: 42.16, ctxTerms: 3,
+            restoreMs: 500.44, repressQueued: true,
+            noiseFloor: 0.01234567, firstVoicedMs: 181.27)
+        guard case .object(let object) = try WispritJSON.parse(with.jsonLine()) else {
+            return XCTFail("not an object")
+        }
+        XCTAssertEqual(object.keys, [
+            "ts", "held_ms", "engine", "finalize_ms", "timed_out", "post_ms",
+            "insert_ms", "outcome", "chars", "release_to_text_ms", "ai_ms", "ai",
+            "peak_level", "audio_ms", "raw_chars", "refine_delta",
+            "ctx", "ctx_ms", "ctx_terms",
+            "restore_ms", "repress_queued", "noise_floor", "first_voiced_ms",
+        ])
+        XCTAssertEqual(object["restore_ms"], .double(500.4), "round1, like every duration")
+        XCTAssertEqual(object["repress_queued"], .bool(true))
+        XCTAssertEqual(object["noise_floor"], .double(0.0123),
+                       "round4 — the same rule as peak_level, same meter scale")
+        XCTAssertEqual(object["first_voiced_ms"], .double(181.3))
+
+        let without = MetricsRecord(
+            ts: 1785872035.681684, heldMs: 1468.75, engine: "apple_live",
+            finalizeMs: 1500.9, timedOut: false, postMs: 0.0, insertMs: 0.0,
+            outcome: "empty", chars: 0).jsonLine()
+        XCTAssertEqual(without, Golden.metricsLegacyEmptyRow)
+        for key in ["restore_ms", "repress_queued", "noise_floor", "first_voiced_ms",
+                    "onboard_ms", "steps_skipped", "relaunches"] {
+            XCTAssertFalse(without.contains("\"\(key)\""), "\(key) must be omitted, not null")
+        }
+    }
+
+    // MARK: the `onboarding` deviation row (R14)
+
+    /// One time-to-wow row per fresh install, written through the dedicated
+    /// entry point: reference-less like `vocab_retro`, engine-less like
+    /// `edit_observed`, and carrying exactly its own three fields.
+    func testWriteOnboardingWritesTheOneRowShape() throws {
+        let writer = MetricsWriter(path: path)
+        writer.writeOnboarding(firstLaunchToDictateMs: 184222.67,
+                               stepsSkipped: 1, relaunchCount: 2)
+
+        let rows = writer.readAll()
+        XCTAssertEqual(rows.count, 1)
+        guard let row = rows.first else { return }
+        XCTAssertEqual(row["outcome"], .string("onboarding"))
+        XCTAssertEqual(row["engine"], .string(""), "no engine produced this line")
+        XCTAssertEqual(row["onboard_ms"], .double(184222.7))
+        XCTAssertEqual(row["steps_skipped"], .int(1))
+        XCTAssertEqual(row["relaunches"], .int(2))
+        XCTAssertEqual(row["chars"], .int(0))
+        for key in ["release_to_text_ms", "vocab_ms", "edit_dist", "restore_ms"] {
+            XCTAssertNil(row[key], "an onboarding row never carries \(key)")
+        }
+    }
+
     // MARK: the `edit_observed` deviation row (Phase 5)
 
     func testEditObservedRowMatchesItsGoldenLine() {

@@ -42,11 +42,16 @@ document extends the spikes-s1 caveat discipline; nothing here fights it.
    empty-transcript rate metric; and **the ASR cache does not key on osBuild**,
    so a macOS update silently serves stale transcripts under a new provenance
    stamp (§6.3 — this is a genuine footgun, found reading `EvalPaths.swift`).
-5. **Live telemetry says this user dictates 12–14 dB quieter than the TTS
-   corpus** (`~/.wisprit/metrics.log`, §7): real `peak_level` 0.039–0.233
+5. **Live telemetry says this user dictates well below TTS levels**
+   (`~/.wisprit/metrics.log`, §7): real `peak_level` 0.039–0.233
    (median 0.156) vs 0.59–0.77 for unscaled `say` output. Every TTS number
    published so far was measured in a level regime the user never occupies.
    The matrix's −12 dB cell, not its 0 dB cell, is the realistic one.
+   *[Correction, 2026-08-10 (FINAL-PLAN §1.1-T8): the specific "12–14 dB"
+   figure is retired — its derivation mixed pre- and post-clamp statistics.
+   The operational conclusion stands on the recomputed live side: peaks
+   0.039–0.233 put the realistic operating regime at the g-12/g-24 cells,
+   not g0.]*
 6. **The calibration ladder is: synthetic matrix → public real-speech corpora →
    human-v1.** The manifest schema already anticipates the middle rung
    (`CorpusSource.librispeech`). Synthetic axes become trustworthy tripwires
@@ -166,8 +171,11 @@ Stress axes (Samantha):
 
 Internal consistency check: stress `g0` = accents `samantha` = 11.76% (same
 audio recipe through two independently generated corpora). Statistical honesty:
-at ~420 ref words/cell the standard error on a ~13% WER is ≈1.6 points —
-**deltas under ~2 points (daniel, r240, clip+6) are within noise; the en-IN
+at ~420 ref words/cell the standard error on a ~13% WER is ≈1.6 points
+*[correction, 2026-08-10 (feasibility C10): errors cluster within utterances,
+so the effective noise floor is nearer 2–3 points — read "within noise" as
+"deltas under ~3 points"]* —
+**deltas under ~2–3 points (daniel, r240, clip+6) are within noise; the en-IN
 gaps (+6.5, +8.3) and the whole noise axis (+3.5 to +16.8) are solidly real.**
 Every cell is deterministic given the same audio and OS build (refine off), so
 these reproduce exactly until the OS model changes.
@@ -389,8 +397,10 @@ Runtime accounting, stated honestly:
   The one `empty_reason` row so far: `produced_nothing` at level 0.0388 with
   785 ms of audio — short *and* quiet, confounded.
 - **The calibration this gives the matrix:** unscaled `say` output measures
-  0.59–0.77 on the same scale — the TTS corpus as generated is **12–14 dB
-  hotter than this user's real speech**. The matrix's g-12 cell (level ≈ 0.25)
+  0.59–0.77 on the same scale — the TTS corpus as generated is **substantially
+  hotter than this user's real speech** *(the earlier "12–14 dB" quantification
+  is retired — see the §1.5 correction; the cell mapping below is what
+  survives)*. The matrix's g-12 cell (level ≈ 0.25)
   brackets the user's loud end; g-24 (0.063) sits at the user's median-to-quiet
   range; the user's observed floor (0.039) is *between* the g-24 and g-36
   cells, both of which transcribe fine. Conclusion: at this user's real

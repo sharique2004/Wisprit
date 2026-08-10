@@ -282,6 +282,62 @@ final class InserterTests: XCTestCase {
         XCTAssertEqual(ports.sleeps, [0])
     }
 
+    // --- R6: delivery callback + timestamp (the feedback-inversion fix) ----------
+
+    /// The core of R6: the delivery hook fires after ⌘V is posted and BEFORE
+    /// the restore sleep — the success flash it carries can no longer trail
+    /// the pasted text by the length of the custody window.
+    func testPasteDeliveryHookFiresAfterCommandVAndBeforeTheRestoreSleep() {
+        let ports = FakeInsertPorts()
+        ports.bundleID = "com.apple.Notes"
+        var deliveredCount = 0
+        let result = Inserter(ports: ports).insert("hello", config: config(delayMs: 500)) {
+            deliveredCount += 1
+            XCTAssertEqual(ports.ops.last, .commandV,
+                           "delivery is the instant after ⌘V, nothing later")
+            XCTAssertTrue(ports.sleeps.isEmpty, "…and strictly before the restore sleep")
+        }
+        XCTAssertEqual(deliveredCount, 1)
+        XCTAssertNotNil(result.deliveredAtMonotonic,
+                        "the paste rung stamps the delivery instant for the metric split")
+        XCTAssertEqual(ports.sleeps, [0.5], "the restore semantics are unchanged")
+        XCTAssertTrue(ports.ops.contains(.restore(items: 0)))
+    }
+
+    func testTypedDeliveryHookFiresOnceTypingIsComplete() {
+        let ports = FakeInsertPorts()
+        ports.bundleID = "com.apple.Terminal"
+        var delivered = false
+        let result = Inserter(ports: ports).insert("hello world echo", config: config()) {
+            delivered = true
+            XCTAssertEqual(ports.typedChunks.joined(), "hello world echo",
+                           "typing IS the delivery — the hook fires after the last chunk")
+        }
+        XCTAssertTrue(delivered)
+        XCTAssertEqual(result.method, .type)
+        XCTAssertNotNil(result.deliveredAtMonotonic)
+    }
+
+    /// No failure path may ever claim a delivery.
+    func testDeliveryHookNeverFiresOnAFailurePath() {
+        let cases: [(String, (FakeInsertPorts) -> Void)] = [
+            ("blocked secure", { $0.secure = true }),
+            ("not trusted", { $0.trusted = false }),
+            ("pasteboard write failed", { $0.setStringSucceeds = false }),
+            ("postCommandV threw", { $0.postVError = FakeError.boom }),
+            ("typing threw", { $0.bundleID = "com.apple.Terminal"; $0.typeError = FakeError.boom }),
+        ]
+        for (label, arrange) in cases {
+            let ports = FakeInsertPorts()
+            arrange(ports)
+            let result = Inserter(ports: ports).insert("hello", config: config()) {
+                XCTFail("delivery hook fired on: \(label)")
+            }
+            XCTAssertFalse(result.ok, label)
+            XCTAssertNil(result.deliveredAtMonotonic, label)
+        }
+    }
+
     // --- misc --------------------------------------------------------------------
 
     func testConfigProviderIsEvaluatedPerCall() {

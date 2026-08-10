@@ -69,7 +69,7 @@ final class StatusMenuModelTests: XCTestCase {
             "Paste Last Transcript  (⌘⌃V)",
             "Open Dictionary…",
             "Open Config…",
-            "Run Doctor…",
+            "Open Setup…",
             "Purge History",
             "---",
             "Quit Wisprit",
@@ -279,9 +279,20 @@ final class StatusMenuModelTests: XCTestCase {
             polishModes: StatusMenuModelTests.modes))
         let actions = items.compactMap(\.action)
         for expected: MenuAction in [.pasteLast, .openDictionary, .openConfig,
-                                     .runDoctor, .purgeHistory, .quit] {
+                                     .openSetup, .purgeHistory, .quit] {
             XCTAssertEqual(actions.filter { $0 == expected }.count, 1, "\(expected)")
         }
+    }
+
+    /// P6/R9: "Run Doctor…" spawned a Terminal window running the CLI — a
+    /// mechanism leak. The row is now the Setup page, which is the same doctor
+    /// rendered natively. (`wisprit doctor` itself remains, for terminals.)
+    func testTheDoctorRowIsTheSetupPageNotATerminalRitual() {
+        let items = StatusMenuModel.build(StatusMenuState())
+        XCTAssertFalse(items.contains { $0.title.contains("Doctor") },
+                       "no row may send the user to a terminal for the checklist")
+        let setup = items.first { $0.title == "Open Setup…" }
+        XCTAssertEqual(setup?.action, .openSetup)
     }
 
     func testThreeSeparators() {
@@ -329,7 +340,10 @@ final class StatusMenuModelTests: XCTestCase {
     func testFinishSetupRowAppearsOnlyWhileSomethingIsBlocking() {
         let healthy = StatusMenuModel.build(StatusMenuState(needsSetup: false))
         XCTAssertFalse(titles(healthy).contains("Finish setup…"))
-        XCTAssertFalse(healthy.contains { $0.action == .openSetup })
+        // The tools cluster's "Open Setup…" (P6) is always there; the
+        // attention-tinted alert row is the one that must not nag a healthy
+        // install.
+        XCTAssertEqual(healthy.filter { $0.action == .openSetup }.count, 1)
 
         let blocked = StatusMenuModel.build(StatusMenuState(needsSetup: true))
         XCTAssertEqual(blocked[1].title, "Finish setup…")
@@ -373,12 +387,14 @@ final class StatusMenuModelTests: XCTestCase {
                        MenuIconSpec(symbolName: "mic.fill", isTemplate: false))
     }
 
-    /// `needsSetup > disabled > recording > working > idle`, total and in that
-    /// order — a Mac that cannot dictate says so before it says anything else.
+    /// `needsSetup > disabled > recording > working > secureInput > idle`,
+    /// total and in that order — a Mac that cannot dictate says so before it
+    /// says anything else.
     func testIconPriorityWhenStatesCollide() {
         let everything = StatusIconState(state: .recording,
                                          dictationEnabled: false,
-                                         needsSetup: true)
+                                         needsSetup: true,
+                                         secureInput: true)
         XCTAssertEqual(StatusMenuModel.iconSpec(for: everything).symbolName,
                        "exclamationmark.circle")
 
@@ -392,6 +408,39 @@ final class StatusMenuModelTests: XCTestCase {
         enabled.dictationEnabled = true
         XCTAssertEqual(StatusMenuModel.iconSpec(for: enabled).symbolName, "mic.fill")
         XCTAssertFalse(StatusMenuModel.iconSpec(for: enabled).isTemplate)
+    }
+
+    /// R12: while some app holds Secure Keyboard Entry the event tap never
+    /// fires, and this icon is the only feedback channel left. The lock shows
+    /// only at idle — a session that is visibly running proves the key WAS
+    /// seen, so a lock over `recording` would be the icon lying — and never
+    /// outranks `needsSetup` or the master toggle.
+    func testSecureInputLocksTheIdleIconAndOnlyTheIdleIcon() {
+        let locked = StatusIconState(state: .idle, secureInput: true)
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: locked),
+                       MenuIconSpec(symbolName: StatusMenuModel.secureInputSymbolName,
+                                    isTemplate: true),
+                       "information, not alarm: the lock stays a template")
+
+        for state in AppState.allCases where state != .idle {
+            let live = StatusIconState(state: state, secureInput: true)
+            XCTAssertNotEqual(StatusMenuModel.iconSpec(for: live).symbolName,
+                              StatusMenuModel.secureInputSymbolName,
+                              "\(state): a running session outranks the lock")
+        }
+
+        var blocked = locked
+        blocked.needsSetup = true
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: blocked).symbolName,
+                       "exclamationmark.circle")
+
+        var off = locked
+        off.dictationEnabled = false
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: off).symbolName, "mic.slash")
+
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: StatusIconState()),
+                       MenuIconSpec(symbolName: "mic", isTemplate: true),
+                       "no secure input, no lock")
     }
 
     /// Retired from the button, kept as the title fallback — and still the only

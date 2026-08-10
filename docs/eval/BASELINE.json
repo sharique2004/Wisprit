@@ -138,6 +138,36 @@
    ],
    "config": "cases",
    "corpus": "refine-battery"
+  },
+  {
+   "bands": [
+    {
+     "accepted": 0.167355,
+     "metric": "wer",
+     "stage": "ri-noise",
+     "tolerance": 0.03
+    },
+    {
+     "accepted": 0.030992,
+     "metric": "wer",
+     "stage": "ri-accent",
+     "tolerance": 0.02
+    },
+    {
+     "accepted": 0.016529,
+     "metric": "wer",
+     "stage": "ri-level",
+     "tolerance": 0.023471
+    },
+    {
+     "accepted": 0,
+     "metric": "emptyRate",
+     "stage": "ri-empty",
+     "tolerance": 0
+    }
+   ],
+   "config": "v1",
+   "corpus": "robustness-deck"
   }
  ]
 }

@@ -40,15 +40,28 @@ record, and **not** reused. Aim for a spread of accents and of pitch; if all
 three speakers sound alike the corpus reports how the pipeline handles one voice
 three times.
 
+**The spread is concrete, not aspirational (FINAL-PLAN §3.0):** the three
+speakers must include **at least two non-US accents**, and at least one
+Indian-English speaker — that is the axis the synthetic deck flags worst
+(aman +8.3, tara +6.5 on `tts-accents-v1`), and spk01 likely covers it.
+
+**Recording order matters:** record **spk01's pass 1 first and run `verify` on
+it immediately**. Its first 20–30 verified clips open Gate 1 the same day (the
+mini locale bake-off — decoding those clips across all nine installed English
+ST locales is minutes of cached compute), so the rest of the program does not
+wait for the full corpus.
+
 ## The passes
 
-Each speaker does **three passes** over the same 13 files:
+Each speaker does **three passes** over the same 13 files, plus a short fourth
+pass (quiet voice — mandatory for spk01, encouraged for everyone):
 
 | pass | `--mic` | conditions |
 |---|---|---|
 | 1 — internal | `internal` | the built-in microphone, quiet room, 20-30 cm |
 | 2 — Bluetooth | e.g. `airpods-pro` | a Bluetooth headset, same quiet room, same distance |
 | 3 — real conditions | e.g. `internal-cafe` | a **subset** (see below), deliberately hostile |
+| 4 — quiet voice | `internal-quiet` | a ~30-utterance subset, deliberately soft speech |
 
 The mic label is part of every clip id (`spk01.airpods-pro.pn-01`), so a second
 pass over a script the first pass already recorded produces new clips rather
@@ -80,6 +93,17 @@ Pass 3, concretely:
 - **Pace**: faster than passes 1 and 2. Real dictation is quicker than reading.
 - Label it so the condition is legible in the id: `internal-cafe`,
   `airpods-street`, `internal-60cm`.
+
+**Pass 4 — quiet voice (FINAL-PLAN §3.0).** A ~30-utterance subset — files 01
+(proper nouns), 04 or the everyday half of 11, and 09 (numbers) — internal
+mic, quiet room, normal distance, but **deliberately soft speech shading to
+near-whisper**: the voice you use with someone asleep in the room. Mic label
+`internal-quiet`. This is the only way the tone/vocal-effort axis ever gets a
+number — synthetic audio cannot reach it (the deck prints "—" for tone), gain
+scaling is measured to be a solved non-axis, and the engine's behaviour on
+real low-energy phonation is otherwise a guess. About 10 minutes per speaker;
+**mandatory for spk01**, encouraged for the others. Do not perform the whisper
+— speak quietly, as you actually would.
 
 ## The dev / held split
 

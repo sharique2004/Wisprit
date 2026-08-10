@@ -78,7 +78,17 @@ enum EvalScoring {
             termRecall: expected > 0 ? Double(found) / Double(expected) : nil,
             zeroEdit: clips.isEmpty
                 ? nil
-                : Score.zeroEditRate(clips.map { (ref: $0.ref, hyp: $0.hyp) }))
+                : Score.zeroEditRate(clips.map { (ref: $0.ref, hyp: $0.hyp) }),
+            emptyRate: clips.isEmpty
+                ? nil
+                : Double(clips.count { isEmptyHypothesis($0.hyp) }) / Double(clips.count))
+    }
+
+    /// The live path's `outcome: empty`, applied to a replay: nothing survived
+    /// but whitespace. Deliberately not a normalization profile — an utterance
+    /// that produced only punctuation still produced *something*.
+    static func isEmptyHypothesis(_ hyp: String) -> Bool {
+        hyp.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
     /// Per-category WER and term recall, in first-appearance order so the table
@@ -93,7 +103,8 @@ enum EvalScoring {
         return order.map { category in
             let row = metrics(stage: category, clips: grouped[category] ?? [])
             return CategoryMetrics(category: category, utterances: row.utterances,
-                                   wer: row.wer, termRecall: row.termRecall)
+                                   wer: row.wer, termRecall: row.termRecall,
+                                   emptyRate: row.emptyRate)
         }
     }
 
@@ -106,6 +117,7 @@ enum EvalScoring {
     /// with no reference behind it.
     static func summary(timestamp: String, corpus: Corpus, records: [StageRecord],
                         engine: String, config: String, provenance: RunProvenance,
+                        categoryStage: String = "final",
                         battery: Double? = nil, notes: String? = nil) -> RunSummary {
         var byID: [String: CorpusEntry] = [:]
         for entry in corpus.entries { byID[entry.id] = entry }
@@ -127,7 +139,10 @@ enum EvalScoring {
             config: config,
             provenance: provenance,
             stages: stageOrder.map { metrics(stage: $0, clips: clips(stage: $0)) },
-            categories: categories(clips(stage: "final")),
+            categories: categories(clips(stage: categoryStage)),
+            // Nil is the historical spelling of "final", so summaries produced
+            // before `--stage` existed compare equal to new default-stage ones.
+            categoryStage: categoryStage == "final" ? nil : categoryStage,
             battery: battery,
             notes: notes)
     }
@@ -150,20 +165,25 @@ enum EvalScoring {
         var lines: [String] = []
         lines.append("\(run.corpusId)/\(run.split) · \(run.engine) · \(run.config)")
         lines.append(pad("stage", 11) + right("n", 5) + right("WER", 9) + right("CER", 9)
-                     + right("terms", 8) + right("zero-edit", 11))
+                     + right("terms", 8) + right("zero-edit", 11) + right("empty", 8))
         for stage in run.stages {
             lines.append(pad(stage.stage, 11) + right("\(stage.utterances)", 5)
                          + right(percent(stage.wer), 9) + right(percent(stage.cer), 9)
                          + right(rate(stage.termRecall), 8)
-                         + right(rate(stage.zeroEdit), 11))
+                         + right(rate(stage.zeroEdit), 11)
+                         + right(percent(stage.emptyRate), 8))
         }
         if !run.categories.isEmpty {
             lines.append("")
+            if let stage = run.categoryStage {
+                lines.append("  by category (\(stage) stage)")
+            }
             for category in run.categories {
                 lines.append("  " + pad(category.category, 20)
                              + right("\(category.utterances)", 4)
                              + right(percent(category.wer), 9)
-                             + right(rate(category.termRecall), 8))
+                             + right(rate(category.termRecall), 8)
+                             + right(percent(category.emptyRate), 8))
             }
         }
         return lines.joined(separator: "\n")

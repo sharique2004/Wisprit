@@ -178,4 +178,24 @@ final class HotkeyEventQueueTests: XCTestCase {
         XCTAssertEqual(seen, producers * perProducer)
         XCTAssertEqual(queue.count, 0)
     }
+
+    // --- hasPendingPress (R6's restore-window counter probe) -------------------
+
+    func testHasPendingPressIsNonConsumingAndPressSpecific() {
+        let queue = HotkeyEventQueue()
+        XCTAssertFalse(queue.hasPendingPress)
+
+        queue.put(HotkeyEvent(.esc, ts: 0))
+        XCTAssertFalse(queue.hasPendingPress, "an esc is not a press")
+
+        queue.put(HotkeyEvent(.press, ts: 1))
+        XCTAssertTrue(queue.hasPendingPress)
+        XCTAssertTrue(queue.hasPendingPress, "probing consumes nothing")
+        XCTAssertEqual(queue.count, 2, "…and the queue is untouched")
+
+        XCTAssertEqual(queue.getNowait()?.kind, .esc)
+        XCTAssertEqual(queue.getNowait()?.kind, .press,
+                       "the probed press still starts the next utterance in order")
+        XCTAssertFalse(queue.hasPendingPress)
+    }
 }

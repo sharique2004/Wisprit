@@ -211,6 +211,41 @@ final class MetricsSummaryTests: XCTestCase {
         XCTAssertEqual(one.finalizeMsP50, 120.0)
     }
 
+    /// The `onboarding` row (R14) is the same class: one reference-less
+    /// time-to-wow line per fresh install, with a `finalize_ms` of 0 that must
+    /// never anchor a percentile and no utterance behind it.
+    func testOnboardingRowIsNotCountedAsAnUtterance() {
+        let mixed = rows([
+            #"{"ts": 1786399000.0, "held_ms": 0.0, "engine": "", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "onboarding", "chars": 0, "onboard_ms": 184222.7, "steps_skipped": 1, "relaunches": 2}"#,
+            #"{"ts": 1786399001.0, "held_ms": 1200.0, "engine": "apple_live", "finalize_ms": 120.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 10.0, "outcome": "paste", "chars": 43}"#,
+        ])
+        let s = MetricsSummary.summarize(mixed, now: now)
+        XCTAssertEqual(s.total, 1)
+        XCTAssertEqual(s.outcomes, ["paste": 1])
+        XCTAssertEqual(s.finalizeMsP50, 120.0,
+                       "the onboarding row's finalize_ms of 0 anchors nothing")
+
+        // …but the row is not dropped on the floor either: it IS the
+        // time-to-wow reading, and `Wisprit stats` prints it.
+        XCTAssertEqual(s.timeToWow,
+                       MetricsSummary.TimeToWow(onboardMs: 184222.7,
+                                                stepsSkipped: 1, relaunches: 2))
+        let rendered = MetricsSummary.render(for: s)
+        XCTAssertTrue(rendered.contains("time-to-wow"), rendered)
+        XCTAssertTrue(rendered.contains("184.2 s first launch → first dictation"
+                                        + " (1 steps skipped, 2 relaunches)"), rendered)
+    }
+
+    /// No onboarding row — every install that predates R14 — renders no
+    /// time-to-wow line at all: absence is "unmeasured", never a zero.
+    func testNoOnboardingRowMeansNoTimeToWowLine() {
+        let s = MetricsSummary.summarize(rows([
+            #"{"ts": 1786399001.0, "held_ms": 1200.0, "engine": "apple_live", "finalize_ms": 120.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 10.0, "outcome": "paste", "chars": 43}"#,
+        ]), now: now)
+        XCTAssertNil(s.timeToWow)
+        XCTAssertFalse(MetricsSummary.render(for: s).contains("time-to-wow"))
+    }
+
     // MARK: zero-edit rate (Phase 5)
 
     /// The observable-denominator rule, as data: three observations — two

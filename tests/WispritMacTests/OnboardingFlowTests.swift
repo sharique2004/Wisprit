@@ -165,30 +165,39 @@ final class OnboardingFlowTests: XCTestCase {
 // MARK: - the mic test
 
 /// Step 3's measurement — the only gate in the cascade that no TCC read can
-/// stand in for.
+/// stand in for. Since R15 the judge is the engine: the step passes when a
+/// transcription comes back, and no level can pass it (acoustic §2 proved the
+/// old 0.02 proxy failed quiet speakers the engine served perfectly).
 final class MicTestStateTests: XCTestCase {
 
-    /// The threshold is *the engine's*, reused rather than restated (§4.2). A
-    /// mic test that passed below the transcriber's voiced floor would wave
-    /// through inputs that then produce nothing but empty transcripts.
-    func testThePassLevelIsTheEngineSVoicedFloor() {
-        XCTAssertEqual(MicTestState.passLevel, MetricsSummary.voicedPeakThreshold)
-    }
-
-    func testAVoicedPeakPassesOnceAndStaysPassed() {
+    /// The pass is evidence, not a meter reading: the loudest tick in the world
+    /// does not pass, and the quietest utterance that transcribes does.
+    func testOnlyATranscriptionPassesNeverALevel() {
         var state = MicTestState()
         XCTAssertEqual(state.phase, .waiting)
-        XCTAssertFalse(state.tick(level: 0.001, interval: 0.05))
+        state.tick(level: 1.0, interval: 0.05)
+        XCTAssertFalse(state.hasPassed, "a level is a proxy, and the proxy is retired")
 
-        XCTAssertTrue(state.tick(level: MicTestState.passLevel, interval: 0.05),
-                      "the boundary itself passes")
+        XCTAssertTrue(state.hear("hello there"))
         XCTAssertTrue(state.hasPassed)
         XCTAssertEqual(state.caption, "Heard you.")
+    }
 
-        XCTAssertFalse(state.tick(level: 0.9, interval: 0.05), "it only fires once")
+    func testWordsPassOnceAndStayPassed() {
+        var state = MicTestState()
+        XCTAssertTrue(state.hear("anything"))
+        XCTAssertFalse(state.hear("more words"), "it only fires once")
         for _ in 0..<3 { state.tick(level: 0, interval: MicTestState.stallAfter) }
         XCTAssertTrue(state.hasPassed, "a passed test does not un-pass in silence")
         XCTAssertFalse(state.offersSkip)
+    }
+
+    /// An engine that hands back whitespace has not heard anyone yet.
+    func testWhitespaceIsNotWords() {
+        var state = MicTestState()
+        XCTAssertFalse(state.hear(""))
+        XCTAssertFalse(state.hear("   \n"))
+        XCTAssertEqual(state.phase, .waiting)
     }
 
     func testSilenceOffersSkipOnlyAfterTheFullSixSeconds() {
@@ -196,7 +205,7 @@ final class MicTestStateTests: XCTestCase {
         state.tick(level: 0, interval: MicTestState.stallAfter - 0.1)
         XCTAssertEqual(state.phase, .waiting)
         XCTAssertFalse(state.offersSkip)
-        XCTAssertEqual(state.caption, "Waiting for sound…")
+        XCTAssertEqual(state.caption, "Listening…")
 
         state.tick(level: 0, interval: 0.1)
         XCTAssertEqual(state.phase, .stalled)
@@ -204,13 +213,30 @@ final class MicTestStateTests: XCTestCase {
         XCTAssertTrue(state.caption.contains("Sound ▸ Input"))
     }
 
+    /// Two stalls, two remedies: a meter that never moved points at the input
+    /// device; a meter that moved while no words came back points past the
+    /// mic, at recognition. The level's ONLY job here is that caption — it
+    /// still cannot pass anything.
+    func testAStalledTestDiagnosesDeadInputVersusDeafEngine() {
+        var dead = MicTestState()
+        dead.tick(level: 0.001, interval: MicTestState.stallAfter)
+        XCTAssertTrue(dead.caption.contains("Sound ▸ Input"))
+
+        var deaf = MicTestState()
+        deaf.tick(level: 0.4, interval: MicTestState.stallAfter)
+        XCTAssertFalse(deaf.caption.contains("Sound ▸ Input"),
+                       "the input demonstrably works; do not send the user there")
+        XCTAssertTrue(deaf.caption.contains("Setup"))
+        XCTAssertTrue(deaf.offersSkip)
+    }
+
     /// Giving up is not final: a user who was fixing their input device in
     /// another window and comes back talking still passes.
-    func testAStalledTestStillPassesIfSoundArrivesLate() {
+    func testAStalledTestStillPassesIfWordsArriveLate() {
         var state = MicTestState()
         state.tick(level: 0, interval: MicTestState.stallAfter)
         XCTAssertEqual(state.phase, .stalled)
-        XCTAssertTrue(state.tick(level: 0.4, interval: 0.05))
+        XCTAssertTrue(state.hear("late but here"))
         XCTAssertTrue(state.hasPassed)
     }
 
@@ -235,12 +261,13 @@ final class MicTestStateTests: XCTestCase {
         XCTAssertEqual(state.levels[0], 0, "and it scrolls in from there")
     }
 
-    /// A dead input can hand back garbage; garbage is silence, never a pass.
+    /// A dead input can hand back garbage; garbage is silence, never sound.
     func testNonsenseLevelsAreSilence() {
         var state = MicTestState()
-        XCTAssertFalse(state.tick(level: .nan, interval: 0.05))
-        XCTAssertFalse(state.tick(level: -1, interval: 0.05))
+        state.tick(level: .nan, interval: 0.05)
+        state.tick(level: -1, interval: 0.05)
         XCTAssertEqual(state.phase, .waiting)
+        XCTAssertFalse(state.sawSound)
         XCTAssertTrue(state.levels.allSatisfy { $0 == 0 })
     }
 }
@@ -248,25 +275,29 @@ final class MicTestStateTests: XCTestCase {
 // MARK: - the capture behind it
 
 /// The probe's contract is a privacy contract: the input opens when the card
-/// appears and is closed by the time it leaves, whatever happened in between.
+/// appears and is closed by the time it leaves, whatever happened in between —
+/// and since R15 the pass rides the engine's partials, not the meter.
 @MainActor
 final class OnboardingMicProbeTests: XCTestCase {
 
-    private final class Recorder {
+    private final class Recorder: @unchecked Sendable {
         var starts = 0
         var stops = 0
         var passes = 0
         var level: Double = 0
         var opens = true
+        /// The engine seam, captured so a test can hand words back.
+        var deliverWords: (@Sendable (String) -> Void)?
 
         func source() -> OnboardingMicProbe.Source {
             OnboardingMicProbe.Source(start: { self.starts += 1; return self.opens },
                                       stop: { self.stops += 1 },
-                                      level: { self.level })
+                                      level: { self.level },
+                                      beginEvidence: { self.deliverWords = $0 })
         }
     }
 
-    func testItOpensTheInputNotifiesOnceAndAlwaysClosesIt() async {
+    func testItOpensTheInputNotifiesOncePerTranscriptionAndAlwaysClosesIt() async {
         let recorder = Recorder()
         recorder.level = 0.4
         let probe = OnboardingMicProbe(source: recorder.source)
@@ -275,6 +306,14 @@ final class OnboardingMicProbeTests: XCTestCase {
             await probe.run { recorder.passes += 1 }
         }
         var waited = 0
+        while recorder.deliverWords == nil && waited < 400 {
+            try? await Task.sleep(for: .milliseconds(10))
+            waited += 1
+        }
+        XCTAssertEqual(recorder.passes, 0,
+                       "a loud meter alone must not pass the step (R15)")
+        recorder.deliverWords?("hello from the engine")
+        waited = 0
         while recorder.passes == 0 && waited < 400 {
             try? await Task.sleep(for: .milliseconds(10))
             waited += 1
@@ -290,7 +329,8 @@ final class OnboardingMicProbeTests: XCTestCase {
 
     /// `start()` returning false means nothing was opened — and `MicCapture`
     /// unwinds its own tap in that case, which is why `SessionController` does
-    /// not call `stop()` there either. Mirror it, do not "improve" it.
+    /// not call `stop()` there either. Mirror it, do not "improve" it. The
+    /// engine is never installed over an input that did not open.
     func testAnInputThatWillNotOpenIsReportedImmediately() async {
         let recorder = Recorder()
         recorder.opens = false
@@ -301,6 +341,7 @@ final class OnboardingMicProbeTests: XCTestCase {
         XCTAssertEqual(recorder.starts, 1)
         XCTAssertEqual(recorder.stops, 0)
         XCTAssertEqual(recorder.passes, 0)
+        XCTAssertNil(recorder.deliverWords, "no engine over a closed input")
         XCTAssertTrue(probe.state.offersSkip)
     }
 }

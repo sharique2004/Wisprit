@@ -591,3 +591,243 @@ Refine battery: **0.948** (weighted)
 | disfluency | 5 | 9.76% | — |
 | self-correction | 10 | 2.56% | — |
 | long-form | 1 | 5.56% | 1.000 |
+
+## 2026-08-10T11:48:36Z — tts-accents-v1/all — apple_live — `refine=off,dict=off`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `6fd929f` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 432 | 3872 | 885 | 22.86% | 18.66% | 0.125 | 0.169 | 0.00% |
+| corrected | 432 | 3872 | 878 | 22.68% | 18.30% | 0.125 | 0.174 | 0.00% |
+| refined | 432 | 3872 | 878 | 22.68% | 18.30% | 0.125 | 0.174 | 0.00% |
+| final | 432 | 3872 | 546 | 14.10% | 8.48% | 0.125 | 0.241 | 0.00% |
+
+### By category (raw stage)
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| samantha | 54 | 20.87% | 0.056 | 0.00% |
+| daniel | 54 | 23.35% | 0.167 | 0.00% |
+| karen | 54 | 23.97% | 0.000 | 0.00% |
+| moira | 54 | 23.14% | 0.111 | 0.00% |
+| rishi | 54 | 23.14% | 0.111 | 0.00% |
+| aman | 54 | 22.52% | 0.222 | 0.00% |
+| tara | 54 | 22.52% | 0.222 | 0.00% |
+| tessa | 54 | 23.35% | 0.111 | 0.00% |
+
+## 2026-08-10T11:48:38Z — tts-stress-v1/all — apple_live — `refine=off,dict=off`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `6fd929f` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 702 | 6292 | 1677 | 26.65% | 21.67% | 0.064 | 0.192 | 0.00% |
+| corrected | 702 | 6292 | 1665 | 26.46% | 21.16% | 0.064 | 0.195 | 0.00% |
+| refined | 702 | 6292 | 1665 | 26.46% | 21.16% | 0.064 | 0.195 | 0.00% |
+| final | 702 | 6292 | 1168 | 18.56% | 11.83% | 0.064 | 0.256 | 0.00% |
+
+### By category (raw stage)
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| g0 | 54 | 20.87% | 0.056 | 0.00% |
+| g-12 | 54 | 21.49% | 0.056 | 0.00% |
+| g-24 | 54 | 22.31% | 0.056 | 0.00% |
+| g-36 | 54 | 22.52% | 0.056 | 0.00% |
+| clip+6 | 54 | 20.45% | 0.056 | 0.00% |
+| wn20 | 54 | 24.38% | 0.167 | 0.00% |
+| wn10 | 54 | 27.48% | 0.056 | 0.00% |
+| wn5 | 54 | 37.60% | 0.000 | 0.00% |
+| bab10 | 54 | 22.73% | 0.056 | 0.00% |
+| bandlimit8k | 54 | 23.35% | 0.111 | 0.00% |
+| whisper-voice | 54 | 60.33% | 0.000 | 0.00% |
+| r120 | 54 | 22.11% | 0.056 | 0.00% |
+| r240 | 54 | 20.87% | 0.111 | 0.00% |
+
+## 2026-08-10T11:48:41Z — tts-corners-v1/all — apple_live — `refine=off,dict=off`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `6fd929f` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 162 | 1452 | 408 | 28.10% | 21.95% | 0.093 | 0.123 | 0.00% |
+| corrected | 162 | 1452 | 408 | 28.10% | 21.89% | 0.093 | 0.123 | 0.00% |
+| refined | 162 | 1452 | 408 | 28.10% | 21.89% | 0.093 | 0.123 | 0.00% |
+| final | 162 | 1452 | 302 | 20.80% | 13.31% | 0.093 | 0.173 | 0.00% |
+
+### By category (raw stage)
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| aman-g-24-wn10 | 54 | 25.41% | 0.111 | 0.00% |
+| aman-r240-bab10 | 54 | 25.41% | 0.056 | 0.00% |
+| rishi-g-12-wn5 | 54 | 33.47% | 0.111 | 0.00% |
+
+## 2026-08-10 — ANNOTATION: paste-rung metric correction (R6 discontinuity)
+
+Not a run. As of git `6fd929f`+R6, `release_to_text_ms` and `insert_ms` stop
+at the delivery instant (`postCommandV`) instead of after the 500 ms
+clipboard-restore sleep, and the success flash fires at delivery. Live paste
+`release_to_text_ms` p50 drops ~770 → ~270 ms at this boundary **because the
+metric was overstating, not because anything got faster** — a METRIC
+CORRECTION, not a speedup. No `release_to_text_ms`/`insert_ms` comparison may
+straddle rows written before and after this build without saying so; the
+restore window now has its own field (`restore_ms`). Full record:
+`docs/notes/deviations.md` §"Paste-rung metric correction".
+
+## 2026-08-10T12:34:50Z — tts-samantha/all — apple_live — `refine=off,dict=off`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `6fd929f` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| final | 54 | 484 | 56 | 11.57% | 7.16% | 0.056 | 0.333 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 31.71% | 0.000 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 18.64% | 0.000 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 12.24% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 5.88% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 19.51% | — | 0.00% |
+| self-correction | 10 | 5.13% | — | 0.00% |
+| long-form | 1 | 16.67% | 0.000 | 0.00% |
+
+## 2026-08-10T12:34:50Z — tts-samantha/all — apple_live — `refine=off,dict=on`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `6fd929f` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| final | 54 | 484 | 39 | 8.06% | 6.11% | 0.444 | 0.389 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 14.63% | 0.500 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 13.56% | 0.250 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 10.20% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 5.88% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 19.51% | — | 0.00% |
+| self-correction | 10 | 2.56% | — | 0.00% |
+| long-form | 1 | 5.56% | 1.000 | 0.00% |
+
+## 2026-08-10T12:36:27Z — tts-samantha/all — apple_live — `refine=on,dict=off`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `6fd929f` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 65 | 13.43% | 10.27% | 0.222 | 0.352 | 0.00% |
+| final | 54 | 484 | 44 | 9.09% | 5.60% | 0.222 | 0.389 | 0.00% |
+
+Refine battery: **0.948** (weighted)
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 31.71% | 0.000 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 6.78% | 0.750 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 12.24% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 2.94% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 9.76% | — | 0.00% |
+| self-correction | 10 | 5.13% | — | 0.00% |
+| long-form | 1 | 16.67% | 0.000 | 0.00% |
+
+## 2026-08-10T12:36:55Z — tts-samantha/all — apple_live — `refine=on,dict=on`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `6fd929f` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 65 | 13.43% | 10.27% | 0.222 | 0.352 | 0.00% |
+| final | 54 | 484 | 30 | 6.20% | 4.98% | 0.556 | 0.426 | 0.00% |
+
+Refine battery: **0.948** (weighted)
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 14.63% | 0.500 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 6.78% | 0.750 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 10.20% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 2.94% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 9.76% | — | 0.00% |
+| self-correction | 10 | 2.56% | — | 0.00% |
+| long-form | 1 | 5.56% | 1.000 | 0.00% |
+
+## 2026-08-10 — SHIP VERIFY v2.3.0: matrix + deck reproduction (not a new baseline)
+
+Post-integration verification with all four robustness tracks in the tree
+(working tree over git `6fd929f`, macOS build `25F84`).
+
+**Matrix (tts-samantha, 4 configs, live model, cached ASR under the
+osBuild-keyed hash `00449f59`):** the 12:34–12:36Z sections above. Every
+final-stage number reproduced the `BASELINE.json` accepted values exactly —
+WER/CER/term-recall/zero-edit byte-identical across all four configs, refine
+battery 0.9485 (3/3 passes identical) — zero violations, zero drift.
+
+**Robustness deck (`eval deck`, raw stage, 1,296 clips, all cached):**
+
+| component | verify run | recorded baseline | verdict |
+|---|---:|---:|---|
+| ri-noise | +16.7 pts (wn5 − g0) | +16.7 ± 3 | green |
+| ri-accent | +3.1 pts (karen) | +3.1 ± 2 | green, same worst voice |
+| ri-level | +1.7 pts | +1.7, alarm > +4 | green |
+| ri-empty | 0.00% over 1,296 | 0 exact | green |
+| tone | — | — | unmeasured until human-v1, as designed |
+
+`eval deck` exit 0. Per-cell tables matched the 11:48Z first-run sections
+above cell-for-cell (same transcripts — the cache key held, which is itself
+the A-1 provenance property doing its job). `WISPRIT_REHEARSAL=1` battery
+0.9485 against floor 0.8885.

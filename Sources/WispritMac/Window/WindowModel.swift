@@ -68,6 +68,20 @@ public final class WispritWindowModel: ObservableObject {
         public var acceptLearnProposal: @Sendable (LearnProposalRow) -> Void
         /// Dismiss: `PendingLearnStore.dismiss` — a permanent negative.
         public var dismissLearnProposal: @Sendable (String) -> Void
+        /// The data inventory (R17): every store class with its size, read from
+        /// disk. Called off the main actor; defaults empty so the section stays
+        /// hidden in tests that never wire it.
+        public var dataStores: @Sendable () -> [DataStoreStatus]
+        /// Delete one store class's files. `.transcripts` never arrives here —
+        /// the model routes it through `purgeHistory` above, the store's own
+        /// purge. Owned by the app, which also reloads the dictionary after its
+        /// file is removed.
+        public var purgeDataStore: @Sendable (DataStoreID) -> Void
+        /// The one-time time-to-wow row (R14): `(firstLaunchToDictateMs,
+        /// stepsSkipped, relaunchCount)` → `MetricsWriter.writeOnboarding`.
+        /// Track B owns the writer; this seam is the only way the row is
+        /// written, so the schema stays owned in one place.
+        public var writeOnboardingRow: @Sendable (Double, Int, Int) -> Void
 
         public init(fullProbe: @escaping @Sendable () async -> DoctorFacts = { DoctorFacts() },
                     fastProbe: @escaping @Sendable (DoctorFacts) -> DoctorFacts = { $0 },
@@ -80,7 +94,10 @@ public final class WispritWindowModel: ObservableObject {
                     performFix: @escaping (SetupFixKind) -> Void = { _ in },
                     learnProposals: @escaping @Sendable () -> [LearnProposalRow] = { [] },
                     acceptLearnProposal: @escaping @Sendable (LearnProposalRow) -> Void = { _ in },
-                    dismissLearnProposal: @escaping @Sendable (String) -> Void = { _ in }) {
+                    dismissLearnProposal: @escaping @Sendable (String) -> Void = { _ in },
+                    dataStores: @escaping @Sendable () -> [DataStoreStatus] = { [] },
+                    purgeDataStore: @escaping @Sendable (DataStoreID) -> Void = { _ in },
+                    writeOnboardingRow: @escaping @Sendable (Double, Int, Int) -> Void = { _, _, _ in }) {
             self.fullProbe = fullProbe
             self.fastProbe = fastProbe
             self.globeKey = globeKey
@@ -93,6 +110,9 @@ public final class WispritWindowModel: ObservableObject {
             self.learnProposals = learnProposals
             self.acceptLearnProposal = acceptLearnProposal
             self.dismissLearnProposal = dismissLearnProposal
+            self.dataStores = dataStores
+            self.purgeDataStore = purgeDataStore
+            self.writeOnboardingRow = writeOnboardingRow
         }
     }
 
@@ -216,6 +236,11 @@ public final class WispritWindowModel: ObservableObject {
     /// The last fetch came back full, so there is very likely more behind it.
     @Published public private(set) var historyHasMore = false
 
+    /// The data inventory (R17): every store class Wisprit keeps, with sizes.
+    /// Refreshed when the window opens and after every purge — sizes are a
+    /// disk walk, not something to poll.
+    @Published public private(set) var dataStores: [DataStoreStatus] = []
+
     // Home (§3.3).
     /// The same page of history in the neutral shape `HomeModel` groups,
     /// filters and counts. Mapped once, off the main actor, next to the fetch
@@ -237,7 +262,7 @@ public final class WispritWindowModel: ObservableObject {
     @Published public private(set) var liveTypingSettled = false
     /// A transcript has landed since the window opened.
     @Published public private(set) var didDictate = false
-    /// The onboarding mic test has heard a voiced peak (§4.2 step 3).
+    /// The onboarding mic test's engine transcribed the user (§4.2 step 3, R15).
     @Published public private(set) var micTestPassed = false
 
     // Settings mirrors — written straight through to `Settings` on change.
@@ -316,6 +341,9 @@ public final class WispritWindowModel: ObservableObject {
         self.ports = ports
         reloadSettings()
         reloadDictionary()
+        // The model is built once per launch, so this is where the
+        // time-to-wow clock (R14) sees launches.
+        noteLaunchForTimeToWow()
     }
 
     // MARK: - Refresh
@@ -335,6 +363,7 @@ public final class WispritWindowModel: ObservableObject {
         refreshRecents()
         loadHistory(reset: true)
         refreshHomeStats()
+        refreshDataInventory()
         Task { await refreshFull() }
         startPolling()
     }
@@ -509,6 +538,7 @@ public final class WispritWindowModel: ObservableObject {
         guard let newest = rows.first?.ts else { return }
         if newest > dictationBaseline {
             didDictate = true
+            recordTimeToWowIfNeeded()
         }
         // A transcript the rail has not counted yet. One comparison against a
         // query that was already going to run, rather than re-reading the whole
@@ -588,6 +618,7 @@ public final class WispritWindowModel: ObservableObject {
     /// completed even when history is switched off.
     public func noteDictationObserved() {
         didDictate = true
+        recordTimeToWowIfNeeded()
         refreshRecents()
         advanceOnboardingIfNeeded()
     }
@@ -647,6 +678,43 @@ public final class WispritWindowModel: ObservableObject {
         loadHistory(reset: true)
         statsNewestTs = 0
         refreshHomeStats()
+        refreshDataInventory()
+    }
+
+    // MARK: - Data inventory (R17)
+
+    /// Re-read every store class's on-disk footprint. A disk walk, so it runs
+    /// on a detached task and publishes back — the `refreshRecents` pattern.
+    public func refreshDataInventory() {
+        let scan = ports.dataStores
+        Task { [weak self] in
+            let rows = await Task.detached(priority: .utility) { scan() }.value
+            self?.dataStores = rows
+        }
+    }
+
+    /// Delete one store class. Transcripts go through the history store's own
+    /// purge (a live SQLite handle is not a file to unlink); everything else is
+    /// the app's file-level purge. The dictionary view model reloads afterwards
+    /// so the page never shows rows whose file is gone.
+    public func purgeDataStore(_ id: DataStoreID) {
+        switch id {
+        case .transcripts:
+            purgeHistory()
+            return
+        case .settings:
+            return
+        case .metrics, .dictionary, .learnLedger, .models:
+            ports.purgeDataStore(id)
+        }
+        if id == .dictionary || id == .learnLedger { reloadDictionary() }
+        refreshDataInventory()
+    }
+
+    /// The one purge that reaches every store (soul test 6). Settings stay —
+    /// preferences are not dictation content — and the inventory above says so.
+    public func purgeAllData() {
+        for id in DataInventory.deletableClasses { purgeDataStore(id) }
     }
 
     // MARK: - Dictionary
@@ -910,9 +978,9 @@ public final class WispritWindowModel: ObservableObject {
                          hotkey: hotkey)
     }
 
-    /// The mic test heard a voiced peak (§4.2 step 3). Deliberately not
-    /// persisted: it proves the input worked *now*, and a machine whose mic has
-    /// since been unplugged should be asked again.
+    /// The mic test's engine transcribed the user (§4.2 step 3, R15).
+    /// Deliberately not persisted: it proves the input worked *now*, and a
+    /// machine whose mic has since been unplugged should be asked again.
     public func noteMicTestPassed() {
         guard !micTestPassed else { return }
         micTestPassed = true
@@ -974,12 +1042,56 @@ public final class WispritWindowModel: ObservableObject {
     }
 
     public func skipStep() {
+        noteStepSkippedForTimeToWow()
         guard let index = OnboardingStep.allCases.firstIndex(of: onboardingStep),
               index + 1 < OnboardingStep.allCases.count else {
             finishOnboarding()
             return
         }
         goToStep(OnboardingStep.allCases[index + 1])
+    }
+
+    // MARK: - Time-to-wow (R14)
+
+    /// First launch → first successful dictation, as one metrics row. The
+    /// clock starts only on a genuinely fresh install (no stamp yet, onboarding
+    /// never completed), so an existing machine never writes a bogus row; it
+    /// stops forever once the row is written. Counters live in the same
+    /// append-only settings namespace as the rest of the wizard's state, so
+    /// they survive the mid-onboarding relaunch that Input Monitoring forces —
+    /// which is exactly the cost the row exists to measure.
+    private func noteLaunchForTimeToWow() {
+        guard !settings.bool(OnboardingSettings.wowRecordedKey, or: false) else { return }
+        if settings.double(OnboardingSettings.firstLaunchKey) != nil {
+            settings.set(OnboardingSettings.relaunchCountKey,
+                         settings.int(OnboardingSettings.relaunchCountKey, or: 0) + 1)
+        } else if !settings.bool(OnboardingSettings.completedKey, or: false) {
+            settings.set(OnboardingSettings.firstLaunchKey, Date().timeIntervalSince1970)
+        }
+    }
+
+    /// A Skip the user actually pressed, counted only while the clock runs.
+    private func noteStepSkippedForTimeToWow() {
+        guard !settings.bool(OnboardingSettings.wowRecordedKey, or: false),
+              settings.double(OnboardingSettings.firstLaunchKey) != nil else { return }
+        settings.set(OnboardingSettings.stepsSkippedKey,
+                     settings.int(OnboardingSettings.stepsSkippedKey, or: 0) + 1)
+    }
+
+    /// Write the row, once, the first time a dictation lands. The recorded
+    /// flag flips before the write so no re-entry can ever produce a second
+    /// row.
+    private func recordTimeToWowIfNeeded() {
+        guard didDictate,
+              !settings.bool(OnboardingSettings.wowRecordedKey, or: false),
+              let firstLaunch = settings.double(OnboardingSettings.firstLaunchKey) else {
+            return
+        }
+        settings.set(OnboardingSettings.wowRecordedKey, true)
+        ports.writeOnboardingRow(
+            max(0, Date().timeIntervalSince1970 - firstLaunch) * 1000.0,
+            settings.int(OnboardingSettings.stepsSkippedKey, or: 0),
+            settings.int(OnboardingSettings.relaunchCountKey, or: 0))
     }
 
     public func finishOnboarding() {

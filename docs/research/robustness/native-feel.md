@@ -29,7 +29,7 @@ sensory channels (sound, hidden-pill feedback) the spec never covered.
 | finalize p50 / p90 | 119 ms / 264 ms | `finalize_ms` |
 | insert p50 (non-zero) | **508.7 ms** | `insert_ms` |
 | refine when it ran, p50 / p90 / max | 185 ms / 971 ms / 3 388 ms | `ai_ms` where `ai=applied` |
-| empty rate (whole log) | 17.7 % — 63 of 64 rows predate `empty_reason` | `outcome=empty` |
+| empty rate (whole log) | 17.3 % (64/369; corrected from 17.7 % per the feasibility re-count) — 63 of 64 rows predate `empty_reason` | `outcome=empty` |
 | hold length p50 / p90 | 5.4 s / 52 s | `held_ms` |
 
 **The single most important fact in this audit:** the paste rung's 769 ms is

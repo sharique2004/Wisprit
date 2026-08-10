@@ -170,6 +170,10 @@ final class FakeAudio: AudioPort, @unchecked Sendable {
     private(set) var startCount = 0
     private(set) var stopCount = 0
     var level: Double = 0.4
+    /// Scripted R4 telemetry; nil (the default) omits the fields, like a port
+    /// that measured nothing.
+    var noiseFloorValue: Double?
+    var firstVoicedMsValue: Double?
 
     func start() -> Bool {
         lock.lock(); startCount += 1; let ok = startSucceeds; lock.unlock()
@@ -177,6 +181,9 @@ final class FakeAudio: AudioPort, @unchecked Sendable {
     }
 
     func stop() { lock.lock(); stopCount += 1; lock.unlock() }
+
+    var noiseFloor: Double? { lock.lock(); defer { lock.unlock() }; return noiseFloorValue }
+    var firstVoicedMs: Double? { lock.lock(); defer { lock.unlock() }; return firstVoicedMsValue }
 }
 
 final class FakeRefiner: RefinePort, @unchecked Sendable {
@@ -247,13 +254,37 @@ final class FakeInserter: InsertPort, @unchecked Sendable {
     var deferredAtInsert: [String?] = []
     var deferredLabel: (@Sendable () -> String?)?
 
-    func insert(_ text: String) -> InsertResult {
+    /// Mimic the real paste rung's R6 shape: stamp `deliveredAtMonotonic` and
+    /// fire `onDelivered` BEFORE returning, so the session's early flash runs
+    /// inside the delivery window exactly as it does in production. Off for a
+    /// test that wants the pre-R6 (return-time delivery) behaviour.
+    var stampsDelivery = true
+    /// The pill whose calls are snapshotted at the delivery instant — the
+    /// proof that the checkmark landed with the words, not after the restore.
+    var pill: FakePill?
+    private(set) var pillCallsAtDelivery: [[String]] = []
+
+    func insert(_ text: String) -> InsertResult { insert(text, onDelivered: {}) }
+
+    func insert(_ text: String, onDelivered: () -> Void) -> InsertResult {
         lock.lock()
         inserted.append(text)
         historyDepthAtInsert.append(history?.addedCount ?? -1)
         reconcileDepthAtInsert.append(asr?.reconcileTally ?? -1)
         deferredAtInsert.append(deferredLabel?())
-        let result = self.result
+        var result = self.result
+        let stamps = stampsDelivery
+        let pill = self.pill
+        lock.unlock()
+        guard stamps, result.ok else { return result }
+        result = InsertResult(ok: result.ok, method: result.method, detail: result.detail,
+                              deliveredAtMonotonic: MonotonicClock.now())
+        onDelivered()
+        // Snapshot AFTER the callback: whatever the session did at the
+        // delivery instant is on this list, and anything it does after
+        // `insert` returns is not.
+        lock.lock()
+        pillCallsAtDelivery.append(pill?.snapshot() ?? [])
         lock.unlock()
         return result
     }
@@ -419,6 +450,13 @@ final class FakeVocabulary: VocabularyPort, @unchecked Sendable {
         let needle = word.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return known.contains { $0.lowercased() == needle }
     }
+}
+
+final class FakeSound: SoundPort, @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var played: [SoundCue] = []
+    func play(_ cue: SoundCue) { lock.lock(); played.append(cue); lock.unlock() }
+    var cues: [SoundCue] { lock.lock(); defer { lock.unlock() }; return played }
 }
 
 final class FakeGate: RecordingGate, @unchecked Sendable {

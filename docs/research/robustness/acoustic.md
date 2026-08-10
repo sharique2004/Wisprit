@@ -128,7 +128,7 @@ Two facts kill auto-detection for Wisprit v1:
 **Mechanism**: decode the *same recorded human audio* once per installed
 English locale and put the WER side by side; the accent-matched asset either
 wins on that user's voice or it does not. Everything required exists:
-`Wisprit eval record` / `eval verify` and the 131-utterance human-v1 script
+`Wisprit eval record` / `eval verify` and the 135-utterance human-v1 script
 set (docs/research/spikes-s1.md, S4 status), the append-only scoreboard, and
 per-run settings hashes. Consent is inherent — eval recording is an explicit
 user act, and no dictation audio is retained otherwise (`RetainedUtterance`

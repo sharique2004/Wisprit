@@ -132,6 +132,9 @@ public final class SessionController: @unchecked Sendable {
     /// runs; the IM rung's observation channel is wired elsewhere and is not
     /// affected.
     private let editObserver: (any EditObservingPort)?
+    /// R11 sound cues — mic-open and commit. nil = silent, the pre-cue
+    /// behaviour of every earlier build and of every test harness.
+    private let sound: (any SoundPort)?
     private let config: Configuration
 
     private let lock = NSLock()
@@ -164,6 +167,7 @@ public final class SessionController: @unchecked Sendable {
                 liveTyping: (any LiveTypingPort)? = nil,
                 context: (any ContextPort)? = nil,
                 editObserver: (any EditObservingPort)? = nil,
+                sound: (any SoundPort)? = nil,
                 configuration: Configuration = Configuration()) {
         self.events = events
         self.asr = asr
@@ -180,6 +184,7 @@ public final class SessionController: @unchecked Sendable {
         self.liveTyping = liveTyping
         self.context = context
         self.editObserver = editObserver
+        self.sound = sound
         self.config = configuration
     }
 
@@ -378,6 +383,11 @@ public final class SessionController: @unchecked Sendable {
         setState(.recording)
         gate?.setRecording(true)
         pill?.showRecording()
+        // The mic-open cue rides the show-recording event, which this function
+        // only reaches once `audio.start()` HAS succeeded — the orange rule in
+        // a second sense: the cue may never claim a mic that did not open. For
+        // a `pill_hidden` user this is the only "it's listening" signal.
+        sound?.play(.micOpen)
         startLevelTicker()
     }
 
@@ -405,6 +415,12 @@ public final class SessionController: @unchecked Sendable {
 
         let tRelease = MonotonicClock.now()
         audio.stop()
+        // The capture session's acoustic telemetry, read once it is closed and
+        // threaded onto every row this utterance writes: the (peak, floor)
+        // pair maps live conditions onto the eval matrix's noise axis, and
+        // `first_voiced_ms` is the clipping-exposure clock (R4).
+        let noiseFloor = audio.noiseFloor
+        let firstVoicedMs = audio.firstVoicedMs
         let result = runBlocking { [asr] in await asr.finalize() }
         // Snapshot the utterance's audio HERE, on the session thread, while no
         // other utterance can exist: every off-path consumer gets this value, so
@@ -522,7 +538,8 @@ public final class SessionController: @unchecked Sendable {
                 writeMetrics(heldMs: heldMs, result: result, postMs: 0, insertMs: 0,
                              outcome: "correction", releaseToTextMs: nil,
                              aiMs: (tAi - tAsr) * 1000.0, ai: aiOutcome.rawValue,
-                             audioMs: audioMs, refineDelta: refineDelta, ctx: ctx)
+                             audioMs: audioMs, refineDelta: refineDelta, ctx: ctx,
+                             noiseFloor: noiseFloor, firstVoicedMs: firstVoicedMs)
                 return
             }
             // Split the one indistinguishable `outcome=empty` row into the
@@ -536,7 +553,12 @@ public final class SessionController: @unchecked Sendable {
                          outcome: "empty", releaseToTextMs: nil,
                          aiMs: (tAi - tAsr) * 1000.0, ai: aiOutcome.rawValue,
                          audioMs: audioMs, emptyReason: reason, refineDelta: refineDelta,
-                         ctx: ctx)
+                         ctx: ctx,
+                         // The rows the floor pair exists to decompose: an
+                         // empty with normal floor+peak is a finger slip; a
+                         // sub-threshold peak over a real floor is quiet
+                         // speech misfiled as silence (R26's evidence).
+                         noiseFloor: noiseFloor, firstVoicedMs: firstVoicedMs)
             return
         }
 
@@ -544,11 +566,32 @@ public final class SessionController: @unchecked Sendable {
         let transcriptId = history.add(text: text, engine: result.engine, durationMs: heldMs)
 
         setState(.inserting)
-        let insertion = deliver(text)
+        // R6, the feedback-inversion fix: the success flash (and commit cue)
+        // fire from inside the delivery — on the paste rung that is right
+        // after ⌘V and BEFORE the 500 ms clipboard-restore sleep, which stays
+        // on this thread, after the flash, semantics unchanged. The checkmark
+        // lands with the words instead of half a second behind them.
+        var deliveredEarly = false
+        let insertion = deliver(text) {
+            self.pill?.flashSuccess()
+            self.sound?.play(.commit)
+            deliveredEarly = true
+        }
         let tInsert = MonotonicClock.now()
+        // When the text was actually in the field. Rungs without a stamp
+        // (IM commit, a pre-hook port) deliver at return, where tInsert is it.
+        let tText = insertion.deliveredAt ?? tInsert
+        // The R6 one-line counter (§1.1-T5): a press still queued once the
+        // restore window closes spent that window waiting behind it. This is
+        // the number that would ever justify reviving R34 — as deferred
+        // restore, never as a skip.
+        let repressQueued = events.hasPendingPress
 
         if insertion.ok {
-            pill?.flashSuccess()
+            if !deliveredEarly {
+                pill?.flashSuccess()
+                sound?.play(.commit)
+            }
         } else if insertion.blockedSecure {
             // Its own pill state (§2.4): a lock rather than an alarm, held long
             // enough to read, because the text is safe in history and ⌘⌃V is a
@@ -561,14 +604,24 @@ public final class SessionController: @unchecked Sendable {
 
         writeMetrics(heldMs: heldMs, result: result,
                      postMs: (tPost - tAi) * 1000.0,
-                     insertMs: (tInsert - tPost) * 1000.0,
+                     // Through delivery only. The restore window is split out
+                     // below — this is a METRIC CORRECTION, not a speedup
+                     // (docs/notes/deviations.md records the discontinuity).
+                     insertMs: (tText - tPost) * 1000.0,
                      outcome: insertion.outcome,
-                     releaseToTextMs: (tInsert - tRelease) * 1000.0,
+                     releaseToTextMs: (tText - tRelease) * 1000.0,
                      aiMs: (tAi - tAsr) * 1000.0,
                      ai: aiOutcome.rawValue,
                      audioMs: audioMs,
                      refineDelta: refineDelta,
-                     ctx: ctx)
+                     ctx: ctx,
+                     noiseFloor: noiseFloor,
+                     firstVoicedMs: firstVoicedMs,
+                     // Only the paste rung has a post-delivery custody window.
+                     restoreMs: insertion.outcome == InsertResult.Method.paste.rawValue
+                         ? insertion.deliveredAt.map { (tInsert - $0) * 1000.0 }
+                         : nil,
+                     repressQueued: repressQueued ? true : nil)
         setState(.idle)
 
         // The utterance's pipeline triple, keyed to the transcript row written
@@ -629,11 +682,19 @@ public final class SessionController: @unchecked Sendable {
             flashError("no transcript to paste")
             return
         }
-        let insertion = inserter.insert(text)
+        var deliveredEarly = false
+        let insertion = inserter.insert(text) {
+            // Same truth-in-feedback ordering as the main path (R6): the
+            // checkmark rides the delivery, not the restore sleep behind it.
+            self.pill?.flashSuccess()
+            deliveredEarly = true
+        }
         if insertion.ok {
-            pill?.flashSuccess()
+            if !deliveredEarly { pill?.flashSuccess() }
         } else if insertion.method == .blockedSecure {
-            flashError("secure field — can't paste here")
+            // R9d: the same condition as the main path gets the same state —
+            // the lock with the ⌘⌃V remedy, not an alarm styled differently.
+            pill?.flashBlockedSecure()
         } else {
             flashError(insertion.detail.isEmpty ? "paste failed" : insertion.detail)
         }
@@ -649,6 +710,10 @@ public final class SessionController: @unchecked Sendable {
         var outcome: String
         var detail: String
         var blockedSecure: Bool
+        /// `MonotonicClock` stamp of the moment the text was in the field, when
+        /// the serving rung reported one (the paste rung stamps it before its
+        /// restore sleep). nil = delivery coincided with the return.
+        var deliveredAt: Double? = nil
     }
 
     /// Walk the ladder for real. Rungs 1–2 first when the input method holds a
@@ -659,22 +724,26 @@ public final class SessionController: @unchecked Sendable {
     /// A rung-1/2 refusal falls through to paste rather than failing: the text
     /// was never delivered (the transport says so explicitly), and history was
     /// written before any of this, so the worst case is still ⌘⌃V.
-    func deliver(_ text: String) -> Delivery {
+    func deliver(_ text: String, onDelivered: () -> Void = {}) -> Delivery {
         if let live = liveTyping, live.isEngaged {
             switch live.commit(text) {
             case .committed(let tier):
                 live.endUtterance()
+                // The committed text IS the delivery on this rung and there is
+                // no post-delivery window; notify and return in one breath.
+                onDelivered()
                 return Delivery(ok: true, outcome: tier.rawValue, detail: "", blockedSecure: false)
             case .fallback(let reason):
                 log.info("live typing declined (\(reason, privacy: .public)) — pasting")
             }
         }
         endLiveUtterance(discardingTail: true)
-        let insertion = inserter.insert(text)
+        let insertion = inserter.insert(text, onDelivered: onDelivered)
         return Delivery(ok: insertion.ok,
                         outcome: insertion.method.rawValue,
                         detail: insertion.detail,
-                        blockedSecure: insertion.method == .blockedSecure)
+                        blockedSecure: insertion.method == .blockedSecure,
+                        deliveredAt: insertion.deliveredAtMonotonic)
     }
 
     /// Route a cross-utterance `retroReplace` through the input method. Returns
@@ -946,7 +1015,11 @@ public final class SessionController: @unchecked Sendable {
                               releaseToTextMs: Double?, aiMs: Double?, ai: String?,
                               audioMs: Double, emptyReason: EmptyReason? = nil,
                               refineDelta: Int? = nil,
-                              ctx: ContextOutcome = ContextOutcome()) {
+                              ctx: ContextOutcome = ContextOutcome(),
+                              noiseFloor: Double? = nil,
+                              firstVoicedMs: Double? = nil,
+                              restoreMs: Double? = nil,
+                              repressQueued: Bool? = nil) {
         metrics.write(MetricsRecord(
             heldMs: heldMs,
             engine: result.engine,
@@ -976,7 +1049,15 @@ public final class SessionController: @unchecked Sendable {
             // `ctx_terms` is only meaningful for a consumed snapshot.
             ctx: ctx.status?.rawValue,
             ctxMs: ctx.captureMs,
-            ctxTerms: ctx.status == .read ? ctx.terms.count : nil))
+            ctxTerms: ctx.status == .read ? ctx.terms.count : nil,
+            // R6: the paste rung's post-delivery custody window, split out of
+            // `release_to_text_ms`/`insert_ms` so the felt number stops
+            // carrying the sleep — plus the re-press counter it prices R34 by.
+            restoreMs: restoreMs,
+            repressQueued: repressQueued,
+            // R4: the capture session's acoustic pair, every utterance row.
+            noiseFloor: noiseFloor,
+            firstVoicedMs: firstVoicedMs))
     }
 
     // MARK: - level ticker

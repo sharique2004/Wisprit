@@ -1,0 +1,85 @@
+{
+  "categories" : [
+    {
+      "category" : "aman-g-24-wn10",
+      "emptyRate" : 0,
+      "termRecall" : 0.1111111111111111,
+      "utterances" : 54,
+      "wer" : 0.25413223140495866
+    },
+    {
+      "category" : "aman-r240-bab10",
+      "emptyRate" : 0,
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 54,
+      "wer" : 0.25413223140495866
+    },
+    {
+      "category" : "rishi-g-12-wn5",
+      "emptyRate" : 0,
+      "termRecall" : 0.1111111111111111,
+      "utterances" : 54,
+      "wer" : 0.3347107438016529
+    }
+  ],
+  "categoryStage" : "raw",
+  "config" : "refine=off,dict=off",
+  "corpusId" : "tts-corners-v1",
+  "engine" : "apple_live",
+  "provenance" : {
+    "corpusSource" : "tts",
+    "dictionaryTerms" : 9,
+    "gitSha" : "6fd929f",
+    "osBuild" : "25F84",
+    "promptSha256" : "b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf",
+    "scorerVersion" : 1
+  },
+  "split" : "all",
+  "stages" : [
+    {
+      "cer" : 0.21945525291828794,
+      "emptyRate" : 0,
+      "errors" : 408,
+      "refWords" : 1452,
+      "stage" : "raw",
+      "termRecall" : 0.09259259259259259,
+      "utterances" : 162,
+      "wer" : 0.2809917355371901,
+      "zeroEdit" : 0.12345679012345678
+    },
+    {
+      "cer" : 0.21893644617380026,
+      "emptyRate" : 0,
+      "errors" : 408,
+      "refWords" : 1452,
+      "stage" : "corrected",
+      "termRecall" : 0.09259259259259259,
+      "utterances" : 162,
+      "wer" : 0.2809917355371901,
+      "zeroEdit" : 0.12345679012345678
+    },
+    {
+      "cer" : 0.21893644617380026,
+      "emptyRate" : 0,
+      "errors" : 408,
+      "refWords" : 1452,
+      "stage" : "refined",
+      "termRecall" : 0.09259259259259259,
+      "utterances" : 162,
+      "wer" : 0.2809917355371901,
+      "zeroEdit" : 0.12345679012345678
+    },
+    {
+      "cer" : 0.1330739299610895,
+      "emptyRate" : 0,
+      "errors" : 302,
+      "refWords" : 1452,
+      "stage" : "final",
+      "termRecall" : 0.09259259259259259,
+      "utterances" : 162,
+      "wer" : 0.20798898071625344,
+      "zeroEdit" : 0.1728395061728395
+    }
+  ],
+  "timestamp" : "2026-08-10T11:48:41Z"
+}

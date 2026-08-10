@@ -115,13 +115,28 @@ final class HomeSourceTests: XCTestCase {
 
     // MARK: - the caption line
 
-    func testTheCaptionIsTimeWordsEngineAndDuration() {
+    /// R9/P7: `apple_live` is a config token, and it leaked into every row
+    /// caption. While one engine ships the caption names no engine at all;
+    /// `engineDisplayName` is where a second engine earns a human name.
+    func testTheCaptionIsTimeWordsAndDurationWithNoEngineToken() {
         let item = HomeSource.items([entry(1, date(2026, 8, 9, 14, 32),
                                            "Let's ship the pill redesign before the demo "
                                            + "on Thursday",
                                            durationMs: 400)])[0]
         XCTAssertEqual(HomeSource.caption(for: item, calendar: calendar),
-                       "14:32 · 10 words · apple_live · 0.4s")
+                       "14:32 · 10 words · 0.4s")
+    }
+
+    /// The de-leak is total: no engine id — known, unknown, or the "none"
+    /// sentinel — may reach a caption as a raw token.
+    func testNoMachineEngineIdEverReachesACaption() {
+        for id in ["apple_live", "none", "", "some_future_engine_v2"] {
+            let item = HomeSource.items([entry(1, date(2026, 8, 9, 9), "two words",
+                                               engine: id, durationMs: 1000)])[0]
+            XCTAssertEqual(HomeSource.caption(for: item, calendar: calendar),
+                           "09:00 · 2 words · 1.0s", "engine id \(id) leaked")
+            XCTAssertNil(HomeSource.engineDisplayName(id))
+        }
     }
 
     func testOneWordIsSingularAndMidnightIsZeroPadded() {

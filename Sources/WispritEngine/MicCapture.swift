@@ -42,6 +42,15 @@ public final class MicCapture: @unchecked Sendable {
     private var levelValue: Float = 0
     private var deliveredBytes = 0
     private var reconfigured = false
+    // R4 telemetry, per capture session (reset by `start()`, stable after
+    // `stop()` so the session thread can read them at finalize).
+    /// Nanosecond stamp when `start()` went live — the `first_voiced_ms` epoch.
+    private var startedAtNs: UInt64 = 0
+    private var firstVoicedMsValue: Double?
+    /// Mean-squares of the two most recent chunks (the sliding window's tail).
+    private var recentMeanSquares: [Double] = []
+    /// Smallest 3-chunk (~300 ms) window mean-square seen this session.
+    private var floorMeanSquare: Double?
     /// Owned by the render thread for the lifetime of one capture session; a
     /// per-buffer converter would drop the resampler tail on every chunk.
     private var downconverter: PcmDownconverter?
@@ -80,6 +89,25 @@ public final class MicCapture: @unchecked Sendable {
         return reconfigured
     }
 
+    /// Quietest ~300 ms window of the current (or most recent) session on the
+    /// meter's own scale — RMS × 4, clamped, the same statistic family as
+    /// `peak_level`, so the (peak, floor) pair reads as an SNR proxy on one
+    /// axis (measurement §7). nil until three chunks have been delivered.
+    public var noiseFloor: Double? {
+        lock.lock(); defer { lock.unlock() }
+        return floorMeanSquare.map { Double(PcmFormat.level(fromMeanSquare: $0)) }
+    }
+
+    /// mic-live → first chunk whose metered level cleared the voiced threshold,
+    /// in ms; nil when no chunk ever did. The clipping-exposure clock (acoustic
+    /// §3 fix 2): its live p5 decides whether cold-start head-loss was ever
+    /// real exposure. The threshold's job here is measurement, not judgment —
+    /// R26 recalibrates the classification floor separately, from telemetry.
+    public var firstVoicedMs: Double? {
+        lock.lock(); defer { lock.unlock() }
+        return firstVoicedMsValue
+    }
+
     /// Returns false when the input could not be opened (mic permission denied,
     /// no input device); the session then aborts the utterance cleanly.
     @discardableResult
@@ -94,6 +122,10 @@ public final class MicCapture: @unchecked Sendable {
         levelValue = 0
         deliveredBytes = 0
         reconfigured = false
+        startedAtNs = 0
+        firstVoicedMsValue = nil
+        recentMeanSquares.removeAll()
+        floorMeanSquare = nil
         lock.unlock()
 
         let input = engine.inputNode
@@ -127,16 +159,43 @@ public final class MicCapture: @unchecked Sendable {
             guard let self, self.isActive else { return }
             let pcm = converter.convert(buffer)
             guard !pcm.isEmpty else { return }
-            let l = PcmFormat.level(of: pcm)
+            // One pass over the samples; the meter level and the telemetry
+            // pair below are all derived from this chunk's mean-square.
+            let meanSquare = PcmFormat.meanSquare(of: pcm)
+            let l = PcmFormat.level(fromMeanSquare: meanSquare)
             self.lock.lock()
             self.levelValue = l
             self.deliveredBytes += pcm.count
+            // first_voiced_ms: the first chunk that cleared the voiced
+            // threshold stops the clock (R4's clipping-exposure metric).
+            if self.firstVoicedMsValue == nil, self.startedAtNs > 0,
+               l >= SpeechAnalyzerEngine.voicedPeakThreshold {
+                let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                self.firstVoicedMsValue = Double(now - self.startedAtNs) / 1_000_000.0
+            }
+            // noise_floor: minimum over sliding ~300 ms (3-chunk) windows,
+            // averaged in mean-square space where averaging is legitimate.
+            self.recentMeanSquares.append(meanSquare)
+            if self.recentMeanSquares.count == 3 {
+                let window = (self.recentMeanSquares[0] + self.recentMeanSquares[1]
+                              + self.recentMeanSquares[2]) / 3.0
+                if self.floorMeanSquare.map({ window < $0 }) ?? true {
+                    self.floorMeanSquare = window
+                }
+                self.recentMeanSquares.removeFirst()
+            }
             self.lock.unlock()
             self.onChunk(pcm)
         }
         do {
             engine.prepare()
             try engine.start()
+            // The `first_voiced_ms` epoch is mic-LIVE — the HAL I/O proc is
+            // running from here — not key-down; the ~45–55 ms start cost is
+            // the hard privacy floor and is accounted separately (acoustic §3).
+            lock.lock()
+            startedAtNs = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+            lock.unlock()
             return true
         } catch {
             log.error("could not start audio input (mic permission?): \(error.localizedDescription, privacy: .public)")

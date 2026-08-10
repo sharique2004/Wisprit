@@ -66,6 +66,18 @@ public struct MetricsRecord: Sendable {
     // utterance row.
     public var editDist: Int?        // 0 = zero-edit; absent on an observed edit whose size is unknowable
     public var editScope: String?    // "im" | "ax" — which reader observed it
+    // R6 (2026-08-10): the paste rung's post-delivery custody window, split
+    // out of `release_to_text_ms`/`insert_ms`, which now stop at delivery —
+    // the metric-correction discontinuity recorded in docs/notes/deviations.md.
+    public var restoreMs: Double?    // delivery → insert() return (sleep + clipboard restore)
+    public var repressQueued: Bool?  // a press was waiting when the restore window closed (R34's counter)
+    // R4 (2026-08-10): the capture session's acoustic pair, utterance rows.
+    public var noiseFloor: Double?   // quietest ~300 ms window, meter scale (RMS×4, clamped) like peak_level
+    public var firstVoicedMs: Double? // mic-live → first ≥-voiced-threshold chunk
+    // R14: the one-time `onboarding` row only (reference-less, like vocab_retro).
+    public var onboardMs: Double?    // first launch → first successful dictation
+    public var stepsSkipped: Int?    // onboarding steps the user skipped
+    public var relaunches: Int?      // relaunch count before the first dictation
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
@@ -76,7 +88,11 @@ public struct MetricsRecord: Sendable {
                 vocabMs: Double? = nil, vocabHits: Int? = nil, vocabDelta: Int? = nil,
                 applied: Bool? = nil,
                 ctx: String? = nil, ctxMs: Double? = nil, ctxTerms: Int? = nil,
-                editDist: Int? = nil, editScope: String? = nil) {
+                editDist: Int? = nil, editScope: String? = nil,
+                restoreMs: Double? = nil, repressQueued: Bool? = nil,
+                noiseFloor: Double? = nil, firstVoicedMs: Double? = nil,
+                onboardMs: Double? = nil, stepsSkipped: Int? = nil,
+                relaunches: Int? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -103,6 +119,13 @@ public struct MetricsRecord: Sendable {
         self.ctxTerms = ctxTerms
         self.editDist = editDist
         self.editScope = editScope
+        self.restoreMs = restoreMs
+        self.repressQueued = repressQueued
+        self.noiseFloor = noiseFloor
+        self.firstVoicedMs = firstVoicedMs
+        self.onboardMs = onboardMs
+        self.stepsSkipped = stepsSkipped
+        self.relaunches = relaunches
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -143,6 +166,17 @@ public struct MetricsRecord: Sendable {
         // stays a byte-for-byte prefix of this schema.
         if let editDist { entry["edit_dist"] = .int(editDist) }
         if let editScope { entry["edit_scope"] = .string(editScope) }
+        // 2026-08-10 additions, strictly after every key above — the same
+        // append-only rule, one more round. R6's split pair first, then R4's
+        // acoustic pair, then the `onboarding` row's own three (never on an
+        // utterance row).
+        if let restoreMs { entry["restore_ms"] = .double(MetricsWriter.round1(restoreMs)) }
+        if let repressQueued { entry["repress_queued"] = .bool(repressQueued) }
+        if let noiseFloor { entry["noise_floor"] = .double(MetricsWriter.round4(noiseFloor)) }
+        if let firstVoicedMs { entry["first_voiced_ms"] = .double(MetricsWriter.round1(firstVoicedMs)) }
+        if let onboardMs { entry["onboard_ms"] = .double(MetricsWriter.round1(onboardMs)) }
+        if let stepsSkipped { entry["steps_skipped"] = .int(stepsSkipped) }
+        if let relaunches { entry["relaunches"] = .int(relaunches) }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -177,6 +211,16 @@ public enum MetricsField {
     public static let ctx = "ctx"
     public static let ctxMs = "ctx_ms"
     public static let ctxTerms = "ctx_terms"
+    // R6/R4 (2026-08-10). Session-written `MetricsRecord` fields; named here so
+    // readers share one vocabulary with the writer.
+    public static let restoreMs = "restore_ms"
+    public static let repressQueued = "repress_queued"
+    public static let noiseFloor = "noise_floor"
+    public static let firstVoicedMs = "first_voiced_ms"
+    // The `onboarding` row (R14).
+    public static let onboardMs = "onboard_ms"
+    public static let stepsSkipped = "steps_skipped"
+    public static let relaunches = "relaunches"
 }
 
 public final class MetricsWriter: @unchecked Sendable {
@@ -226,6 +270,22 @@ public final class MetricsWriter: @unchecked Sendable {
             audioMs: f[MetricsField.audioMs],
             rawChars: f[MetricsField.rawChars].map { Int($0.rounded()) },
             refineDelta: f[MetricsField.refineDelta].map { Int($0.rounded()) }))
+    }
+
+    /// The one-time time-to-wow row (R14): first launch → first successful
+    /// dictation, written by the onboarding model through this entry point so
+    /// the schema stays owned in one place. Reference-less like `vocab_retro`
+    /// (no engine produced it — `engine` is the empty string) and dropped from
+    /// every utterance stat by `MetricsSummary.nonUtteranceOutcomes`.
+    public func writeOnboarding(firstLaunchToDictateMs: Double,
+                                stepsSkipped: Int,
+                                relaunchCount: Int) {
+        write(MetricsRecord(
+            heldMs: 0, engine: "", finalizeMs: 0, timedOut: false,
+            postMs: 0, insertMs: 0, outcome: "onboarding", chars: 0,
+            onboardMs: firstLaunchToDictateMs,
+            stepsSkipped: stepsSkipped,
+            relaunches: relaunchCount))
     }
 
     /// Read the stream back, newest last, skipping unparsable lines (the file

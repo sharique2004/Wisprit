@@ -149,6 +149,13 @@ public struct DoctorFacts: Sendable {
     public var dictionaryValid: Bool = false
     public var dictionaryPath: String = ""
 
+    // Data inventory (R17)
+    /// Every persisted store class as the Settings ▸ Data page catalogs it —
+    /// `DataInventory.status()`, gathered so the terminal can confirm the
+    /// inventory reaches every store without opening the window. Empty means
+    /// "not gathered" (a test-built facts value), never "no stores".
+    public var dataStores: [DataStoreStatus] = []
+
     // Parakeet vocabulary channel (Phase 6)
     /// "not_downloaded" | "partial" | "verified", derived from the models dir
     /// PATH ONLY (`~/.wisprit/models/parakeet` + its `verified.json` marker).
@@ -230,7 +237,11 @@ public enum Doctor {
         default: micMark = .warn
         }
         let micDetail = [
-            "granted": "capture allowed",
+            // The engine-evidence discipline (R15/T4): the copy points at the
+            // Setup mic test, which passes on words transcribed — never on a
+            // level-meter proxy that fails exactly the quiet speakers.
+            "granted": "capture allowed — Setup's mic test passes on words "
+                + "transcribed, never a level threshold",
             "undetermined": "will prompt on first recording",
             "denied": "MISSING → System Settings ▸ Privacy & Security ▸ Microphone",
             "restricted": "restricted by policy",
@@ -299,6 +310,7 @@ public enum Doctor {
             facts.dictionaryValid ? .ok : .warn, "dictionary.json",
             facts.dictionaryValid ? facts.dictionaryPath
                 : "missing/invalid at \(facts.dictionaryPath) (run once to create)"))
+        checks.append(dataInventory(facts))
         checks.append(parakeetModels(facts))
 
         // --- accuracy & hygiene ----------------------------------------------
@@ -314,6 +326,32 @@ public enum Doctor {
         return DoctorReport(executablePath: facts.executablePath,
                             checks: checks,
                             reminders: reminders)
+    }
+
+    // MARK: - data inventory
+
+    public static let dataInventoryLabel = "Data inventory"
+
+    /// Info-only, never required: the row exists so "one purge that reaches
+    /// every store" (R17) is checkable from a terminal — every class the
+    /// Settings ▸ Data page lists, how many actually exist on disk, and their
+    /// total weight. A store that is missing from this catalog could be kept
+    /// and never deleted, which is exactly the state the page was built to end.
+    static func dataInventory(_ facts: DoctorFacts) -> DoctorCheck {
+        guard !facts.dataStores.isEmpty else {
+            return DoctorCheck(.ok, dataInventoryLabel,
+                               "not enumerated — Settings ▸ Data lists every store "
+                               + "with sizes and per-class delete")
+        }
+        let present = facts.dataStores.filter(\.exists)
+        let bytes = present.reduce(Int64(0)) { $0 + $1.byteSize }
+        let size = bytes > 0
+            ? ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+            : "nothing yet"
+        return DoctorCheck(.ok, dataInventoryLabel,
+                           "\(facts.dataStores.count) store classes cataloged, "
+                           + "\(present.count) on disk (\(size)) — each visible and "
+                           + "deletable in Settings ▸ Data")
     }
 
     // MARK: - Parakeet models

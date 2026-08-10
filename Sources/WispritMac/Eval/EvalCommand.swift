@@ -1,5 +1,6 @@
 #if os(macOS)
 import Foundation
+import WispritEval
 
 /// `Wisprit eval <verb> [flags]` — the accuracy harness's command line.
 ///
@@ -27,6 +28,7 @@ enum EvalCommand {
         case refine
         case report
         case all
+        case deck
         case record
         case verify
 
@@ -62,6 +64,16 @@ enum EvalCommand {
         /// directly (a test) gets the replay default and can override it.
         var corpus: String = defaultCorpus
         var engine: Engine = .speech
+        /// Recognizer locale for the asr phase. The default is the shipped
+        /// default; any other value is a deliberate experiment (the locale
+        /// bake-off, the real-speech accent cross). Part of the settings hash,
+        /// so runs under different locales can never collide in the cache.
+        var locale: String = defaultLocale
+        /// Render the per-category table at this stage; nil = `final`.
+        /// `--stage raw` is the robustness deck's view: the axes attack the
+        /// engine, and the final-stage table conflates engine damage with
+        /// pipeline repair.
+        var stage: String?
         /// nil = both, i.e. the full matrix.
         var refine: Toggle?
         /// nil = both.
@@ -104,6 +116,8 @@ enum EvalCommand {
     }
 
     static let defaultCorpus = "tts-samantha"
+    /// The shipped default locale (`AsrSettings.init`).
+    static let defaultLocale = "en-US"
     /// Where human takes go. The interactive verbs default to it — see
     /// `Verb.isInteractive`.
     static let humanCorpus = "human-v1"
@@ -118,6 +132,9 @@ enum EvalCommand {
           report    append a RESULTS.md section + write the run JSON
           all       asr → stages × the config matrix → score → report; the
                     refine=on rows also carry a battery score
+          deck      the robustness deck: raw-stage per-axis table + the four
+                    RI tripwire indices over \(RobustnessDeck.corpora.joined(separator: " + ")),
+                    compared against the robustness-deck baseline record
           record    read a script aloud into the corpus, one line at a time,
                     through the live microphone path (resumable)
           verify    review ref vs hyp per clip and accept / fix / discard
@@ -127,6 +144,13 @@ enum EvalCommand {
                                  (default: \(defaultCorpus); \(humanCorpus) for record/verify)
           --engine speech|dictation
                                  recognizer for the asr phase (default: speech)
+          --locale <id>          recognizer locale for the asr phase
+                                 (default: \(defaultLocale)); non-default runs
+                                 are experiments and say so in their notes
+          --stage raw|corrected|refined|final
+                                 stage for the per-category table (default: final;
+                                 raw is the robustness view — engine damage
+                                 before pipeline repair)
           --refine on|off        default: both
           --dict on|off          default: both
           --out <dir>            run artifacts (default: docs/eval/runs); for
@@ -196,6 +220,14 @@ enum EvalCommand {
             switch name {
             case "--corpus":
                 options.corpus = raw
+            case "--locale":
+                options.locale = raw
+            case "--stage":
+                guard EvalScoring.stageOrder.contains(raw) else {
+                    return .invalid("--stage must be "
+                                    + EvalScoring.stageOrder.joined(separator: "|"))
+                }
+                options.stage = raw
             case "--engine":
                 guard let engine = Engine(rawValue: raw) else {
                     return .invalid("--engine must be "

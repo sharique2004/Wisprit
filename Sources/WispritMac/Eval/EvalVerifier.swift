@@ -177,7 +177,8 @@ struct EvalVerifier {
         let engine = runner.engineName
         let hash = EvalPaths.settingsHash(locale: settings.locale, engine: engine,
                                           finalizeTimeoutMs: settings.finalizeTimeoutMs,
-                                          contextualTermLimit: settings.contextualTermLimit)
+                                          contextualTermLimit: settings.contextualTermLimit,
+                                          osBuild: EvalRunner.currentOsBuild)
         let runs = options.out.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath,
                                          isDirectory: true) }
             ?? EvalPaths.runs(root: root)

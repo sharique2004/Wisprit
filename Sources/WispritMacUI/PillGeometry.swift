@@ -141,6 +141,23 @@ public enum PillGeometry {
     /// is not squeezed into a listening-width capsule (§2.4).
     public static let errorMinWidth: Double = 140.0
     public static let blockedSecureMinWidth: Double = 180.0
+
+    /// The live dead-mic cue (FINAL-PLAN R10, native-feel §2.5.2). A dead or
+    /// muted microphone is knowable *during* the hold — the level ticker is
+    /// already delivering zeros — so the pill says so while the user can still
+    /// act, instead of as a posthumous flash.
+    ///
+    /// `deadMicFloor` is the 0.02 voiced floor in its one legitimate job
+    /// (§1.1-T4d): a cheap heuristic whose false negative is harmless, because
+    /// the trigger is amended by engine evidence — a partial suppresses and
+    /// clears the cue, and so does a single voiced tick. The cue fires only
+    /// after *more* than `deadMicTickCount` consecutive sub-floor ticks
+    /// (40 × 50 ms = 2 s), which both reads as "after ~2 s" and keeps the
+    /// 2-second silence window itself render-free — the zero-redraw silence
+    /// invariant is measured over exactly that window.
+    public static let deadMicFloor: Double = 0.02
+    public static let deadMicTickCount = 40
+    public static let deadMicMessage = "No audio — check mic"
     /// The message a `blockedSecure` flash carries when the session does not
     /// supply one.
     public static let blockedSecureMessage = "Secure input — ⌘⌃V to paste"
@@ -189,6 +206,13 @@ public enum PillTailGeometry {
     public static let widthStep: Double = 8.0
     public static let minWidth: Double = 44.0
     public static let maxWidth: Double = 196.0
+    /// The alarm states' wider cap (FINAL-PLAN R9a, native-feel P3). The live
+    /// tail's 196 pt cap is right for a scrolling partial and wrong for a
+    /// diagnosis: §2.4 gives errors a 40-character budget, and 40 characters
+    /// need `2 × 12 + 40 × 6.5 = 284` pt of text frame — under the old cap the
+    /// copy was first char-clipped to 40, then truncated again to ~30 by the
+    /// frame. 288 is the next `widthStep` multiple that fits the whole budget.
+    public static let errorMaxWidth: Double = 288.0
 
     /// Everything around the text: `12 + 32.5 + 8 + w + 12` (§2.2).
     public static var chrome: Double {
@@ -203,14 +227,172 @@ public enum PillTailGeometry {
     /// every width is a multiple of `widthStep`, which is what the flicker
     /// guarantee actually needs.
     public static func width(forCharacters n: Int) -> Double {
+        width(forCharacters: n, cappedAt: maxWidth)
+    }
+
+    /// The alarm-state layout: same quantisation, wider cap, so the rendered
+    /// frame fits every string the error character budget admits.
+    public static func errorWidth(forCharacters n: Int) -> Double {
+        width(forCharacters: n, cappedAt: errorMaxWidth)
+    }
+
+    private static func width(forCharacters n: Int, cappedAt cap: Double) -> Double {
         guard n > 0 else { return 0 }
         let raw = 2 * textInset + Double(n) * characterWidth
         let stepped = (raw / widthStep).rounded(.up) * widthStep
-        return min(maxWidth, max(minWidth, stepped))
+        return min(cap, max(minWidth, stepped))
     }
 
+    /// Which end the text system may cut (FINAL-PLAN R9a). Head-truncation is
+    /// right for a live tail — the newest words are the ones worth keeping —
+    /// and wrong for a diagnosis, whose head *is* the diagnosis ("Didn't hear
+    /// anything — …"). The alarm states truncate at the tail.
+    public static func truncation(for state: PillState) -> PillTailTruncation {
+        switch state {
+        case .error, .blockedSecure: return .tail
+        case .hidden, .prewarming, .recording, .finalizing, .refining, .success: return .head
+        }
+    }
+}
+
+/// AppKit-free spelling of `Text.truncationMode`, so the decision lives beside
+/// the geometry and under test rather than inline in the view.
+public enum PillTailTruncation: Equatable, Sendable {
+    case head
+    case tail
+}
+
+extension PillTailGeometry {
     /// Total panel width for a given tail width — `64.5 + w`.
     public static func totalWidth(tailWidth: Double) -> Double {
         tailWidth <= 0 ? PillGeometry.widthListening : chrome + tailWidth
+    }
+}
+
+/// The §2.5 transition table, as numbers with names (FINAL-PLAN R13,
+/// native-feel §2.12 — "the largest spec/build gap"). Everything here is
+/// AppKit-free so the durations, the curve choices and the per-bar collapse
+/// choreography are assertions, not vibes.
+///
+/// The split of labour the plan prescribes: the *panel frame* transitions
+/// (appear fade+rise, width spring, committed contraction, hide sink) run
+/// through `NSAnimationContext`/`animator()` in `Pill.apply`; the *drawn
+/// surface* transitions (bar tint crossfade, desaturate, staggered collapse,
+/// glyph crossfade) run through SwiftUI in `PillSurface`. The 20 Hz level path
+/// animates nothing — the 50 ms tick *is* the spec's 50 ms linear row — and
+/// silence still costs zero redraws.
+public enum PillMotion {
+    // MARK: §2.5 rows — durations and travel
+
+    /// `hidden → prewarming`: 90 ms `.easeOut`, opacity + 4 pt rise.
+    public static let appearDuration: Double = 0.09
+    public static let appearRise: Double = 4.0
+    /// `prewarming → listening`: 140 ms bar tint crossfade, `.easeInOut`.
+    public static let tintCrossfadeDuration: Double = 0.14
+    /// `listening → finalizing`: 120 ms desaturate (`.easeIn`), then the
+    /// staggered collapse below.
+    public static let desaturateDuration: Double = 0.12
+    /// Width change (tail grows): 120 ms, `.spring(response: 0.28,
+    /// dampingFraction: 0.9)` — damping 0.9 is a near-critically-damped
+    /// spring, which the AppKit side approximates with an ease-out of the
+    /// spring's response time.
+    public static let widthDuration: Double = 0.12
+    public static let widthSpringResponse: Double = 0.28
+    public static let widthSpringDamping: Double = 0.9
+    /// `finalizing → committed`: 140 ms, `.spring(response: 0.22,
+    /// dampingFraction: 0.86)`; the panel contracts 260.5 → 28 pt while the
+    /// checkmark crossfades in.
+    public static let committedDuration: Double = 0.14
+    public static let committedSpringResponse: Double = 0.22
+    public static let committedSpringDamping: Double = 0.86
+    /// `any → hidden`: 160 ms `.easeIn`, opacity + 3 pt sink.
+    public static let hideDuration: Double = 0.16
+    public static let hideSink: Double = 3.0
+
+    // MARK: the staggered collapse (§2.4 `finalizing`, §2.5 row 6)
+
+    /// 6 ms × index — precomputed here, in the model layer, because the spec's
+    /// alternative (15 view identities each carrying `.delay(i × 6ms)`) is the
+    /// one way this redesign could make dictation worse (§2.7).
+    public static let collapseStagger: Double = 0.006
+    /// How long one bar takes to fall to floor once its turn comes.
+    public static let collapseBarFall: Double = 0.12
+
+    public static func collapseDelay(forBar index: Int) -> Double {
+        Double(max(0, index)) * collapseStagger
+    }
+
+    /// Full choreography length: the last bar's delay plus its fall.
+    public static func collapseDuration(barCount: Int) -> Double {
+        collapseDelay(forBar: max(0, barCount - 1)) + collapseBarFall
+    }
+
+    /// Per-bar progress (0 = full height, 1 = at floor) for a global phase
+    /// 0…1 driven by one animatable scalar. One `Canvas`, one animation, no
+    /// per-bar view identity.
+    public static func collapseProgress(phase: Double, bar index: Int, barCount: Int) -> Double {
+        let total = collapseDuration(barCount: barCount)
+        guard total > 0, collapseBarFall > 0 else { return 1 }
+        let clamped = min(1.0, max(0.0, phase))
+        let elapsed = clamped * total - collapseDelay(forBar: index)
+        return min(1.0, max(0.0, elapsed / collapseBarFall))
+    }
+
+    // MARK: the panel-frame decision
+
+    /// What `Pill.apply` should do to the panel frame for one render change.
+    /// Pure, so the seven-rows-present claim is a unit test.
+    public struct FrameChange: Equatable, Sendable {
+        public enum Kind: Equatable, Sendable {
+            case none
+            /// Order front, fade 0 → 1, rise `travel` pt.
+            case appear
+            /// Fade 1 → 0, sink `travel` pt, order out on completion.
+            case hide
+            /// Animate `setFrame` to the new width.
+            case resize
+            /// The committed contraction — same mechanism, its own timing.
+            case contract
+        }
+
+        public var kind: Kind
+        public var duration: Double
+        /// Vertical travel in points. 0 under Reduce Motion — only motion goes.
+        public var travel: Double
+        /// Whether the frame itself animates. Reduce Motion snaps the frame
+        /// (the committed contraction becomes the SwiftUI crossfade alone) but
+        /// keeps the opacity fades — durations survive.
+        public var animatesFrame: Bool
+
+        public init(kind: Kind, duration: Double, travel: Double, animatesFrame: Bool) {
+            self.kind = kind
+            self.duration = duration
+            self.travel = travel
+            self.animatesFrame = animatesFrame
+        }
+    }
+
+    public static func frameChange(wasVisible: Bool, isVisible: Bool,
+                                   oldWidth: Double, newWidth: Double,
+                                   newState: PillState,
+                                   reduceMotion: Bool) -> FrameChange {
+        if isVisible && !wasVisible {
+            return FrameChange(kind: .appear, duration: appearDuration,
+                               travel: reduceMotion ? 0 : appearRise,
+                               animatesFrame: !reduceMotion)
+        }
+        if !isVisible && wasVisible {
+            return FrameChange(kind: .hide, duration: hideDuration,
+                               travel: reduceMotion ? 0 : hideSink,
+                               animatesFrame: !reduceMotion)
+        }
+        if isVisible && oldWidth != newWidth {
+            let contracting = (newState == .success && newWidth < oldWidth)
+            return FrameChange(kind: contracting ? .contract : .resize,
+                               duration: contracting ? committedDuration : widthDuration,
+                               travel: 0,
+                               animatesFrame: !reduceMotion)
+        }
+        return FrameChange(kind: .none, duration: 0, travel: 0, animatesFrame: false)
     }
 }

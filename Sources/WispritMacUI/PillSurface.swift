@@ -24,6 +24,12 @@ public final class PillRenderBox {
 public struct PillSurface: View {
     private let box: PillRenderBox
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    /// The §2.5 staggered collapse (row 6): one animatable phase over a
+    /// snapshot of the meter as it stood at release. Both live here so the
+    /// choreography is view state — the model's `bars` are already at floor,
+    /// which is what every headless test asserts.
+    @State private var collapseBase: [Double] = []
+    @State private var collapsePhase: Double = 1
 
     public init(box: PillRenderBox) {
         self.box = box
@@ -48,6 +54,9 @@ public struct PillSurface: View {
             .overlay(alignment: .bottom) { sweep(render) }
             .modifier(AlarmShake(isActive: isAlarm(render.state), reduceMotion: reduceMotion))
             .opacity(render.isVisible ? 1 : 0)
+            .onChange(of: box.render) { old, new in
+                stageCollapse(from: old, to: new)
+            }
     }
 
     // MARK: - content
@@ -55,33 +64,83 @@ public struct PillSurface: View {
     @ViewBuilder
     private func content(_ render: PillRender) -> some View {
         let hasTail = !render.bubble.isEmpty
+        let liveness: Double = PillPalette.isLive(render.state) ? 1 : 0
         HStack(spacing: PillTailGeometry.gap) {
             if !render.bars.isEmpty {
-                TallyWaveform(levels: render.bars,
-                              metrics: hasTail ? .pillCompact : .pill,
-                              color: barColor(render.state))
+                // §2.5 rows 2 and 6: the tint crossfade (prewarming →
+                // listening, 140 ms ease-in-out; listening → finalizing
+                // desaturate, 120 ms ease-in) and the staggered collapse ride
+                // the meter's two animatable lanes. The 20 Hz level path
+                // animates neither — `liveness` and `collapsePhase` only move
+                // at state changes.
+                PillMeter(levels: render.bars,
+                          metrics: hasTail ? .pillCompact : .pill,
+                          liveness: liveness,
+                          collapseBase: collapseBase,
+                          collapsePhase: collapsePhase)
+                    .animation(liveness == 1
+                                   ? .easeInOut(duration: PillMotion.tintCrossfadeDuration)
+                                   : .easeIn(duration: PillMotion.desaturateDuration),
+                               value: liveness)
             }
             if let symbol = render.glyph.symbolName {
                 Image(systemName: symbol)
                     .font(.system(size: glyphSize(render.glyph), weight: .medium))
                     .foregroundStyle(color(render.tint))
                     .accessibilityHidden(true)
+                    .transition(.opacity)
             }
             if hasTail {
-                // Machine text (§1.4), head-truncated: the newest words are the
-                // ones worth keeping.
+                // Machine text (§1.4). Live tails head-truncate — the newest
+                // words are the ones worth keeping; the alarm states
+                // tail-truncate, because a diagnosis leads with the diagnosis
+                // (R9a).
                 Text(render.bubble)
                     .font(Theme.font(Theme.Role.mono))
-                    .foregroundStyle(color(textColor(render.state)).opacity(PillPalette.textAlpha))
+                    .foregroundStyle(color(textColor(render)).opacity(PillPalette.textAlpha))
                     .lineLimit(1)
-                    .truncationMode(.head)
+                    .truncationMode(truncationMode(render.state))
                     .frame(width: render.bubbleWidth, alignment: .leading)
             }
         }
         .padding(.horizontal, hasTail ? PillTailGeometry.textInset : 0)
         .frame(maxWidth: .infinity, alignment: hasTail ? .leading : .center)
+        // §2.5 row 7's other half: when the glyph changes, its insertion —
+        // and whatever it replaces — crossfades over the committed duration
+        // instead of popping. Under Reduce Motion this fade *is* the committed
+        // transition: the contraction is dropped, the crossfade survives. The
+        // 20 Hz level path never changes `glyph`, so this transaction is
+        // state-change-only.
+        .animation(.easeInOut(duration: PillMotion.committedDuration), value: render.glyph)
         .accessibilityElement()
         .accessibilityLabel(accessibilityLabel(render))
+    }
+
+    /// Row 6 of §2.5: when `finalizing`/`refining` collapses a live meter, the
+    /// model hands over the pre-collapse levels and the surface plays them to
+    /// floor — 120 ms desaturate first (the tint lane above), then the 6 ms ×
+    /// index stagger. Under Reduce Motion the bars snap, exactly as they do on
+    /// the scroll.
+    private func stageCollapse(from old: PillRender, to new: PillRender) {
+        if new.state == .recording || new.state == .prewarming {
+            collapseBase = []
+            collapsePhase = 1
+            return
+        }
+        guard !new.collapseFrom.isEmpty, old.collapseFrom.isEmpty,
+              new.state == .finalizing || new.state == .refining
+        else { return }
+        guard !reduceMotion else {
+            collapseBase = []
+            collapsePhase = 1
+            return
+        }
+        collapseBase = new.collapseFrom
+        collapsePhase = 0
+        let duration = PillMotion.collapseDuration(barCount: new.collapseFrom.count)
+        withAnimation(.easeIn(duration: duration).delay(PillMotion.desaturateDuration)) {
+            collapsePhase = 1
+        }
     }
 
     /// `finalizing` / `refining` draw a sweep hairline rather than a spinner:
@@ -101,16 +160,21 @@ public struct PillSurface: View {
         Color(.sRGB, red: c.r, green: c.g, blue: c.b, opacity: 1)
     }
 
-    /// The bars are the one place mic-orange appears, and they are orange only
-    /// while the microphone is open (§1.6). Every other meter state is muted.
-    private func barColor(_ state: PillState) -> Color {
-        PillPalette.isLive(state) ? Theme.hot(.pillWaveform) : color(PillPalette.muted)
+    private func textColor(_ render: PillRender) -> PillColor {
+        // The dead-mic cue is a notice, not an alarm: muted ink, never orange
+        // (R10 — the mic is open, so the bars keep the tally colour; the text
+        // must not borrow it).
+        if render.tailMuted { return PillPalette.muted }
+        switch render.state {
+        case .error, .blockedSecure: return PillPalette.tint(for: render.state)
+        default: return PillPalette.ink
+        }
     }
 
-    private func textColor(_ state: PillState) -> PillColor {
-        switch state {
-        case .error, .blockedSecure: return PillPalette.tint(for: state)
-        default: return PillPalette.ink
+    private func truncationMode(_ state: PillState) -> Text.TruncationMode {
+        switch PillTailGeometry.truncation(for: state) {
+        case .head: return .head
+        case .tail: return .tail
         }
     }
 
@@ -138,6 +202,69 @@ public struct PillSurface: View {
         case .error: return "Error"
         case .blockedSecure: return PillGeometry.blockedSecureMessage
         }
+    }
+}
+
+// MARK: - the meter's two animated lanes
+
+/// The pill's meter with the two §2.5 animations `TallyWaveform` itself must
+/// never carry: the bar tint crossfade (`liveness`, muted ↔ hot) and the
+/// staggered collapse (`collapsePhase` over `collapseBase`). One `Animatable`
+/// scalar pair, one `Canvas` underneath, no per-bar view identity — the
+/// per-bar delays come precomputed from `PillMotion` (§2.12's constraint).
+///
+/// Steady states cost nothing: while recording, `liveness == 1` and
+/// `collapsePhase == 1`, so the only redraws are the level ticks TallyWaveform
+/// was already drawing — and silence never reaches this view at all.
+private struct PillMeter: View, Animatable {
+    var levels: [Double]
+    var metrics: TallyMetrics
+    /// 0 = `studioMuted`, 1 = mic-orange. Only 1 while the mic is open (§1.6).
+    var liveness: Double
+    /// Pre-collapse levels (oldest first), empty when no collapse is playing.
+    var collapseBase: [Double]
+    /// 0 → 1 across `PillMotion.collapseDuration`.
+    var collapsePhase: Double
+    @Environment(\.colorScheme) private var colorScheme
+
+    var animatableData: AnimatablePair<Double, Double> {
+        get { AnimatablePair(liveness, collapsePhase) }
+        set {
+            liveness = newValue.first
+            collapsePhase = newValue.second
+        }
+    }
+
+    var body: some View {
+        TallyWaveform(levels: displayedLevels, metrics: metrics, color: blendedColor)
+    }
+
+    /// While the collapse plays, draw the snapshot staggering down to floor;
+    /// at phase 1 the drawn levels equal the model's truth (all floor).
+    private var displayedLevels: [Double] {
+        guard collapsePhase < 1, !collapseBase.isEmpty else { return levels }
+        let count = collapseBase.count
+        return collapseBase.enumerated().map { index, value in
+            let progress = PillMotion.collapseProgress(phase: collapsePhase,
+                                                       bar: index, barCount: count)
+            return value * (1 - progress)
+        }
+    }
+
+    /// The tint crossfade, interpolated in sRGB between the same two colours
+    /// the static states use — `studioMuted` is appearance-independent and
+    /// `hot` resolves per appearance, so the endpoints match `Theme` exactly.
+    private var blendedColor: Color {
+        let muted = PillPalette.muted
+        let hot = PillColor(hex: colorScheme == .light
+                                ? Theme.Token.hot.light
+                                : Theme.Token.hot.dark)
+        let t = min(1.0, max(0.0, liveness))
+        return Color(.sRGB,
+                     red: muted.r + (hot.r - muted.r) * t,
+                     green: muted.g + (hot.g - muted.g) * t,
+                     blue: muted.b + (hot.b - muted.b) * t,
+                     opacity: 1)
     }
 }
 

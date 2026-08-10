@@ -46,7 +46,6 @@ public enum MenuAction: Equatable, Sendable {
     case pasteLast
     case openDictionary
     case openConfig
-    case runDoctor
     case purgeHistory
     case quit
 }
@@ -229,7 +228,7 @@ public struct MenuIconSpec: Equatable, Sendable {
     }
 }
 
-/// Everything `iconSpec(for:)` needs: the session state plus the two flags that
+/// Everything `iconSpec(for:)` needs: the session state plus the flags that
 /// outrank it.
 public struct StatusIconState: Equatable, Sendable {
     public var state: AppState
@@ -237,12 +236,19 @@ public struct StatusIconState: Equatable, Sendable {
     public var dictationEnabled: Bool
     /// Some `SetupItem.isBlocking`.
     public var needsSetup: Bool
+    /// `IsSecureEventInputEnabled()` — some app (a password field, Slack) holds
+    /// Secure Keyboard Entry, so macOS suppresses the event tap and the
+    /// dictation key is invisible to Wisprit. The menu-bar icon is the ONE
+    /// feedback channel that survives that state (native-feel §2.6 / R12), so
+    /// it is the one that has to say so.
+    public var secureInput: Bool
 
     public init(state: AppState = .idle, dictationEnabled: Bool = true,
-                needsSetup: Bool = false) {
+                needsSetup: Bool = false, secureInput: Bool = false) {
         self.state = state
         self.dictationEnabled = dictationEnabled
         self.needsSetup = needsSetup
+        self.secureInput = secureInput
     }
 }
 
@@ -273,12 +279,26 @@ public enum StatusMenuModel {
 
     // MARK: - the menu-bar icon (§5.1)
 
+    /// The symbol the secure-input lock state draws (R12). A plain lock rather
+    /// than a badged mic: SF Symbols ships no `mic.badge.lock`, and the state
+    /// it reports is "your keys are being withheld from every app", which the
+    /// lock says on its own. Template — the condition is information, not an
+    /// alarm; nothing is broken and nothing needs fixing in Wisprit.
+    public static let secureInputSymbolName = "lock.fill"
+
     /// The image the status button draws, by state.
     ///
     /// Priority when states collide is fixed and total:
-    /// `needsSetup > disabled > recording > working > idle`. A Mac that cannot
-    /// dictate says so before it says anything else, and the orange recording
-    /// icon is never shown for a run that is not actually recording.
+    /// `needsSetup > disabled > recording > working > secureInput > idle`. A
+    /// Mac that cannot dictate says so before it says anything else, and the
+    /// orange recording icon is never shown for a run that is not actually
+    /// recording.
+    ///
+    /// The secure-input lock sits below every live session state on purpose:
+    /// a session that is visibly recording proves the key WAS seen, so a lock
+    /// over it would be the icon lying about the thing it exists to report.
+    /// It sits above `idle` because idle-while-locked is exactly the "pressed
+    /// the key, literally nothing happened" moment the state is for.
     ///
     /// `glyph(for:)` above is kept — the emoji is still the title fallback when
     /// a symbol cannot be made — but `StatusMenu` reads this.
@@ -297,6 +317,9 @@ public enum StatusMenuModel {
         case .finalizing, .inserting:
             return MenuIconSpec(symbolName: "mic.fill", isTemplate: true)
         case .idle:
+            if icon.secureInput {
+                return MenuIconSpec(symbolName: secureInputSymbolName, isTemplate: true)
+            }
             return MenuIconSpec(symbolName: "mic", isTemplate: true)
         }
     }
@@ -370,7 +393,12 @@ public enum StatusMenuModel {
         items.append(MenuItemModel(title: "Paste Last Transcript  (⌘⌃V)", action: .pasteLast))
         items.append(MenuItemModel(title: "Open Dictionary…", action: .openDictionary))
         items.append(MenuItemModel(title: "Open Config…", action: .openConfig))
-        items.append(MenuItemModel(title: "Run Doctor…", action: .runDoctor))
+        // The doctor, rendered natively. This used to be "Run Doctor…", which
+        // spawned a Terminal window running the CLI — a mechanism leak the
+        // Setup page exists to end (native-feel P6 / R9). `wisprit doctor`
+        // still works for terminal users; this row and the checklist read the
+        // same `DoctorFacts`, so neither can disagree with the other.
+        items.append(MenuItemModel(title: "Open Setup…", action: .openSetup))
         items.append(MenuItemModel(title: "Purge History", action: .purgeHistory))
         items.append(.separator)
         items.append(MenuItemModel(title: "Quit Wisprit", action: .quit))

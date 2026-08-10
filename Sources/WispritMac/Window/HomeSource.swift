@@ -61,16 +61,37 @@ enum HomeSource {
 
     // MARK: - row caption
 
-    /// `HH:mm · N words · engine · D.Ds` (§3.3).
+    /// `HH:mm · N words · D.Ds`, plus an engine name only when it has a human
+    /// one (§3.3, amended by R9/P7).
     ///
     /// Parts that are not known are dropped rather than rendered empty: the
     /// Python era did not always write a duration, and a row that says
     /// "· 0.0s" is a lie about a measurement that was never taken.
     static func caption(for item: TranscriptItem, calendar: Calendar) -> String {
         var parts = [time(item.date, calendar: calendar), words(item.wordCount)]
-        if !item.engine.isEmpty { parts.append(item.engine) }
+        if let engine = engineDisplayName(item.engine) { parts.append(engine) }
         if let ms = item.durationMs, ms > 0 { parts.append(duration(ms)) }
         return parts.joined(separator: " · ")
+    }
+
+    /// The engine id, in the user's language — or nothing.
+    ///
+    /// `apple_live` is a config token, and it leaked into every Home row
+    /// caption ("14:32 · 11 words · apple_live · 0.4s"). While exactly one
+    /// engine ships, naming it on every row is noise even in human words —
+    /// everything is on-device, and the Settings privacy line already says so —
+    /// so the shipping engine is omitted outright. This map is where a second
+    /// engine earns its human name the day one ships; an id it does not know
+    /// is omitted too, because an unknown machine token is precisely the leak.
+    /// (Insights keeps the raw vocabulary on purpose — machine text labelled
+    /// as machine text is the Instrument school being itself, §1.4.)
+    static func engineDisplayName(_ id: String) -> String? {
+        // One entry per shipped engine whose name is worth a caption slot.
+        // Today that is none: `apple_live` is the only engine, so every row
+        // saying "on-device" would be decoration, and any other id reaching a
+        // caption would be exactly the machine token this map exists to stop.
+        let humanNames: [String: String] = [:]
+        return humanNames[id]
     }
 
     /// 24-hour clock, from the calendar's components — no `DateFormatter`, so

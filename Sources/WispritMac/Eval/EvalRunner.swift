@@ -94,6 +94,12 @@ struct EvalRunner {
             return 0
         }
 
+        // The deck reads its own frozen corpus list, so it must not load
+        // `options.corpus` — a `--corpus` flag on `deck` is simply ignored.
+        if options.verb == .deck {
+            return try await runDeck(root: root, outDir: outDir)
+        }
+
         let corpus = try loadCorpus(root: root)
         switch options.verb {
         case .asr:
@@ -133,7 +139,7 @@ struct EvalRunner {
         case .all:
             return try await runAll(root: root, corpus: corpus, outDir: outDir)
 
-        case .refine:
+        case .refine, .deck:
             return 0   // handled above
 
         case .record, .verify:
@@ -188,6 +194,67 @@ struct EvalRunner {
         return worst
     }
 
+    // MARK: - the robustness deck
+
+    /// `eval deck`: raw-stage per-axis tables for the deck corpora plus the
+    /// four RI tripwire indices, compared against the `robustness-deck`
+    /// pseudo-record in BASELINE.json. Reads the cached ASR details (`eval asr
+    /// --corpus <deck corpus>` must have run); publishes nothing — the deck is
+    /// a tripwire to look at, and `report` on the individual corpora is the
+    /// dated record.
+    private func runDeck(root: URL, outDir: URL) async throws -> Int32 {
+        let timestamp = EvalPaths.timestamp(Date())
+        var accents: [CategoryMetrics] = []
+        var stress: [CategoryMetrics] = []
+        var deckStages: [StageMetrics] = []
+        var provenance: RunProvenance?
+
+        for corpusId in RobustnessDeck.corpora {
+            var subOptions = options
+            subOptions.corpus = corpusId
+            let sub = EvalRunner(options: subOptions)
+            let corpus = try sub.loadCorpus(root: root)
+            let full = EvalScoring.summary(
+                timestamp: timestamp, corpus: corpus, records: try sub.loadAsr(outDir: outDir),
+                engine: sub.engineName, config: "deck=\(RobustnessDeck.version)",
+                provenance: sub.provenance(root: root, corpus: corpus),
+                categoryStage: "raw", notes: sub.notes())
+            // An ASR detail carries the raw text in every stage, so only the
+            // raw row means anything here — printing the rest would show a
+            // "final" no pipeline produced.
+            var view = full
+            view.stages = full.stages.filter { $0.stage == "raw" }
+            print(EvalScoring.renderTable(view))
+            print("")
+
+            guard let raw = full.stages.first(where: { $0.stage == "raw" }) else { continue }
+            deckStages.append(raw)
+            if corpusId == RobustnessDeck.accentsCorpus { accents = full.categories }
+            if corpusId == RobustnessDeck.stressCorpus { stress = full.categories }
+            provenance = full.provenance
+        }
+
+        let components = RobustnessDeck.components(accents: accents, stress: stress,
+                                                   deckStages: deckStages)
+        print(RobustnessDeck.renderTable(components))
+
+        guard let provenance else { return 1 }
+        let run = RobustnessDeck.summaryRun(timestamp: timestamp, engine: engineName,
+                                            provenance: provenance, components: components,
+                                            notes: notes())
+        let baselineURL = options.baseline.map { URL(fileURLWithPath: $0) }
+            ?? EvalPaths.baseline(root: root)
+        guard FileManager.default.fileExists(atPath: baselineURL.path),
+              let baseline = try? Scoreboard.decodeBaseline(Data(contentsOf: baselineURL))
+        else { return 0 }
+        let violations = Scoreboard.compare(run: run, baseline: baseline)
+        guard !violations.isEmpty else { return 0 }
+        FileHandle.standardError.write(Data(
+            ("deck baseline violated:\n"
+             + violations.map { "  \($0)" }.joined(separator: "\n") + "\n").utf8))
+        return Self.regressionExit
+    }
+
     // MARK: - phase 1: audio → text
 
     private func runAsr(root: URL, corpus: Corpus, outDir: URL) async throws -> [StageRecord] {
@@ -195,7 +262,8 @@ struct EvalRunner {
         let engineName = self.engineName
         let hash = EvalPaths.settingsHash(locale: settings.locale, engine: engineName,
                                           finalizeTimeoutMs: settings.finalizeTimeoutMs,
-                                          contextualTermLimit: settings.contextualTermLimit)
+                                          contextualTermLimit: settings.contextualTermLimit,
+                                          osBuild: Self.currentOsBuild)
         let cacheURL = outDir.appendingPathComponent(
             EvalPaths.asrCacheName(corpus: options.corpus, engine: engineName,
                                    settingsHash: hash))
@@ -257,7 +325,8 @@ struct EvalRunner {
         let settings = asrSettings()
         let hash = EvalPaths.settingsHash(locale: settings.locale, engine: engineName,
                                           finalizeTimeoutMs: settings.finalizeTimeoutMs,
-                                          contextualTermLimit: settings.contextualTermLimit)
+                                          contextualTermLimit: settings.contextualTermLimit,
+                                          osBuild: Self.currentOsBuild)
         let url = outDir.appendingPathComponent(
             EvalPaths.asrDetailName(corpus: options.corpus, engine: engineName,
                                     settingsHash: hash))
@@ -388,7 +457,7 @@ struct EvalRunner {
 
         let url = outDir.appendingPathComponent(
             EvalPaths.stagesDetailName(corpus: options.corpus, engine: engineName,
-                                       config: config.label))
+                                       locale: options.locale, config: config.label))
         try StageRecord.jsonl(out).write(to: url, atomically: true, encoding: .utf8)
         return out
     }
@@ -396,7 +465,7 @@ struct EvalRunner {
     private func loadStages(config: EvalCommand.Config, outDir: URL) throws -> [StageRecord] {
         let url = outDir.appendingPathComponent(
             EvalPaths.stagesDetailName(corpus: options.corpus, engine: engineName,
-                                       config: config.label))
+                                       locale: options.locale, config: config.label))
         guard FileManager.default.fileExists(atPath: url.path) else {
             throw EvalError.missingFile(url, hint: "run `Wisprit eval stages` first")
         }
@@ -480,6 +549,7 @@ struct EvalRunner {
                             engine: engineName,
                             config: config.label,
                             provenance: provenance(root: root, corpus: corpus),
+                            categoryStage: options.stage ?? "final",
                             battery: battery,
                             notes: notes())
     }
@@ -491,16 +561,24 @@ struct EvalRunner {
         RunProvenance(
             gitSha: Self.shell("/usr/bin/git", ["-C", root.path, "rev-parse", "--short", "HEAD"])
                 ?? "unknown",
-            osBuild: Self.shell("/usr/bin/sw_vers", ["-buildVersion"]) ?? "unknown",
+            osBuild: Self.currentOsBuild,
             promptSha256: EvalPaths.sha256Hex(RefineInstructions.text),
             dictionaryTerms: dictionary(root: root).terms().count,
             corpusSource: EvalScoring.reportedSource(corpus))
     }
 
     private func notes() -> String? {
-        guard !options.categories.isEmpty else { return nil }
-        return "Categories: \(options.categories.joined(separator: ", ")) "
-            + "— a filtered run is not comparable with a full one."
+        var parts: [String] = []
+        if !options.categories.isEmpty {
+            parts.append("Categories: \(options.categories.joined(separator: ", ")) "
+                         + "— a filtered run is not comparable with a full one.")
+        }
+        if options.locale != EvalCommand.defaultLocale {
+            parts.append("Locale: \(options.locale) — a non-default locale is an "
+                         + "experiment (bake-off / accent cross); its rows are not "
+                         + "comparable with \(EvalCommand.defaultLocale) ones.")
+        }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 
     /// Append the section, write the run JSON, and compare against the accepted
@@ -580,10 +658,20 @@ struct EvalRunner {
     }
 
     /// The shipped defaults, not the user's config: a scoreboard row has to mean
-    /// the same thing on another machine.
+    /// the same thing on another machine. The locale is the one deliberate
+    /// parameter (`--locale`): the locale bake-off and the real-speech accent
+    /// cross decode the same audio under different locale assets, and the
+    /// settings hash carries the locale so those runs can never collide in the
+    /// cache.
     func asrSettings() -> AsrSettings {
-        AsrSettings(locale: "en-US", finalizeTimeoutMs: 1500, engine: .appleLive)
+        AsrSettings(locale: options.locale, finalizeTimeoutMs: 1500, engine: .appleLive)
     }
+
+    /// One `sw_vers -buildVersion` per process, shared by the settings hash and
+    /// the provenance stamp so the two can never disagree about which model
+    /// produced a transcript.
+    static let currentOsBuild: String =
+        shell("/usr/bin/sw_vers", ["-buildVersion"]) ?? "unknown"
 
     private func outputDirectory(root: URL) throws -> URL {
         let url = options.out.map { URL(fileURLWithPath: ($0 as NSString).expandingTildeInPath,

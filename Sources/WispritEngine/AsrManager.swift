@@ -71,15 +71,42 @@ public final class AsrManager: @unchecked Sendable {
         }
         let engine = primaryFactory(settings)
         let ok = await engine.begin(onPartial: onPartial)
-        setPrimary(ok ? engine : nil, started: ok)
+        guard ok else {
+            setPrimary(nil, started: false)
+            return
+        }
+        // Retained-head replay (R7, acoustic §3 fix 1): the mic goes live
+        // BEFORE this install completes, and until now any chunk arriving in
+        // that window reached only the retention buffer — on a cold start the
+        // head of the utterance silently vanished from the live transcript
+        // while the retained copy kept it. Splice that head into the engine
+        // here, INSIDE the feed lock and BEFORE the started flag flips, so a
+        // live chunk can neither overtake the replay nor be fed twice:
+        // `feed` appends and checks the flag inside the same critical section,
+        // which makes every chunk either part of this snapshot (flag still
+        // down when it appended) or a post-replay live feed (flag already up)
+        // — never both. Burst-feeding a multi-chunk head is the eval
+        // harness's proven-safe unpaced shape (~35× realtime, identical
+        // transcripts). Expected steady-state delta ≈ 0 — this closes a race
+        // deterministically; it is not an accuracy lever.
+        lock.lock()
+        let head = retention.data
+        if !head.isEmpty { engine.feed(pcm: head) }
+        primary = engine
+        primaryStarted = true
+        lock.unlock()
     }
 
     /// Audio-callback path: retain, then hand to the engine. Both are
-    /// lock-only and allocation-bounded; neither can block.
+    /// lock-only and allocation-bounded; neither can block. The append and the
+    /// started-flag check share one critical section with `begin`'s install —
+    /// the no-double-feed/no-reorder guarantee of the head replay above.
     public func feed(pcm: Data) {
+        lock.lock()
         retention.append(pcm)
-        guard let engine = currentPrimary, primaryIsStarted else { return }
-        engine.feed(pcm: pcm)
+        let engine = primaryStarted ? primary : nil
+        lock.unlock()
+        engine?.feed(pcm: pcm)
     }
 
     public func finalize() async -> UtteranceResult {

@@ -72,6 +72,18 @@ public final class AppController: NSObject, NSApplicationDelegate {
     private var liveTypingStatus: LiveTypingMenuStatus = .probing
     private var liveTypingDetail: String = ""
     private var availabilityTimer: Timer?
+    /// Secure Keyboard Entry, cached (R12). While some app holds it, macOS
+    /// suppresses the event tap entirely, so the menu-bar icon is the only
+    /// feedback channel left standing — it gets a lock. The flag is refreshed
+    /// by `secureInputTimer` below and by every menu open, and NEVER read live
+    /// from the icon path itself: `iconState` is sampled on session-state
+    /// changes, i.e. while the key is held, and the discipline for that path
+    /// is no syscalls (same rule as `needsSetup` above).
+    private var secureInputActive = false
+    private var secureInputTimer: Timer?
+    /// The session's last reported state. The secure-input poll is suspended
+    /// for the whole of any utterance — "never while a key is held".
+    private var sessionIsIdle = true
 
     public init(instanceLock: SingleInstanceLock) {
         self.instanceLock = instanceLock
@@ -219,6 +231,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
             liveTyping: liveTyping,
             context: contextCapture,
             editObserver: editCapture,
+            // Default-off behind the `sounds` key until the cue-bleed check
+            // passes with the real asset (tools/eval/scripts/cue-bleed).
+            sound: SystemSoundCues(settings: settings),
             configuration: SessionController.Configuration(
                 holdDebounceMs: { Double(settings.holdDebounceMs) },
                 isEnabled: { settings.enabled },
@@ -258,6 +273,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
                                                  tierCache: tierCache,
                                                  dictionary: dictionary,
                                                  pendingLearns: pendingLearns,
+                                                 metrics: metrics,
                                                  paste: { [weak self] text in
                                                      self?.pasteFromWindow(text)
                                                  },
@@ -268,8 +284,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
         self.windowController = MainWindowController(model: windowModel)
 
         let statusMenu = self.statusMenu!
-        session.onStateChange = { state in
+        session.onStateChange = { [weak self] state in
             WispritUI.callOnMain {
+                self?.sessionIsIdle = state == .idle
                 statusMenu.update(stateNamed: state.rawValue)
                 // The window's 2-second timer stops for the duration of an
                 // utterance. Everything it polls shares the main thread with the
@@ -291,6 +308,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
                                         tierCache: BundleCapabilityCache,
                                         dictionary: DictionaryStore,
                                         pendingLearns: PendingLearnStore,
+                                        metrics: MetricsWriter,
                                         paste: @escaping (String) -> Void,
                                         fix: @escaping (SetupFixKind) -> Void)
         -> WispritWindowModel.Ports {
@@ -328,7 +346,22 @@ public final class AppController: NSObject, NSApplicationDelegate {
                                            source: EditCapture.learnSource))
                 pendingLearns.promoteConsumed(term: row.term)
             },
-            dismissLearnProposal: { term in pendingLearns.dismiss(term: term) })
+            dismissLearnProposal: { term in pendingLearns.dismiss(term: term) },
+            dataStores: { DataInventory.status() },
+            purgeDataStore: { id in
+                // File-level classes only — the window model routes
+                // `.transcripts` through `purgeHistory` (the store's own
+                // DELETE + VACUUM) and never sends `.settings`.
+                DataInventory.purge(id)
+                // `maybeReload` deliberately keeps its in-memory copy when the
+                // file vanishes; a purge is the one caller that MEANS empty.
+                if id == .dictionary { dictionary.reload() }
+            },
+            writeOnboardingRow: { deltaMs, skipped, relaunches in
+                metrics.writeOnboarding(firstLaunchToDictateMs: deltaMs,
+                                        stepsSkipped: skipped,
+                                        relaunchCount: relaunches)
+            })
     }
 
     /// Home's per-row "paste at cursor" (§3.3).
@@ -487,6 +520,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
         Permissions.requestMicrophone()
         auditPermissions()
         startAvailabilityRefresh()
+        startSecureInputWatch()
 
         // A menu-bar-only app with a notch-hidden icon starts INVISIBLY — users
         // read that as "not starting" (it happened). The pill flash is the
@@ -542,6 +576,32 @@ public final class AppController: NSObject, NSApplicationDelegate {
         statusMenu?.refreshIcon()
     }
 
+    /// The low-rate idle poll behind the secure-input lock icon (R12).
+    ///
+    /// Two seconds is the same cadence the window's fast probe uses, and the
+    /// manual bar it exists to meet: password field focused → lock within ~2 s;
+    /// released → clears as fast. `IsSecureEventInputEnabled()` is one syscall,
+    /// but the poll still yields for the whole of any utterance — the main
+    /// thread is carrying the event tap and the pill while the key is held,
+    /// and no icon is worth competing with that (`noteSessionState` rule).
+    private func startSecureInputWatch() {
+        refreshSecureInput()
+        secureInputTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
+            MainActor.assumeIsolated { self.refreshSecureInput() }
+        }
+    }
+
+    /// Re-sample Secure Keyboard Entry and redraw the icon only on a change.
+    /// Skipped mid-utterance; a session that is running proves the key was
+    /// seen, so the cached value cannot be misleading anyone right now.
+    private func refreshSecureInput() {
+        guard sessionIsIdle else { return }
+        let active = Permissions.secureInput().active
+        guard active != secureInputActive else { return }
+        secureInputActive = active
+        statusMenu?.refreshIcon()
+    }
+
     /// Cheap enough to re-read on every menu open: one `TISCreateInputSourceList`
     /// plus a file-existence check. Strictly read-only.
     private func refreshLiveTypingStatus() {
@@ -585,6 +645,10 @@ public final class AppController: NSObject, NSApplicationDelegate {
             state: { [weak self] in
                 guard let self else { return StatusMenuState() }
                 self.refreshLiveTypingStatus()
+                // A menu open is a user gesture, not a key-hold — refresh the
+                // secure-input cache here too so the icon is honest the moment
+                // the user comes looking for an answer.
+                self.refreshSecureInput()
                 return StatusMenuState(
                     dictationEnabled: self.settings.enabled,
                     aiCleanupEnabled: self.settings.aiCleanup,
@@ -603,8 +667,12 @@ public final class AppController: NSObject, NSApplicationDelegate {
             openSetup: { [weak self] in self?.openWindow(tab: .setup) },
             iconState: { [weak self] in
                 guard let self else { return StatusIconState() }
+                // `secureInputActive` is the cache, never a live read: this
+                // closure runs on every session-state change, i.e. while the
+                // key is held (see the field's comment).
                 return StatusIconState(dictationEnabled: self.settings.enabled,
-                                       needsSetup: self.needsSetup)
+                                       needsSetup: self.needsSetup,
+                                       secureInput: self.secureInputActive)
             },
             toggleDictation: { [weak self] in
                 guard let self else { return }
@@ -635,7 +703,6 @@ public final class AppController: NSObject, NSApplicationDelegate {
             pasteLast: { [weak self] in self?.session.requestPasteLast() },
             openDictionary: { NSWorkspace.shared.open(WispritPaths.dictionaryPath) },
             openConfig: { NSWorkspace.shared.open(WispritPaths.configPath) },
-            runDoctor: { AppController.openDoctorInTerminal() },
             purgeHistory: { [weak self] in self?.history.purge() },
             quit: { [weak self] in self?.terminate() })
     }
@@ -696,7 +763,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
             LiveTypingSettings.setEnabled(settings, true)
             pill.transientNotice("Live Typing enabled")
         } else {
-            pill.transientNotice("Could not enable Live Typing — run Doctor")
+            // "run Doctor" pointed at a terminal ritual; the Setup page is the
+            // same doctor rendered natively, so say that AND open it — the
+            // remedy should not be a scavenger hunt (native-feel P6 / R9).
+            pill.transientNotice("Could not enable Live Typing — see Setup")
+            openWindow(tab: .setup)
         }
         refreshLiveTypingStatus()
         statusMenu?.rebuild()
@@ -742,31 +813,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
         statusMenu?.rebuild()
     }
 
-    /// Open a Terminal window running this same binary's `doctor` subcommand so
-    /// the user can read the checklist (`app.py`'s `runDoctor_`).
-    static func openDoctorInTerminal() {
-        let binary = Bundle.main.executableURL?.path
-            ?? ProcessInfo.processInfo.arguments.first ?? "wisprit"
-        let command = "\(shellQuoted(binary)) doctor; echo; "
-            + "read -n1 -r -p \\\"Press any key to close…\\\""
-        let script = """
-            tell application "Terminal"
-                do script "\(command)"
-                activate
-            end tell
-            """
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        try? process.run()
-    }
-
-    private static func shellQuoted(_ path: String) -> String {
-        "'" + path.replacingOccurrences(of: "'", with: "'\\''") + "'"
-    }
-
     func terminate() {
         availabilityTimer?.invalidate()
+        secureInputTimer?.invalidate()
         // Commits anything still marked, closes the session, and gives the input
         // source back — leaving a palette source selected after we quit would
         // strand the user's field.

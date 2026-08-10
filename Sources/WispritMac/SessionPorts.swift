@@ -36,6 +36,26 @@ public protocol AudioPort: Sendable {
     func stop()
     /// 0…1, read by the pill level ticker at 20 Hz.
     var level: Double { get }
+
+    // R4 telemetry (FINAL-PLAN B-2). Both describe the current-or-most-recent
+    // capture session and are read by the session AFTER `stop()`, on its own
+    // thread. Additive with defaults so a port that cannot measure them (fakes,
+    // the onboarding meter) simply omits the fields from the metrics row.
+
+    /// Quietest ~300 ms window of the utterance on the meter's own scale
+    /// (RMS × 4, clamped — deliberately comparable with `peak_level`, so the
+    /// (level, floor) pair reads as an SNR proxy on one axis). nil until three
+    /// chunks exist.
+    var noiseFloor: Double? { get }
+    /// mic-live → first chunk at or above the voiced threshold, in ms. The
+    /// clipping-exposure metric: its p5 owns the verdict on whether cold-start
+    /// head-loss was ever real exposure (never reported as an accuracy win).
+    var firstVoicedMs: Double? { get }
+}
+
+public extension AudioPort {
+    var noiseFloor: Double? { nil }
+    var firstVoicedMs: Double? { nil }
 }
 
 public protocol RefinePort: Sendable {
@@ -52,6 +72,40 @@ public protocol RefinePort: Sendable {
 public protocol InsertPort: Sendable {
     /// Never throws — every failure comes back as an `InsertResult`.
     func insert(_ text: String) -> InsertResult
+    /// Same cascade, plus the R6 delivery hook: `onDelivered` fires the moment
+    /// the text is in the target app — on the paste rung that is after ⌘V and
+    /// BEFORE the 500 ms restore sleep — and never on a failure. The session
+    /// flashes success (and plays the commit cue) from inside it, so feedback
+    /// stops trailing the text it confirms.
+    func insert(_ text: String, onDelivered: () -> Void) -> InsertResult
+}
+
+public extension InsertPort {
+    /// A conformer that predates the hook delivers by the time `insert`
+    /// returns, so firing the callback at return preserves the old ordering —
+    /// feedback is never earlier than delivery, merely no longer late.
+    func insert(_ text: String, onDelivered: () -> Void) -> InsertResult {
+        let result = insert(text)
+        if result.ok { onDelivered() }
+        return result
+    }
+}
+
+/// R11's two cues — mic-open and commit. Deliberately no error cue: the visual
+/// alarm body is enough, and a failure buzzer would make a starved mic feel
+/// like a slot machine (native-feel §2.10).
+public enum SoundCue: String, Sendable, CaseIterable {
+    /// Played on the show-recording event, i.e. only once `audio.start()` has
+    /// succeeded — the orange rule in a second sense: the cue may never claim
+    /// a mic that did not open.
+    case micOpen = "mic_open"
+    /// Played at the delivery instant, alongside the success flash.
+    case commit
+}
+
+public protocol SoundPort: Sendable {
+    /// Cheap and non-blocking; called on the session thread.
+    func play(_ cue: SoundCue)
 }
 
 public protocol PillPort: Sendable {
@@ -188,9 +242,14 @@ public struct SettingsInserterPort: InsertPort {
     }
 
     public func insert(_ text: String) -> InsertResult {
+        insert(text, onDelivered: {})
+    }
+
+    public func insert(_ text: String, onDelivered: () -> Void) -> InsertResult {
         inserter.insert(text, config: InserterConfig(
             terminalBundleIDs: settings.terminalBundleIDs,
-            pasteRestoreDelayMs: Double(settings.pasteRestoreDelayMs)))
+            pasteRestoreDelayMs: Double(settings.pasteRestoreDelayMs)),
+                        onDelivered: onDelivered)
     }
 }
 
@@ -202,5 +261,7 @@ public struct MicCapturePort: AudioPort {
     public func start() -> Bool { capture.start() }
     public func stop() { capture.stop() }
     public var level: Double { Double(capture.level) }
+    public var noiseFloor: Double? { capture.noiseFloor }
+    public var firstVoicedMs: Double? { capture.firstVoicedMs }
 }
 #endif

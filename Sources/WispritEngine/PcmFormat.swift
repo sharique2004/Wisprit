@@ -73,6 +73,14 @@ public enum PcmFormat {
     /// `AudioCapture._callback`: RMS over int16/32768, ×4 so quiet speech still
     /// moves the meter, clamped at 1.
     public static func level(of pcm: Data) -> Float {
+        level(fromMeanSquare: meanSquare(of: pcm))
+    }
+
+    /// The raw mean of squared normalized samples — the pre-scaling statistic
+    /// `level(of:)` is built on. Exposed so a consumer that needs to COMBINE
+    /// windows (the noise-floor estimate averages three 100 ms chunks) can do
+    /// so before the ×4-and-clamp, which does not distribute over averaging.
+    public static func meanSquare(of pcm: Data) -> Double {
         let count = pcm.count / bytesPerFrame
         guard count > 0 else { return 0 }
         var sum = 0.0
@@ -83,7 +91,13 @@ public enum PcmFormat {
                 sum += v * v
             }
         }
-        return min(1.0, Float((sum / Double(count)).squareRoot()) * 4.0)
+        return sum / Double(count)
+    }
+
+    /// Mean-square → the meter's 0…1 scale (RMS × 4, clamped). One place, so
+    /// `peak_level` and `noise_floor` are always the same statistic family.
+    public static func level(fromMeanSquare meanSquare: Double) -> Float {
+        min(1.0, Float(meanSquare.squareRoot()) * 4.0)
     }
 
     // MARK: - internals

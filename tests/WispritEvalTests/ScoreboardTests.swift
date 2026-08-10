@@ -43,14 +43,35 @@ final class ScoreboardTests: XCTestCase {
 
     func testMarkdownSectionRendersStagesAndCategories() {
         let text = Scoreboard.markdownSection(for: Self.run())
-        XCTAssertTrue(text.contains("| raw | 60 | 812 | 21 | 2.59% | 1.10% | 0.812 | 0.550 |"),
-                      text)
-        XCTAssertTrue(text.contains("| final | 60 | 812 | 14 | 1.72% | 0.80% | 0.930 | 0.680 |"),
-                      text)
+        // The trailing column is `empty` — nil on rows recorded before the
+        // metric existed, so it renders as the em dash, never as 0.
+        XCTAssertTrue(
+            text.contains("| raw | 60 | 812 | 21 | 2.59% | 1.10% | 0.812 | 0.550 | — |"),
+            text)
+        XCTAssertTrue(
+            text.contains("| final | 60 | 812 | 14 | 1.72% | 0.80% | 0.930 | 0.680 | — |"),
+            text)
         XCTAssertTrue(text.contains("### By category"), text)
-        XCTAssertTrue(text.contains("| proper-nouns | 12 | 5.00% | 0.750 |"), text)
+        XCTAssertFalse(text.contains("### By category ("),
+                       "nil categoryStage keeps the historical header")
+        XCTAssertTrue(text.contains("| proper-nouns | 12 | 5.00% | 0.750 | — |"), text)
         // A metric that was not measured renders as an em dash, never as 0.
-        XCTAssertTrue(text.contains("| addresses | 8 | 1.00% | — |"), text)
+        XCTAssertTrue(text.contains("| addresses | 8 | 1.00% | — | — |"), text)
+    }
+
+    /// The robustness deck records its category table at the raw stage and the
+    /// empty rate per row; both must be visible in the rendered section.
+    func testMarkdownSectionRendersEmptyRateAndCategoryStage() {
+        var run = Self.run()
+        run.categoryStage = "raw"
+        run.stages[0].emptyRate = 0.05
+        run.categories[0].emptyRate = 0
+        let text = Scoreboard.markdownSection(for: run)
+        XCTAssertTrue(
+            text.contains("| raw | 60 | 812 | 21 | 2.59% | 1.10% | 0.812 | 0.550 | 5.00% |"),
+            text)
+        XCTAssertTrue(text.contains("### By category (raw stage)"), text)
+        XCTAssertTrue(text.contains("| proper-nouns | 12 | 5.00% | 0.750 | 0.00% |"), text)
     }
 
     /// The banner is mandatory on TTS rows: `say -v Samantha` audio proves the

@@ -38,13 +38,21 @@ public struct StageMetrics: Codable, Equatable, Sendable {
     public var cer: Double?
     public var termRecall: Double?
     public var zeroEdit: Double?
+    /// Share of utterances whose hypothesis at this stage is empty. WER cannot
+    /// see this failure mode (an empty hypothesis scores as deletions,
+    /// indistinguishable from garbled text), and it is the failure the live
+    /// path actually hits (`outcome: empty`). Optional so records written
+    /// before the field existed still decode; nil renders as `—`, never as 0.
+    public var emptyRate: Double?
 
     public init(stage: String, utterances: Int, refWords: Int, errors: Int,
                 wer: Double? = nil, cer: Double? = nil,
-                termRecall: Double? = nil, zeroEdit: Double? = nil) {
+                termRecall: Double? = nil, zeroEdit: Double? = nil,
+                emptyRate: Double? = nil) {
         self.stage = stage; self.utterances = utterances
         self.refWords = refWords; self.errors = errors
         self.wer = wer; self.cer = cer; self.termRecall = termRecall; self.zeroEdit = zeroEdit
+        self.emptyRate = emptyRate
     }
 }
 
@@ -53,11 +61,16 @@ public struct CategoryMetrics: Codable, Equatable, Sendable {
     public var utterances: Int
     public var wer: Double?
     public var termRecall: Double?
+    /// See `StageMetrics.emptyRate`. Per category because the robustness deck
+    /// encodes its conditions as categories, and "which cell went silent" is
+    /// the question the deck exists to answer.
+    public var emptyRate: Double?
 
     public init(category: String, utterances: Int, wer: Double? = nil,
-                termRecall: Double? = nil) {
+                termRecall: Double? = nil, emptyRate: Double? = nil) {
         self.category = category; self.utterances = utterances
         self.wer = wer; self.termRecall = termRecall
+        self.emptyRate = emptyRate
     }
 }
 
@@ -74,17 +87,24 @@ public struct RunSummary: Codable, Equatable, Sendable {
     public var provenance: RunProvenance
     public var stages: [StageMetrics]
     public var categories: [CategoryMetrics]
+    /// Which stage the category table was computed at. Nil means `final` (the
+    /// historical behaviour); the robustness deck records `raw`, because its
+    /// axes attack the engine and the final-stage table conflates engine damage
+    /// with pipeline repair. Optional so summaries written before the field
+    /// existed still decode.
+    public var categoryStage: String?
     /// Weighted aggregate from `RefineBattery`, when the run included it.
     public var battery: Double?
     public var notes: String?
 
     public init(timestamp: String, corpusId: String, split: String, engine: String,
                 config: String, provenance: RunProvenance, stages: [StageMetrics],
-                categories: [CategoryMetrics] = [], battery: Double? = nil,
-                notes: String? = nil) {
+                categories: [CategoryMetrics] = [], categoryStage: String? = nil,
+                battery: Double? = nil, notes: String? = nil) {
         self.timestamp = timestamp; self.corpusId = corpusId; self.split = split
         self.engine = engine; self.config = config; self.provenance = provenance
         self.stages = stages; self.categories = categories
+        self.categoryStage = categoryStage
         self.battery = battery; self.notes = notes
     }
 }
@@ -96,10 +116,12 @@ public enum BaselineMetric: String, Codable, Equatable, Sendable, CaseIterable {
     case cer
     case termRecall
     case zeroEdit
+    case emptyRate
     case battery
 
-    /// WER and CER are error rates; everything else is a hit rate.
-    public var lowerIsBetter: Bool { self == .wer || self == .cer }
+    /// WER, CER and the empty rate are error rates; everything else is a hit
+    /// rate.
+    public var lowerIsBetter: Bool { self == .wer || self == .cer || self == .emptyRate }
 }
 
 /// One accepted number and how far it is allowed to drift before the run is a
@@ -187,12 +209,14 @@ public enum Scoreboard {
         }
         out.append(provenanceLine(run.provenance))
         out.append("")
-        out.append("| stage | n | ref words | errors | WER | CER | term recall | zero-edit |")
-        out.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+        out.append("| stage | n | ref words | errors | WER | CER | term recall | zero-edit "
+                   + "| empty |")
+        out.append("|---|---:|---:|---:|---:|---:|---:|---:|---:|")
         for stage in run.stages {
             out.append("| \(stage.stage) | \(stage.utterances) | \(stage.refWords) "
                        + "| \(stage.errors) | \(percent(stage.wer)) | \(percent(stage.cer)) "
-                       + "| \(rate(stage.termRecall)) | \(rate(stage.zeroEdit)) |")
+                       + "| \(rate(stage.termRecall)) | \(rate(stage.zeroEdit)) "
+                       + "| \(percent(stage.emptyRate)) |")
         }
         if let battery = run.battery {
             out.append("")
@@ -200,13 +224,17 @@ public enum Scoreboard {
         }
         if !run.categories.isEmpty {
             out.append("")
-            out.append("### By category")
+            // The historical table was final-stage; only a deliberate non-final
+            // choice renames the header, so old sections read unchanged.
+            out.append(run.categoryStage.map { "### By category (\($0) stage)" }
+                       ?? "### By category")
             out.append("")
-            out.append("| category | n | WER | term recall |")
-            out.append("|---|---:|---:|---:|")
+            out.append("| category | n | WER | term recall | empty |")
+            out.append("|---|---:|---:|---:|---:|")
             for category in run.categories {
                 out.append("| \(category.category) | \(category.utterances) "
-                           + "| \(percent(category.wer)) | \(rate(category.termRecall)) |")
+                           + "| \(percent(category.wer)) | \(rate(category.termRecall)) "
+                           + "| \(percent(category.emptyRate)) |")
             }
         }
         if let notes = run.notes, !notes.isEmpty {
@@ -299,6 +327,7 @@ public enum Scoreboard {
         case .cer: return row.cer
         case .termRecall: return row.termRecall
         case .zeroEdit: return row.zeroEdit
+        case .emptyRate: return row.emptyRate
         case .battery: return run.battery
         }
     }
