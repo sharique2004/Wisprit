@@ -1,0 +1,27 @@
+# category: tech-jargon
+#
+# The vocabulary of the people who actually dictate into an editor all day.
+# PostgreSQL, Kubernetes, Ubuntu and GitHub are in the eval dictionary; the rest
+# are not and are scored the same way, which is the point — a general engine
+# should get "idempotent" without anyone teaching it.
+#
+# Note on `.asr` normalization (docs/eval/DEFINITIONS.md): "postgresql" and
+# "postgres" are folded together and "git hub" folds to "github", so those two
+# lines are measuring recognition and not spelling. Nothing else here is folded.
+#
+# Pace: normal, and resist the urge to spell out acronyms you would normally say
+# as words. Say "grpc" however you say it at work.
+# Distance: 20-30 cm.
+
+The PostgreSQL connection pool is exhausted again.|terms=PostgreSQL
+We moved the whole staging cluster to Kubernetes last month.|terms=Kubernetes
+It only reproduces on Ubuntu, never on my machine.|terms=Ubuntu
+The pull request is on GitHub if you want to look at it.|terms=GitHub
+Make the handler idempotent so a retry cannot double charge anyone.|terms=idempotent
+We keep everything in one monorepo and it has been fine so far.|terms=monorepo
+The WebSocket drops after about ninety seconds of no traffic.|terms=WebSocket
+They exposed it over gRPC instead of a plain REST endpoint.|terms=gRPC
+The OAuth refresh token expires and nothing catches it.|terms=OAuth
+Redis is doing the rate limiting and Kafka is doing the fan out.|terms=Redis,Kafka
+Nginx is terminating TLS in front of the whole thing.|terms=nginx,TLS
+The TypeScript types are generated from the schema at build time.|terms=TypeScript

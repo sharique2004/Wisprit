@@ -1,0 +1,34 @@
+# category: disfluent-speech
+#
+# How people actually talk when they are dictating and thinking at the same
+# time: filled pauses, false starts, doubled words, and a mid-sentence change of
+# mind. Written out rather than improvised so every speaker produces the same
+# disfluencies and the numbers stay comparable across the three passes.
+#
+# The line is what you SAY. The `ref=` is what the document should end up
+# containing — filler gone, restarts resolved, the abandoned half of a self-
+# correction dropped. That gap IS the measurement: the raw ASR row scores
+# terribly here by design, and the drop from raw to final is what the cleanup
+# stages are worth.
+#
+# ds-04 and ds-11 are the self-correction cases and they are the hard ones. The
+# target keeps the LAST thing you said, not the first. A pipeline that keeps
+# both has produced a sentence that means something different.
+#
+# Pace: read them exactly as written, at speaking speed, and let the "um" be a
+# real "um" — a crisply articulated filler is not the same acoustic event as a
+# real one and does not test the same thing.
+# Distance: 20-30 cm.
+
+Um, so basically we should uh probably migrate the the database.|ref=So basically we should probably migrate the database.
+We we we should probably just just ship it.|ref=We should probably just ship it.
+Uh yeah, so um I think that we should just ship the thing.|ref=Yeah, so I think that we should just ship the thing.
+Let us meet on Thursday, no actually Wednesday, after lunch.|ref=Let us meet on Wednesday, after lunch.
+I was going, I was gonna say the retry policy needs work.|ref=I was gonna say the retry policy needs work.
+So the the thing is, um, nobody has looked at this since March.|ref=So the thing is, nobody has looked at this since March.
+Can you, uh, can you send me the the logs from last night?|ref=Can you send me the logs from last night?
+It is kind of, I mean, it is basically the same bug as before.|ref=It is basically the same bug as before.
+And then we, sorry, and then it just retries forever.|ref=And then it just retries forever.
+Right so, um, where were we, yeah, the timeout.|ref=Right so, where were we, yeah, the timeout.
+Send it to Sharique, actually no, send it to Khatri instead.|ref=Send it to Khatri instead.|terms=Khatri
+I think, uh, I think we should just, you know, leave it as it is.|ref=I think we should just leave it as it is.

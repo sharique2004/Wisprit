@@ -1,0 +1,27 @@
+# category: homophones
+#
+# The class where the acoustics carry no information at all. "Their" and "there"
+# are the same sound; only the sentence decides. This is the category that moves
+# when a language model gets better and does not move when a microphone does, so
+# it is the cleanest separator between the two kinds of improvement.
+#
+# No `terms=` anywhere: the whole utterance is the assertion. A single wrong
+# word here is a real error a user would have to go back and fix, which is
+# exactly what the zero-edit rate is supposed to catch.
+#
+# Pace: normal. Do NOT put a helpful stress on the target word — the sentence has
+# to do the work, because in real dictation it is the only thing that will.
+# Distance: 20-30 cm.
+
+They said their flight lands at noon, but they're not sure the connection holds.
+There are two of them over there, and their names are on the list.
+It's been running for three days and its memory footprint has not moved.
+We sent two of them to the warehouse too, and the rest went out today.
+The principal reason we chose it was the principle of least surprise.
+That was a lovely compliment, but it does not complement the rest of the design.
+Please be discreet about it until the two discrete phases are both finished.
+The change did not affect the outcome, so the effect was smaller than we feared.
+Whose turn is it, and who's actually going to write the summary?
+You're welcome to bring your laptop if you want to follow along.
+We will go ahead whether or not the weather improves by Thursday.
+The printer is stationary, and we are completely out of stationery again.

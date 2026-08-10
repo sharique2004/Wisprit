@@ -55,7 +55,8 @@ enum WispritMacMain {
                                   what metrics.log says: outcomes, empty
                                   reasons, timings (default: all time)
           Wisprit eval <verb>     accuracy harness (asr|stages|score|refine|
-                                  report|all) — see `Wisprit eval` for flags
+                                  report|all|record|verify) — see `Wisprit eval`
+                                  for flags; record/verify are the human corpus
           Wisprit bootstrap       create ~/.wisprit and seed config + dictionary
           Wisprit hotkey [secs]   print hotkey events (needs WISPRIT_MANUAL_INPUT=1)
           Wisprit insert "text"   insert text after a 3 s countdown (same gate)

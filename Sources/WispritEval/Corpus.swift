@@ -41,14 +41,27 @@ public struct CorpusEntry: Codable, Equatable, Sendable {
     public var script: String?
     public var durationMs: Int?
     public var expect: CorpusExpectation?
+    /// `dev` | `held`. **Assigned by speaker, never by utterance** — thresholds
+    /// tune on the dev speaker and are reported on voices the tuning never
+    /// heard. Written by `Wisprit eval record`; nil on corpora recorded before
+    /// the rule existed (the synthetic one), which report as unsplit rather than
+    /// silently joining a side.
+    public var split: String?
+    /// A human compared this clip's reference against a real transcript and
+    /// accepted it (`Wisprit eval verify`). Nil means nobody has looked yet: an
+    /// unreviewed reader error becomes a permanent WER floor, so the two states
+    /// are worth telling apart.
+    public var verified: Bool?
 
     public init(id: String, audio: String, sha256: String, ref: String, category: String,
                 speaker: String, source: CorpusSource, mic: String? = nil,
                 script: String? = nil, durationMs: Int? = nil,
-                expect: CorpusExpectation? = nil) {
+                expect: CorpusExpectation? = nil, split: String? = nil,
+                verified: Bool? = nil) {
         self.id = id; self.audio = audio; self.sha256 = sha256; self.ref = ref
         self.category = category; self.speaker = speaker; self.source = source
         self.mic = mic; self.script = script; self.durationMs = durationMs; self.expect = expect
+        self.split = split; self.verified = verified
     }
 }
 
@@ -98,6 +111,18 @@ public struct Corpus: Equatable, Sendable {
 
     public func entries(inCategory category: String) -> [CorpusEntry] {
         entries.filter { $0.category == category }
+    }
+
+    /// The dev / held partition, by the `split` a manifest line carries.
+    /// Entries with no split belong to neither — an unsplit clip must not be
+    /// silently reported as held.
+    public func entries(inSplit split: String) -> [CorpusEntry] {
+        entries.filter { $0.split == split }
+    }
+
+    public var speakers: [String] {
+        var seen = Set<String>()
+        return entries.compactMap { seen.insert($0.speaker).inserted ? $0.speaker : nil }
     }
 
     // MARK: - parsing
@@ -159,6 +184,26 @@ public struct Corpus: Equatable, Sendable {
         guard let text = raw as? String, CorpusSource(rawValue: text) != nil else {
             throw CorpusError.unknownSource(line: line, value: String(describing: raw))
         }
+    }
+
+    // MARK: - writing
+
+    /// One JSON object on one line, keys sorted, no trailing newline — the same
+    /// shape `StageRecord.jsonLine` writes and the same reason: a manifest
+    /// rewritten by `eval verify` must differ from its predecessor only where a
+    /// decision changed it, or the diff stops being reviewable.
+    ///
+    /// `/` is not escaped, so `audio/spk01/spk01.internal.pn-01.wav` reads as a
+    /// path in the file rather than as `audio\/spk01\/…`.
+    public static func jsonLine(_ entry: CorpusEntry) throws -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        return String(decoding: try encoder.encode(entry), as: UTF8.self)
+    }
+
+    public static func jsonl(_ entries: [CorpusEntry]) throws -> String {
+        guard !entries.isEmpty else { return "" }
+        return try entries.map { try jsonLine($0) }.joined(separator: "\n") + "\n"
     }
 
     /// Turn `DecodingError`'s prose into a failure that names the field.

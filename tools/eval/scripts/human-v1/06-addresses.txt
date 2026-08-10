@@ -1,0 +1,30 @@
+# category: addresses
+#
+# Spoken emails and URLs, plus the traps that must NOT become one.
+#
+# Read the addresses the way you say them out loud — "sharique dot khatri at
+# gmail dot com". You do not need to be told to do this; that is the point, and
+# it is why these lines carry no `ref=` while the spelled runs do.
+#
+# ad-07 through ad-12 are the guard, and they are half of this file on purpose.
+# A bare "at" in front of a company or a place means LOCATED AT, and joining it
+# into an address corrupts a sentence that was already correct. A pipeline that
+# scores well on ad-01..06 and badly here is worse than one that does neither:
+# it is confidently wrong on ordinary English.
+#
+# Pace: normal for the sentence, and do not slow down or over-separate the
+# address either — a dictated address is said quickly.
+# Distance: 20-30 cm.
+
+Email me at sharique.khatri@gmail.com when the build is green.|bypass=has_address
+The status page is at wisprit.dev and it updates every minute.|bypass=has_address
+Send the invoice to accounts@insforge.io before the end of the month.|bypass=has_address
+My work address is s.khatri@fastmail.com, not the other one.|bypass=has_address
+The repository is at github.com/wisprit if you want to clone it.|bypass=has_address
+The API reference lives at docs.insforge.io/api and it is generated nightly.|bypass=has_address
+Let us meet at the office at four instead of doing this over email.
+I looked at Google for twenty minutes and could not find a straight answer.
+She works at Stripe now, so ask her how they handle idempotency keys.
+Leave it with the team at the London office and they will sort it out.
+I was surprised at Amazon, honestly, given how long they have been doing this.
+He is speaking at Apple next week about on device models.

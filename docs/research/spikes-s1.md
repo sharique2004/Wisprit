@@ -266,6 +266,11 @@ swiftc -O conv.swift -o conv                 # ./conv  (AVAudioConverter capacit
 orders of magnitude are trustworthy; absolute WER and the biasing win need re-validation on
 human speech (spike S4).
 
+**S4 status: tooling ready — recording pending.** `Wisprit eval record` / `eval verify` and the
+131-utterance `human-v1` script set exist (`tools/eval/scripts/human-v1/`, protocol in its
+README). Nothing above is re-validated until that audio is recorded and the held-split baseline
+is on the scoreboard.
+
 ---
 
 # S1-b — the "every utterance after the second comes back empty" incident (5 Aug 2026)

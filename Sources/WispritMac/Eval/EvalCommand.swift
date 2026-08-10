@@ -15,11 +15,11 @@ enum EvalCommand {
 
     // MARK: - the grammar
 
-    /// The verbs this phase ships. `record` and `verify` are Phase 2 of the
-    /// accuracy-parity plan (the human corpus) and are parsed into a refusal
-    /// that names the phase rather than an "unknown verb" — the difference
-    /// between "you typed it wrong" and "that is not built yet" is the whole
-    /// value of the message.
+    /// `record` and `verify` are the two interactive verbs — a person with a
+    /// microphone and a person with a judgement call. They are routed away from
+    /// `EvalRunner` in `run`, because a harness that replays cached transcripts
+    /// and a harness that opens the microphone have nothing in common but a
+    /// noun.
     enum Verb: String, CaseIterable {
         case asr
         case stages
@@ -27,6 +27,14 @@ enum EvalCommand {
         case refine
         case report
         case all
+        case record
+        case verify
+
+        /// True for the verbs that read from stdin. Used to pick the corpus
+        /// default: recording into the synthetic corpus is never what anyone
+        /// means, and a human take landing in `tts-samantha` would poison the
+        /// one corpus whose whole job is to be admittedly synthetic.
+        var isInteractive: Bool { self == .record || self == .verify }
     }
 
     /// Which recognizer produced the transcript. `speech` is the live path
@@ -49,6 +57,9 @@ enum EvalCommand {
 
     struct Options: Equatable {
         var verb: Verb
+        /// Defaulted per verb by `parse` — `humanCorpus` for the interactive
+        /// verbs, `defaultCorpus` for the replay ones. Constructing `Options`
+        /// directly (a test) gets the replay default and can override it.
         var corpus: String = defaultCorpus
         var engine: Engine = .speech
         /// nil = both, i.e. the full matrix.
@@ -69,6 +80,22 @@ enum EvalCommand {
         /// (the analyzer sees the same samples), so it is only worth paying
         /// when the question is about latency rather than accuracy.
         var realtime: Bool = false
+
+        // MARK: the interactive verbs
+
+        /// `record`: the script file to read, absolute or repo-relative.
+        var script: String?
+        /// `record`: who is reading. `verify`: whose clips to review.
+        /// Slugged before it reaches an id — see `EvalRecordPlan.slug`.
+        var speaker: String?
+        /// `record`: which microphone this pass is on. Part of the clip id, so
+        /// the Bluetooth pass of a script the internal mic already recorded is
+        /// new clips rather than a duplicate-id error.
+        var mic: String?
+        /// `record`: force the dev/held side. Absent means the by-speaker rule
+        /// (`EvalRecordPlan.split`), which is the one that should normally
+        /// decide — an override is for a speaker joining an existing side.
+        var split: String?
     }
 
     enum Parsed: Equatable {
@@ -77,9 +104,12 @@ enum EvalCommand {
     }
 
     static let defaultCorpus = "tts-samantha"
+    /// Where human takes go. The interactive verbs default to it — see
+    /// `Verb.isInteractive`.
+    static let humanCorpus = "human-v1"
 
     static let usage = """
-        usage: Wisprit eval <asr|stages|score|refine|report|all> [flags]
+        usage: Wisprit eval <asr|stages|score|refine|report|all|record|verify> [flags]
 
           asr       audio → text, once per (corpus, engine); cached by audio sha
           stages    replay cached text through corrections → refine → postprocess
@@ -88,18 +118,36 @@ enum EvalCommand {
           report    append a RESULTS.md section + write the run JSON
           all       asr → stages × the config matrix → score → report; the
                     refine=on rows also carry a battery score
+          record    read a script aloud into the corpus, one line at a time,
+                    through the live microphone path (resumable)
+          verify    review ref vs hyp per clip and accept / fix / discard
 
         flags:
-          --corpus <id>          corpus under tools/eval/corpus (default: \(defaultCorpus))
+          --corpus <id>          corpus under tools/eval/corpus
+                                 (default: \(defaultCorpus); \(humanCorpus) for record/verify)
           --engine speech|dictation
                                  recognizer for the asr phase (default: speech)
           --refine on|off        default: both
           --dict on|off          default: both
-          --out <dir>            run artifacts (default: docs/eval/runs)
+          --out <dir>            run artifacts (default: docs/eval/runs); for
+                                 `record`, the corpus directory itself
           --repeat N             battery samples per case (default: 3)
           --baseline <path>      default: docs/eval/BASELINE.json
           --categories a,b       restrict to these corpus categories
           --realtime             pace audio at wall-clock speed
+
+        record / verify:
+          --script <file>        one category per file, under
+                                 tools/eval/scripts/human-v1 (record; required)
+          --speaker <id>         who is reading (record; required) or whose
+                                 clips to review (verify; optional filter)
+          --mic <label>          microphone for this pass, e.g. internal,
+                                 airpods-pro (default: \(EvalRecordPlan.defaultMic))
+          --split dev|held       override the by-speaker split rule
+                                 (default: \(EvalRecordPlan.devSpeaker) is dev, everyone else held)
+
+        Recording protocol — speakers, passes, and why the split is by speaker:
+        tools/eval/scripts/human-v1/README.md
         """
 
     // MARK: - parsing
@@ -110,17 +158,12 @@ enum EvalCommand {
         guard let head = arguments.first, !head.isEmpty else {
             return .invalid("eval needs a verb")
         }
-        if head == "record" || head == "verify" {
-            return .invalid("""
-                'eval \(head)' is Phase 2 of the accuracy-parity plan (the human corpus) \
-                — not implemented yet
-                """)
-        }
         guard let verb = Verb(rawValue: head) else {
             return .invalid("unknown verb: \(head)")
         }
 
         var options = Options(verb: verb)
+        if verb.isInteractive { options.corpus = humanCorpus }
         var index = arguments.index(after: arguments.startIndex)
         while index < arguments.endIndex {
             let argument = arguments[index]
@@ -186,9 +229,41 @@ enum EvalCommand {
                     return .invalid("--categories needs at least one category name")
                 }
                 options.categories = names
+            case "--script":
+                options.script = raw
+            case "--speaker":
+                options.speaker = raw
+            case "--mic":
+                options.mic = raw
+            case "--split":
+                guard EvalRecordPlan.splits.contains(raw) else {
+                    return .invalid("--split must be "
+                                    + EvalRecordPlan.splits.sorted().joined(separator: "|"))
+                }
+                options.split = raw
             default:
                 return .invalid("unknown option: \(name)")
             }
+        }
+        return validate(options)
+    }
+
+    /// The two flags `record` cannot invent for itself.
+    ///
+    /// A speaker id is not guessable (the whole corpus is partitioned by it) and
+    /// a script is not either — and both failures are only discoverable an hour
+    /// into a session if they are allowed through, because that is when the
+    /// manifest turns out to be under the wrong name.
+    static func validate(_ options: Options) -> Parsed {
+        guard options.verb == .record else { return .run(options) }
+        guard let script = options.script, !script.isEmpty else {
+            return .invalid("record needs --script <file> "
+                            + "(one per category, under tools/eval/scripts/\(humanCorpus))")
+        }
+        guard let speaker = options.speaker,
+              !EvalRecordPlan.slug(speaker).isEmpty else {
+            return .invalid("record needs --speaker <id> — the corpus is split by speaker, "
+                            + "so a take with no speaker has nowhere to go")
         }
         return .run(options)
     }
@@ -227,7 +302,11 @@ enum EvalCommand {
             FileHandle.standardError.write(Data("\(message)\n\n\(usage)\n".utf8))
             return 2
         case .run(let options):
-            return EvalRunner(options: options).run()
+            switch options.verb {
+            case .record: return EvalRecorder(options: options).run()
+            case .verify: return EvalVerifier(options: options).run()
+            default: return EvalRunner(options: options).run()
+            }
         }
     }
 }

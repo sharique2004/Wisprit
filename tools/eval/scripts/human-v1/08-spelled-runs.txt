@@ -1,0 +1,37 @@
+# category: spelled-runs
+#
+# THE ONLY FILE WHERE WHAT YOU SAY AND WHAT THE DOCUMENT SHOULD SAY REALLY
+# DIFFER — hence the `ref=` on most lines. Read the hyphenated run as individual
+# LETTER NAMES: "jay ess oh enn", not "json".
+#
+# Two lines carry the whole reason this category exists:
+#
+#   sr-01  J-S-O-N — the never-retro-delete case. "JSON" is already a correct
+#          word in the sentence; a reconciler that sees a spelled run and
+#          deletes the word it was spelling has destroyed correct text.
+#   sr-05  K-R-Z-Y-S-Z-T-O-F — the no-candidate case. Nothing in the dictionary
+#          is phonetically near it, so the pipeline must produce the letters and
+#          learn nothing. This is the line that must survive the orthographic
+#          reject rules (no vowel run, consonant clusters) intact.
+#
+# `expect.refineBypass = has_letter_run` on every line: the AI cage measurably
+# corrupts spelled runs (S-H-A-R-I-Q-U-E came back as "Sharifue"), so bypassing
+# it is the assertion, not an optimization.
+#
+# Pace: say the letters at an even, unhurried rhythm — about two per second — and
+# do NOT pause between the run and the rest of the sentence. A long pause makes
+# it a different utterance and stops testing the thing we care about.
+# Distance: 20-30 cm.
+
+The payload is J-S-O-N, not YAML.|bypass=has_letter_run|ref=The payload is JSON, not YAML.
+My name is S-H-A-R-I-Q-U-E.|bypass=has_letter_run|ref=My name is SHARIQUE.
+The surname is K-H-A-T-R-I.|bypass=has_letter_run|ref=The surname is KHATRI.
+It is spelled I-N-S-F-O-R-G-E, all one word.|bypass=has_letter_run|ref=It is spelled INSFORGE, all one word.
+Spell it K-R-Z-Y-S-Z-T-O-F, please.|bypass=has_letter_run|ref=Spell it KRZYSZTOF, please.
+Her name is S-I-O-B-H-A-N, not the way it sounds.|bypass=has_letter_run|ref=Her name is SIOBHAN, not the way it sounds.
+The status code was H-T-T-P four zero three.|bypass=has_letter_run|ref=The status code was HTTP 403.
+Send it to the D-M-Z, not the internal network.|bypass=has_letter_run|ref=Send it to the DMZ, not the internal network.
+The ticket prefix is W-S-P and then the number.|bypass=has_letter_run|ref=The ticket prefix is WSP and then the number.
+It is O-A-U-T-H two, the second version.|bypass=has_letter_run|ref=It is OAUTH two, the second version.
+We store it in JSON and send it over HTTP.
+The environment variable is W-I-S-P-R-I-T underscore state dir.|bypass=has_letter_run|ref=The environment variable is WISPRIT underscore state dir.

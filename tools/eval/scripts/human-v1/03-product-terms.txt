@@ -1,0 +1,28 @@
+# category: product-terms
+#
+# Product and brand names. Three of them (Wisprit, InsForge, MeetingScribe) are
+# in the eval dictionary; FluidAudio, Parakeet, WhisperKit and SpeechAnalyzer are
+# NOT, and are a second control arm inside the same category — a brand that only
+# the dictionary can produce is not being recognized.
+#
+# Interior capitals are the hard part: an engine that hears the two halves
+# separately writes "ins forge" or "meeting scribe", which is a formatting
+# failure and not a hearing one, and the two look identical in a WER number. The
+# per-term recall is what tells them apart.
+#
+# Pace: normal. Say "InsForge" as one word, the way you would say a company name
+# out loud — not "Ins. Forge."
+# Distance: 20-30 cm.
+
+Wisprit runs the whole pipeline on the device with no network at all.|terms=Wisprit
+The InsForge deployment finished about an hour ago.|terms=InsForge
+MeetingScribe transcribes the entire call locally.|terms=MeetingScribe
+Wisprit and InsForge share one deployment account.|terms=Wisprit,InsForge
+We are evaluating FluidAudio as a second engine behind the same seam.|terms=FluidAudio
+Parakeet is the model FluidAudio wraps, if I have that right.|terms=Parakeet,FluidAudio
+SpeechAnalyzer is what Wisprit uses on the live path today.|terms=SpeechAnalyzer,Wisprit
+Someone should compare WhisperKit against what we already ship.|terms=WhisperKit
+I pasted the MeetingScribe notes into the InsForge ticket.|terms=MeetingScribe,InsForge
+Does Wisprit have a setting for that, or do I edit the file?|terms=Wisprit
+The FluidAudio revision is pinned, so do not bump it casually.|terms=FluidAudio
+Wisprit, InsForge and MeetingScribe all read the same dictionary file.|terms=Wisprit,InsForge,MeetingScribe

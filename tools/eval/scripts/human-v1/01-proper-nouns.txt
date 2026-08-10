@@ -1,0 +1,21 @@
+# category: proper-nouns
+#
+# Personal names that ARE in tools/eval/fixtures/eval-dictionary.json. The other
+# half of this arm is 02-control-names.txt, whose names are deliberately absent —
+# read both, or neither number means anything.
+#
+# Pace: normal conversational speed. Do NOT slow down for the name. Over-
+# articulating "Sha-reeq" is the single easiest way to make this corpus report a
+# recognition rate nobody will ever see in real use.
+# Distance: 20-30 cm, the way you hold a laptop.
+
+Hi Sharique, please add this to the roadmap before the meeting.|terms=Sharique
+Ask Sharique Khatri to review the pull request today.|terms=Sharique,Khatri
+Khatri is on holiday until the fourteenth, so route it to me.|terms=Khatri
+I already sent Sharique the deployment logs from last night.|terms=Sharique
+Did Sharique say whether the migration finished or not?|terms=Sharique
+Tell Khatri the invoice went out this morning.|terms=Khatri
+Sharique and I disagreed about the retry policy for about an hour.|terms=Sharique
+Put Sharique Khatri down as the technical contact on the form.|terms=Sharique,Khatri
+Thanks Sharique, that fixed it.|terms=Sharique
+I think Khatri already filed a ticket for exactly this.|terms=Khatri

@@ -1,0 +1,26 @@
+# category: control-names
+#
+# THE CONTROL ARM. Every name here is deliberately absent from
+# tools/eval/fixtures/eval-dictionary.json and must stay absent — if you are
+# tempted to add one because recall is embarrassing, that is the measurement
+# working.
+#
+# What it proves: if term recall on 01-proper-nouns rises with the dictionary on
+# and recall here does not move, the dictionary is recognizing names. If recall
+# here moves too, something is inventing them.
+#
+# Pace: normal conversational speed. Say the names the way you would say them to
+# a colleague — your natural approximation is the honest input, not a careful
+# phonetic rendition.
+# Distance: 20-30 cm.
+
+Krzysztof is joining the standup from Warsaw this week.|terms=Krzysztof
+Anjali owns the billing service until the end of the quarter.|terms=Anjali
+Priyanka will demo the new onboarding flow on Friday.|terms=Priyanka
+Thorbjorn sent over the revised contract last night.|terms=Thorbjorn
+Siobhan wants the design review moved to Wednesday.|terms=Siobhan
+Ask Ekaterina whether the staging cluster is free tomorrow.|terms=Ekaterina
+Oluwaseun has the context on the payment retries.|terms=Oluwaseun
+I copied Rajesh on the thread about the outage.|terms=Rajesh
+Mariam is the one who wrote the original importer.|terms=Mariam
+Let Nguyen know the release is cut and ready to test.|terms=Nguyen

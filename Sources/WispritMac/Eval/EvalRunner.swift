@@ -135,6 +135,15 @@ struct EvalRunner {
 
         case .refine:
             return 0   // handled above
+
+        case .record, .verify:
+            // Routed to `EvalRecorder` / `EvalVerifier` by `EvalCommand.run`
+            // before a runner is ever constructed. Listed rather than defaulted
+            // so adding a verb keeps failing to compile until someone decides
+            // where it goes.
+            FileHandle.standardError.write(
+                Data("eval: '\(options.verb.rawValue)' is interactive and is not a replay\n".utf8))
+            return 2
         }
     }
 
@@ -261,8 +270,12 @@ struct EvalRunner {
     /// One clip through the recognizer. `speech` is the live path;
     /// `dictation` is the off-path channel, whose whole reason to exist is that
     /// `contextualStrings` biasing works there and nowhere else.
-    private func transcribe(pcm: Data, settings: AsrSettings,
-                            vocabulary: (any VocabularySource)?) async -> UtteranceResult {
+    ///
+    /// Internal rather than private because `eval verify` reviews the same
+    /// transcripts this produces and writes into the same cache — a reviewer
+    /// looking at different text from the scoreboard would be reviewing nothing.
+    func transcribe(pcm: Data, settings: AsrSettings,
+                    vocabulary: (any VocabularySource)?) async -> UtteranceResult {
         switch options.engine {
         case .speech:
             let engine = SpeechAnalyzerEngine(settings: settings)
@@ -560,7 +573,7 @@ struct EvalRunner {
         DictionaryStore(path: EvalPaths.dictionaryFixture(root: root))
     }
 
-    private var engineName: String {
+    var engineName: String {
         options.engine == .speech
             ? SpeechAnalyzerEngine.engineName
             : VocabularyChannel.engineName
@@ -568,7 +581,7 @@ struct EvalRunner {
 
     /// The shipped defaults, not the user's config: a scoreboard row has to mean
     /// the same thing on another machine.
-    private func asrSettings() -> AsrSettings {
+    func asrSettings() -> AsrSettings {
         AsrSettings(locale: "en-US", finalizeTimeoutMs: 1500, engine: .appleLive)
     }
 

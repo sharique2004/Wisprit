@@ -1,0 +1,18 @@
+# category: postal-address
+#
+# Street addresses. Separate from 06-addresses because they exercise a different
+# assertion for the same reason: `expect.refineBypass = has_address` says the AI
+# cage must hand this utterance back untouched. A model that "tidies" a postal
+# address changes a number, and a changed number in an address is not a style
+# regression, it is a parcel that does not arrive.
+#
+# Pace: normal — the speed you would read an address to a courier, not the speed
+# you would dictate it to someone writing it down.
+# Distance: 20-30 cm.
+
+Ship it to 1600 Pennsylvania Avenue Northwest, Washington DC.|bypass=has_address
+The office is at 221B Baker Street, London, and the buzzer is broken.|bypass=has_address
+Send the hardware to 350 Fifth Avenue, floor 34, New York.|bypass=has_address
+My flat is 12A Marlborough Road and there is no lift.|bypass=has_address
+Their registered address is 1 Infinite Loop, Cupertino, California.|bypass=has_address
+Deliver it to unit 7, 45 Wellington Street, Leeds, LS1 4HT.|bypass=has_address

@@ -1,0 +1,30 @@
+# category: numbers-dates
+#
+# Digits, dates, times, currency, percentages and units — the inverse text
+# normalization the deterministic post-process is supposed to do.
+#
+# Read the digit forms the way you would naturally say them: "14th" is
+# "fourteenth", "3:15" is "three fifteen", "$1,200" is "twelve hundred dollars"
+# or "one thousand two hundred dollars", whichever is natural for you. That is
+# why these lines need no `ref=` — the written form IS the target, and your
+# spoken form is the input.
+#
+# `.asr` normalization folds cardinals 0-999 and ordinals 1st-31st both ways
+# (docs/eval/DEFINITIONS.md), so a WER here is not punishing "17" vs
+# "seventeen". CER is, which is the point: this is the formatter's category.
+#
+# Pace: normal. Do not group digits helpfully; say them the way you say them.
+# Distance: 20-30 cm.
+
+The meeting moved to March 14th at 3:15.
+We shipped 17 builds in the last 23 days.
+Revenue was up 11% quarter over quarter.
+Call me back at 4:30 on Tuesday if you get a minute.
+The invoice came to $1,200 including tax.
+It takes about 250 milliseconds on this machine, sometimes 300.
+We are on version 2.4.1 in production and 2.5.0 on staging.
+The deadline is the 31st, so we have nine working days.
+There were 1,048 rows in the export and 3 of them were malformed.
+Cut the timeout from 1500 to 800 and see whether anything breaks.
+The file is 66 megabytes, which is too big to ship in the app.
+Between 2019 and 2024 the headcount went from 12 to 140.

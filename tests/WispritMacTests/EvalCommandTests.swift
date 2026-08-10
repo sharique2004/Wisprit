@@ -13,25 +13,77 @@ final class EvalCommandTests: XCTestCase {
 
     // MARK: - verbs
 
+    /// `record` is the one verb a bare invocation cannot satisfy — it needs a
+    /// script and a speaker, and neither is guessable.
     func testEveryVerbParses() {
-        for verb in EvalCommand.Verb.allCases {
-            XCTAssertEqual(EvalCommand.parse([verb.rawValue]),
-                           .run(EvalCommand.Options(verb: verb)), verb.rawValue)
+        for verb in EvalCommand.Verb.allCases where verb != .record {
+            var expected = EvalCommand.Options(verb: verb)
+            if verb.isInteractive { expected.corpus = EvalCommand.humanCorpus }
+            XCTAssertEqual(EvalCommand.parse([verb.rawValue]), .run(expected), verb.rawValue)
         }
     }
 
-    /// The Phase-2 verbs must say what they are, not "unknown verb". A user who
-    /// read the plan and typed `eval record` needs to learn that it is not built
-    /// yet, not that they mistyped.
-    func testPhaseTwoVerbsRefuseByName() {
-        for verb in ["record", "verify"] {
-            guard case .invalid(let message) = EvalCommand.parse([verb]) else {
-                return XCTFail("\(verb) should not parse")
-            }
-            XCTAssertTrue(message.contains("Phase 2"), message)
-            XCTAssertTrue(message.contains("not implemented yet"), message)
-            XCTAssertTrue(message.contains(verb), message)
+    /// Recording into `tts-samantha` is never what anyone means, and a human
+    /// take landing there would poison the one corpus whose entire job is to be
+    /// admittedly synthetic. So the interactive verbs default elsewhere.
+    func testTheInteractiveVerbsDefaultToTheHumanCorpus() {
+        guard case .run(let verify) = EvalCommand.parse(["verify"]) else {
+            return XCTFail("verify should parse")
         }
+        XCTAssertEqual(verify.corpus, "human-v1")
+
+        guard case .run(let record) =
+                EvalCommand.parse(["record", "--script", "s.txt", "--speaker", "spk01"]) else {
+            return XCTFail("record should parse")
+        }
+        XCTAssertEqual(record.corpus, "human-v1")
+
+        // Every replay verb keeps the synthetic default.
+        for verb in EvalCommand.Verb.allCases where !verb.isInteractive {
+            guard case .run(let options) = EvalCommand.parse([verb.rawValue]) else {
+                return XCTFail(verb.rawValue)
+            }
+            XCTAssertEqual(options.corpus, "tts-samantha", verb.rawValue)
+        }
+    }
+
+    /// The two failures that are only discoverable an hour into a session if
+    /// they are allowed through — that is when the manifest turns out to be
+    /// under the wrong name, or to be missing.
+    func testRecordRefusesWithoutAScriptAndASpeaker() {
+        guard case .invalid(let noScript) = EvalCommand.parse(["record", "--speaker", "spk01"])
+        else { return XCTFail("should not parse") }
+        XCTAssertTrue(noScript.contains("--script"), noScript)
+
+        guard case .invalid(let noSpeaker) = EvalCommand.parse(["record", "--script", "s.txt"])
+        else { return XCTFail("should not parse") }
+        XCTAssertTrue(noSpeaker.contains("--speaker"), noSpeaker)
+
+        // A label that slugs to nothing is no speaker at all.
+        guard case .invalid(let blank) =
+                EvalCommand.parse(["record", "--script", "s.txt", "--speaker", "!!!"])
+        else { return XCTFail("should not parse") }
+        XCTAssertTrue(blank.contains("--speaker"), blank)
+    }
+
+    func testTheRecordingFlags() {
+        var expected = EvalCommand.Options(verb: .record)
+        expected.corpus = "human-v1"
+        expected.script = "tools/eval/scripts/human-v1/01-proper-nouns.txt"
+        expected.speaker = "spk02"
+        expected.mic = "AirPods Pro"
+        expected.split = "dev"
+        expected.out = "/tmp/corpus"
+
+        XCTAssertEqual(EvalCommand.parse([
+            "record", "--script", "tools/eval/scripts/human-v1/01-proper-nouns.txt",
+            "--speaker", "spk02", "--mic", "AirPods Pro", "--split", "dev",
+            "--out", "/tmp/corpus",
+        ]), .run(expected))
+
+        XCTAssertEqual(
+            EvalCommand.parse(["record", "--script=s.txt", "--speaker=spk01", "--split=nope"]),
+            .invalid("--split must be dev|held"))
     }
 
     func testBadVerbs() {

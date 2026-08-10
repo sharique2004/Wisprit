@@ -16,7 +16,17 @@ Implementations: `Sources/WispritEval/Normalize.swift`,
 
 Each corpus entry carries one `ref`: **the text the user wanted in their
 document**, not a phonetic transcript of the audio. So `sharique at gmail dot
-com` is spoken, and `sharique@gmail.com` is the reference.
+com` is spoken, and `sharique@gmail.com` is the reference. The manifest's
+`script` field holds the spoken form when the two differ.
+
+For a human corpus the reference is **what the speaker actually said**, which is
+not always what the script asked them to say. A reader who says "not XML" where
+the script says "not YAML" has otherwise written a permanent error into the
+reference: every WER afterwards is measured against a sentence nobody said, and
+from the outside a reader error and an engine error are indistinguishable.
+`Wisprit eval verify` is the only detector — it shows the reference against a
+real transcript and a person says which side was wrong. Reviewed clips carry
+`verified: true`.
 
 Every stage is scored against that same reference. This is deliberate and it is
 the whole reason the stage table is legible: the raw ASR row includes the
@@ -169,6 +179,45 @@ dictionary changes under the user's hands.
 `corpusSource` is required by the manifest parser and carried into the row so a
 TTS number can never masquerade as an accuracy claim. A mixed corpus reports as
 `tts` if it contains any TTS: an over-broad banner is better than a suppressed one.
+
+## Corpora, and the dev / held split
+
+| corpus | source | what it is for |
+|---|---|---|
+| `tts-samantha` | `tts` | plumbing and regression only. Carries the TTS banner on every row and can never be quoted as an accuracy claim. |
+| `human-v1` | `human` | 131 utterances × 13 categories, read by 3+ speakers. The corpus every real number comes from. |
+
+The recording protocol — how many speakers, which microphone passes, the
+real-conditions pass, and how to read each category — is
+**`tools/eval/scripts/human-v1/README.md`**. It is the operational document;
+this file only defines what the resulting numbers mean.
+
+### The split is by speaker
+
+Every `human-v1` manifest line carries `split`, written by `Wisprit eval record`:
+
+- `spk01` → `dev`
+- every other speaker → `held`
+- `--split dev|held` overrides it, which is for a speaker joining an existing
+  side and for nothing else
+- a line with no `split` (the synthetic corpus) belongs to **neither** — an
+  unsplit clip is never silently counted as held
+
+**Thresholds are tuned on `dev`. Reported numbers come from `held`.** A held-out
+speaker moves to dev only once the thresholds it would inform are frozen; after
+that a new speaker has to be recorded to keep a held set.
+
+Why by speaker and not by utterance: an utterance-level split leaves the same
+person's other 130 clips in the tuning half, so their vowels, their microphone
+and their room leak straight into the held set. The held number then looks
+honest and is not. Every threshold in the accuracy plan — the 0.62 phonetic
+floor for retro-correction, the 0.80 merge score, the 0.70 auto-learn bar, the
+plausibility band — is exactly the kind of number that fits itself to one voice
+if the split lets it.
+
+A row produced from a filtered or single-split run says so in its notes. A `dev`
+number and a `held` number are not comparable with each other and neither is
+comparable with a whole-corpus one.
 
 ## Configurations
 

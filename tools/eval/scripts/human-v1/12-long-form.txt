@@ -1,0 +1,26 @@
+# category: long-form
+#
+# Three pieces of 45-90 seconds. Everything else in human-v1 is two to five
+# seconds long, which means everything else measures the pipeline's behaviour on
+# short utterances and nothing measures what happens after that.
+#
+# What only these can catch:
+#   - the finalize budget under a long hold, where a 1500 ms timeout is a
+#     different proposition than it is on a three-second clip
+#   - drift: an engine that is fine for ten seconds and degrades at forty
+#   - the plausibility band in the refine cage, which is a ratio and therefore
+#     behaves differently at 200 words than at 8
+#   - micro-averaging itself — a 190-word clip carries as much weight as
+#     forty short ones, which is exactly the behaviour the micro rule is for
+#
+# Pace: conversational, and DO NOT restart if you stumble. A stumble in a
+# 70-second take is real data; re-recording until it is clean produces a corpus
+# of performances rather than of speech. Only re-take if you lost your place
+# entirely or the sentence became something else.
+# Breathe normally. A held breath at second 50 changes the level and the corpus
+# should contain that.
+# Distance: 20-30 cm.
+
+So the plan for this week is to land the eval harness in Wisprit first, then fix the retention race, and after that I want to look at the empty rate before we touch anything in the vocabulary channel. The reason for that order is that the harness gives us a before number, and without a before number every change after it is just a story we tell ourselves. The retention race is second because the reconciler is going to read that buffer, and if it can hand us the wrong utterance's audio then everything built on top of it inherits the bug. The empty rate is third because I suspect most of it is already fixed and I do not want to spend two days proving that.|terms=Wisprit
+I spent most of yesterday reading through how the insertion ladder actually decides which rung to use, and I think the thing that surprised me is how much of it is about the target application rather than about us. If the app has an input method connection we can stream into it directly, which is fast and undoable, and if it does not we fall back to pasting, which means touching the clipboard, which means restoring it afterwards, which means a delay that somebody has to have chosen a number for. And then there is the case where the field is secure, where we do nothing at all and say so. None of that is complicated on its own but the combination is where the bugs live, and the tests we have cover each rung and not the transitions between them. I want to write the transition tests before I change any of it.
+Let me try to say the whole argument out loud, because I keep going in circles when I write it down. The claim is that raw word error rate has converged, so nobody wins on the acoustic model anymore, and the difference between a dictation tool people love and one they abandon is everything that happens after the transcript exists. That means the names they use, which a general model has never seen, and the formatting they expect, which depends on where they are typing, and the corrections they make afterwards, which nobody is currently learning from. If that is right then the roadmap writes itself: measure the gap honestly, fix the two defects that would poison anything built on top, get real human audio so the thresholds are tuned on something real, and only then start building the levers. If it is wrong, the harness will say so within a week, which is the whole reason it goes first.
