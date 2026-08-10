@@ -11,9 +11,16 @@
 # terribly here by design, and the drop from raw to final is what the cleanup
 # stages are worth.
 #
-# ds-04 and ds-11 are the self-correction cases and they are the hard ones. The
-# target keeps the LAST thing you said, not the first. A pipeline that keeps
-# both has produced a sentence that means something different.
+# ds-04, ds-11 and ds-13 to ds-16 are the self-correction cases and they are the
+# hard ones. The target keeps the LAST thing you said, not the first. A pipeline
+# that keeps both has produced a sentence that means something different.
+#
+# ds-16 is the opposite assertion and it has no `ref=` on purpose: a weekday and
+# a clock time are not the same kind of thing, so "Thursday, I mean half past
+# three" is a clarification and not a replacement, and the whole line has to
+# survive. Read it as a clarification, not as a correction — if you say it with
+# the falling, cancelling intonation of ds-04 you are recording a different
+# sentence from the one the reference describes.
 #
 # Pace: read them exactly as written, at speaking speed, and let the "um" be a
 # real "um" — a crisply articulated filler is not the same acoustic event as a
@@ -32,3 +39,7 @@ And then we, sorry, and then it just retries forever.|ref=And then it just retri
 Right so, um, where were we, yeah, the timeout.|ref=Right so, where were we, yeah, the timeout.
 Send it to Sharique, actually no, send it to Khatri instead.|ref=Send it to Khatri instead.|terms=Khatri
 I think, uh, I think we should just, you know, leave it as it is.|ref=I think we should just leave it as it is.
+I want to have a meeting with person x on Thursday, umm, no actually Friday.|ref=I want to have a meeting with person x on Friday.
+Let us move the standup to half past nine, no actually quarter past ten.|ref=Let us move the standup to quarter past ten.
+Move the demo to Monday, no actually Tuesday, then push the release to March, sorry, April.|ref=Move the demo to Tuesday, then push the release to April.
+We meet Thursday, I mean half past three on Thursday.

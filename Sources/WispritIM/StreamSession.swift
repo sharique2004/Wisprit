@@ -42,9 +42,18 @@ public final class IMStreamSession {
 
     public var client: IMClientSeam?
 
-    public init(gate: IMGenerationGate = IMGenerationGate(), client: IMClientSeam? = nil) {
+    /// The newest wire version this session admits. Injectable so the stale-input-
+    /// method case — an old `WispritIM.app` still installed in
+    /// `~/Library/Input Methods` while the app has moved on — is a testable fact
+    /// rather than a story about a build nobody has.
+    public let supportedWireVersion: Int
+
+    public init(gate: IMGenerationGate = IMGenerationGate(),
+                client: IMClientSeam? = nil,
+                supportedWireVersion: Int = WispritIMWire.version) {
         self.gate = gate
         self.client = client
+        self.supportedWireVersion = supportedWireVersion
     }
 
     public var capabilities: IMClientCapabilities? { client?.capabilities }
@@ -79,7 +88,7 @@ public final class IMStreamSession {
     /// Handle one message. Returns the event to send back, if any.
     @discardableResult
     public func handle(_ message: IMCommandMessage) -> IMEventMessage? {
-        guard WispritIMWire.isSupported(message.wireVersion) else {
+        guard WispritIMWire.isSupported(message.wireVersion, by: supportedWireVersion) else {
             return reject(message, detail: .notSupported,
                           note: "wire version \(message.wireVersion) unsupported")
         }
@@ -108,6 +117,158 @@ public final class IMStreamSession {
         case .endSession(let commit):
             return endSession(commit: commit, generation: message.generation)
         }
+    }
+
+    // MARK: Reads (wire v2)
+
+    /// Answer a read-back. Never writes, never returns an `IMEvent`, and never
+    /// touches the tier — a read that could not be answered must not change where
+    /// the user's next words go.
+    ///
+    /// `nil` means "this build cannot represent the question", which is exactly
+    /// what an input method older than the read channel does with these bytes: it
+    /// fails to decode them and says nothing. Modelling the refusal as silence
+    /// rather than as an error reply keeps the two indistinguishable to the app,
+    /// which is what makes "the app degrades to no-signal" a single code path
+    /// instead of two.
+    public func handle(_ message: IMReadMessage) -> IMSnapshotMessage? {
+        guard WispritIMWire.isSupported(message.wireVersion, by: supportedWireVersion) else {
+            return nil
+        }
+
+        let generation = message.generation
+        switch gate.admitRead(generation) {
+        case .accept:
+            break
+        case .rejectStale:
+            // Answered, but with nothing in it: a read for a generation we are
+            // not serving must not carry one character out of the field.
+            return unavailable(message.read, generation: generation, detail: .staleGeneration)
+        case .rejectNoSession:
+            return unavailable(message.read, generation: generation, detail: .noSession)
+        }
+
+        guard let client else {
+            return unavailable(message.read, generation: generation, detail: .noClient)
+        }
+        // Reads go through `stringFromRange:`, which returns nothing without
+        // TSMDocumentAccess. Saying so is more useful than an empty window that
+        // looks like an empty field.
+        guard client.supportsDocumentAccess else {
+            return unavailable(message.read, generation: generation, detail: .noDocumentAccess)
+        }
+
+        switch message.read {
+        case .context:
+            return .contextSnapshot(generation: generation, readContext(client))
+        case .committed:
+            return .committedSnapshot(generation: generation, readCommitted(client))
+        }
+    }
+
+    /// The bounded window around the insertion point.
+    ///
+    /// One read, not three: the document can change between calls, and a
+    /// `before` from one moment spliced onto an `after` from another is a
+    /// sentence the user never wrote.
+    private func readContext(_ client: IMClientSeam) -> IMContextSnapshot {
+        let length = client.documentLength()
+        guard length > 0 else { return .read(before: "", selected: "", after: "") }
+
+        let selection = client.selectedRange()
+        let caret = selection.location == NSNotFound ? length : selection.location
+        let selectionStart = min(max(0, caret), length)
+        let selectionLength = selection.location == NSNotFound
+            ? 0 : min(max(0, selection.length), length - selectionStart)
+        let selectionEnd = selectionStart + selectionLength
+
+        let windowStart = max(0, selectionStart - IMContextWindow.before)
+        let windowEnd = min(length, selectionEnd + IMContextWindow.after)
+        guard windowEnd > windowStart else { return .read(before: "", selected: "", after: "") }
+
+        guard let read = client.string(in: NSRange(location: windowStart,
+                                                   length: windowEnd - windowStart)) else {
+            return .unavailable(.readFailed)
+        }
+        // `actualRange` is the coordinate base, never the request: a client is
+        // allowed to hand back less than we asked for (Chromium serves a cached
+        // window around the selection).
+        let text = read.text as NSString
+        let base = read.actual.location == NSNotFound ? windowStart : read.actual.location
+        let usable = IMStreamSession.alignedToCharacters(NSRange(location: 0, length: text.length),
+                                                         in: text)
+        // Clip in DOCUMENT coordinates and only then rebase. `NSIntersectionRange`
+        // is unsigned underneath, so a range whose location went negative on the
+        // way to local coordinates comes back empty instead of clamped — which is
+        // exactly the client-returned-a-narrower-window case.
+        let readable = NSRange(location: base + usable.location, length: usable.length)
+
+        func slice(_ absolute: NSRange) -> String {
+            let clipped = NSIntersectionRange(absolute, readable)
+            guard clipped.length > 0 else { return "" }
+            return text.substring(with: NSRange(location: clipped.location - base,
+                                                length: clipped.length))
+        }
+
+        return .read(
+            before: slice(NSRange(location: windowStart, length: selectionStart - windowStart)),
+            selected: slice(NSRange(location: selectionStart, length: selectionLength)),
+            after: slice(NSRange(location: selectionEnd, length: windowEnd - selectionEnd)))
+    }
+
+    /// Is the run this session committed still exactly what we committed?
+    ///
+    /// Located by content and only accepted when it occurs exactly once — the
+    /// same rule `applyEdit` uses, deliberately shared (`RetroEditPlanner.locate`)
+    /// so a correction and an observation can never disagree about which text is
+    /// ours. Only that run travels back to the app; the rest of the document is
+    /// read here and stays here.
+    private func readCommitted(_ client: IMClientSeam) -> IMCommittedSnapshot {
+        guard !committedText.isEmpty, committedRange != nil else {
+            return .unavailable(.unknown)
+        }
+        guard let window = readWindow(client) else { return .unavailable(.readFailed) }
+
+        switch RetroEditPlanner.locate(committed: committedText, in: window) {
+        case .found(let range):
+            // Read the run back out of the document rather than replaying what we
+            // remember writing: the app is then comparing against the field.
+            return .unchanged((window.text as NSString).substring(with: range))
+        case .gone:
+            // Our exact text is not there any more, so an edit is a fact. Which
+            // edit is not, and inventing one is how a flywheel learns nonsense.
+            return .changed
+        case .ambiguous:
+            return .unavailable(.unknown)
+        }
+    }
+
+    private func unavailable(_ read: IMRead,
+                             generation: UInt64,
+                             detail: IMReadDetail) -> IMSnapshotMessage {
+        switch read {
+        case .context:
+            return .contextSnapshot(generation: generation, .unavailable(detail))
+        case .committed:
+            return .committedSnapshot(generation: generation, .unavailable(detail))
+        }
+    }
+
+    /// Drop a stranded half of a surrogate pair from either end of a window we
+    /// cut ourselves.
+    ///
+    /// The 400/200 caps are ours, so they can land in the middle of an emoji;
+    /// slicing there yields a lone surrogate, which becomes U+FFFD the moment it
+    /// is a `String`. Shrinks only — the cap is a promise, not a target.
+    private static func alignedToCharacters(_ range: NSRange, in text: NSString) -> NSRange {
+        var start = range.location
+        var end = NSMaxRange(range)
+        guard start >= 0, end <= text.length, end > start else {
+            return NSRange(location: max(0, min(start, text.length)), length: 0)
+        }
+        if UTF16.isTrailSurrogate(text.character(at: start)) { start += 1 }
+        if end > start, UTF16.isLeadSurrogate(text.character(at: end - 1)) { end -= 1 }
+        return NSRange(location: start, length: max(0, end - start))
     }
 
     // MARK: Individual commands

@@ -15,6 +15,14 @@ let package = Package(
             "WispritCorrections", "WispritPersistence", "WispritRefine", "WispritEngine",
         ]),
     ],
+    dependencies: [
+        // Parakeet TDT v3 (vocabulary-channel replacement, spike-gated; see
+        // docs/research/spikes-parakeet.md). Pinned to the MeetingScribe-
+        // validated revision (v0.15.5-32). Build-time fetch only — runtime
+        // model downloads stay an explicit user action in ParakeetModelStore.
+        .package(url: "https://github.com/FluidInference/FluidAudio.git",
+                 revision: "5390df9752c8fc583596018360c5fd70d6fa6c75"),
+    ],
     targets: [
         // Shared foundation — owned by the orchestrator, frozen for agents.
         .target(name: "WispritKit", swiftSettings: v5),
@@ -29,6 +37,15 @@ let package = Package(
         // Accuracy measurement: WER/CER/term-recall scoring, corpus model, scoreboard,
         // refine battery cases. Pure — no audio, no models, no network.
         .target(name: "WispritEval", dependencies: ["WispritKit"], swiftSettings: v5),
+        // Opt-in context awareness: candidate extraction + policy. Consent-first,
+        // default-off, per-utterance only; readers live in the platform shells.
+        .target(name: "WispritContext", dependencies: ["WispritKit", "WispritCorrections"], swiftSettings: v5),
+        // Parakeet vocabulary channel. NOT a WispritMac dependency yet — the
+        // transitive binary framework must not ride every install while the
+        // ship decision is human-corpus-gated (spikes-parakeet.md).
+        .target(name: "WispritParakeet",
+                dependencies: ["WispritKit", .product(name: "FluidAudio", package: "FluidAudio")],
+                swiftSettings: v5),
 
         // Apple Intelligence polish modes (replaces the Python claude-CLI polish; on-device only).
         .target(name: "WispritPolish", dependencies: ["WispritKit", "WispritRefine"], swiftSettings: v5),
@@ -45,6 +62,7 @@ let package = Package(
             dependencies: [
                 "WispritKit", "WispritPostProcess", "WispritDictionary", "WispritCorrections",
                 "WispritPersistence", "WispritRefine", "WispritEngine", "WispritEval",
+                "WispritContext",
                 "WispritMacInput", "WispritMacUI", "WispritPolish", "WispritIMProtocol",
             ],
             swiftSettings: v5),
@@ -57,6 +75,8 @@ let package = Package(
         .testTarget(name: "WispritPersistenceTests", dependencies: ["WispritPersistence"], path: "tests/WispritPersistenceTests", swiftSettings: v5),
         .testTarget(name: "WispritRefineTests", dependencies: ["WispritRefine", "WispritEval"], path: "tests/WispritRefineTests", swiftSettings: v5),
         .testTarget(name: "WispritEvalTests", dependencies: ["WispritEval"], path: "tests/WispritEvalTests", swiftSettings: v5),
+        .testTarget(name: "WispritContextTests", dependencies: ["WispritContext"], path: "tests/WispritContextTests", swiftSettings: v5),
+        .testTarget(name: "WispritParakeetTests", dependencies: ["WispritParakeet"], path: "tests/WispritParakeetTests", swiftSettings: v5),
         .testTarget(name: "WispritEngineTests", dependencies: ["WispritEngine"], path: "tests/WispritEngineTests", swiftSettings: v5),
         .testTarget(name: "WispritMacInputTests", dependencies: ["WispritMacInput"], path: "tests/WispritMacInputTests", swiftSettings: v5),
         .testTarget(name: "WispritMacUITests", dependencies: ["WispritMacUI"], path: "tests/WispritMacUITests", swiftSettings: v5),

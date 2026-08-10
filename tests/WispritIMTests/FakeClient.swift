@@ -41,6 +41,10 @@ final class FakeClient: IMClientSeam {
     var readsFail: Bool = false
     /// Simulates Chromium's cached read window: reads are clipped to this range.
     var readWindow: NSRange?
+    /// A real selection (the user highlighted text before speaking), or an
+    /// `NSNotFound` location for a client that will not say where the caret is.
+    /// Nil means a plain caret at `caret`, which is the ordinary case.
+    var selection: NSRange?
 
     // Observable state
     private(set) var ops: [Op] = []
@@ -66,7 +70,7 @@ final class FakeClient: IMClientSeam {
 
     func documentLength() -> Int { document.length + (marked as NSString).length }
 
-    func selectedRange() -> NSRange { NSRange(location: caret, length: 0) }
+    func selectedRange() -> NSRange { selection ?? NSRange(location: caret, length: 0) }
 
     func markedRange() -> NSRange {
         marked.isEmpty ? NSRange(location: NSNotFound, length: 0)

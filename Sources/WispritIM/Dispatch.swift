@@ -12,6 +12,10 @@ public enum IMDispatch {
         /// Handled. The payload is the event to send back, if the command
         /// produced one.
         case reply(WispritIMPayload?)
+        /// A read-back answer. There is nothing to reply with on the command
+        /// port — reads are posted, so nobody is holding it open — so this goes
+        /// to the app's own port like every other unsolicited message.
+        case emit(WispritIMPayload)
         /// The bytes were not a command this build understands. Nothing was done
         /// to the user's text — which is the only acceptable response to a
         /// message we cannot read.
@@ -19,6 +23,19 @@ public enum IMDispatch {
     }
 
     public static func handle(_ payload: WispritIMPayload, session: IMStreamSession) -> Outcome {
+        if payload.kind == .read {
+            let message: IMReadMessage
+            do {
+                message = try payload.read()
+            } catch {
+                return .undecodable("\(error)")
+            }
+            guard let snapshot = session.handle(message),
+                  let answer = try? WispritIMPayload(snapshot: snapshot)
+            else { return .reply(nil) }
+            return .emit(answer)
+        }
+
         let message: IMCommandMessage
         do {
             message = try payload.command()

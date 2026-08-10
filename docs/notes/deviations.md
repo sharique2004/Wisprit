@@ -127,3 +127,50 @@ reads and the third native appendix in `Settings.defaults` (append-only, after
   `applied` is finally known. A plan whose deferred application is dropped
   because the user started speaking again writes **no** row, rather than one
   claiming `applied: false` for an edit that was never attempted.
+
+## Self-correction beyond the Python markers (2026-08-10)
+
+SPEC §postprocessing Tier-1 #5 scopes self-correction to "explicit markers
+only … ambiguous cases pass through verbatim", and `postprocess.py` shipped two
+of them: `X no wait Y` and `scratch that`. The engine now lives in
+`WispritPostProcess/SelfCorrection.swift` (stage 5 is a one-line caller) and
+adds a second tier. The Python-generated `Goldens.swift` / `FuzzGoldens.swift`
+are untouched and still literal Python output; the new behavior is pinned by
+`SelfCorrectionTests.swift`, the `EmojiCommandTests` precedent.
+
+- **Closed-class pairs are the new tier.** "`<X> <connective> <Y>`" keeps Y only
+  when X and Y are members of the SAME closed class — weekday, month, clock
+  time, cardinal/ordinal number, relative day. "Thursday umm no actually Friday"
+  → "Friday". Requiring both sides to be the same *kind of thing* is what makes
+  the weak connectives safe: a bare "actually", "sorry" or "no" is a connective
+  inside that sandwich and nowhere else, so "that's actually great" and "I
+  actually think Friday works" are untouched. Fillers are tolerated anywhere in
+  the joint because the live path runs this on raw partials, before stage 1.
+- **Cross-class is a veto, not a fall-through.** "Thursday no actually 3
+  o'clock" does not type-check as a correction — you cannot correct a weekday
+  into a time — so the joint passes verbatim AND no general marker gets a second
+  look at it. The one exemption is "no wait": its replacement span is a
+  Python-parity contract, so it still deletes whatever it is handed
+  ("Thursday no wait 3 o'clock" → "3 o'clock"). The asymmetry is deliberate and
+  pinned by `testLegacyMarkerIsExemptFromTheCrossClassVeto`.
+- **Two new general markers, one new guard.** "no actually" and "I mean" reuse
+  the Python span exactly (the single word before the marker, the marker, the
+  joint whitespace, duplicate function word collapsed). They add a
+  discourse-hedge guard the legacy marker does not need: "so I mean we should
+  go" and "well no actually that's fine" are conversation, not correction, so a
+  function word in front of the marker vetoes the rewrite. Bare "actually" is
+  NOT a general marker at any price — tier one covers the safe cases.
+- **Unconditional, like the rule it extends.** Self-correction has no settings
+  key in Python or here, so the new tier did not get one either: same product
+  surface, not a new toggle. The live path below inherits that for the same
+  reason — a preview that could disagree with the text it previews is worse
+  than no preview.
+- **The live path is display-only.** `LivePartialCorrection` runs the engine on
+  every partial at the single fan-out in `SessionController.begin`, so the
+  correction is already in the pill bubble and the input method's marked text
+  while the user is still speaking. It edits nothing else: the session keeps no
+  partial state, so finalize still runs the whole pipeline over the RAW final,
+  and the corrections stage, the refine prompt, `history` and `metrics`'
+  `chars`/`raw_chars` all still read exactly what the engine heard. Partials
+  longer than 2 000 characters are shown verbatim rather than scanned on the
+  session thread; finalize corrects them a moment later either way.

@@ -9,9 +9,19 @@ import Foundation
 /// never desync the archiver, and an old build meeting a new payload sees a
 /// version it does not support instead of a half-decoded struct.
 public final class WispritIMPayload: NSObject, NSSecureCoding, @unchecked Sendable {
+    /// Which conversation the bytes belong to. A receiver that does not know a
+    /// kind fails to decode the archive at all (`init?(coder:)` returns nil), so
+    /// a v1 input method meeting a v2 read does nothing whatsoever — which is
+    /// precisely the degradation the read channel wants.
     public enum Kind: String, Sendable {
+        /// app → IM, wire v1: writes into the field.
         case command
+        /// IM → app, wire v1: what happened to the field.
         case event
+        /// app → IM, wire v2: read-only questions (`IMRead`).
+        case read
+        /// IM → app, wire v2: the answers (`IMSnapshot`).
+        case snapshot
     }
 
     private enum Key {
@@ -44,6 +54,18 @@ public final class WispritIMPayload: NSObject, NSSecureCoding, @unchecked Sendab
                   json: try WispritIMPayload.encoder.encode(event))
     }
 
+    public convenience init(read: IMReadMessage) throws {
+        self.init(wireVersion: read.wireVersion,
+                  kind: .read,
+                  json: try WispritIMPayload.encoder.encode(read))
+    }
+
+    public convenience init(snapshot: IMSnapshotMessage) throws {
+        self.init(wireVersion: snapshot.wireVersion,
+                  kind: .snapshot,
+                  json: try WispritIMPayload.encoder.encode(snapshot))
+    }
+
     public enum DecodeError: Error, Equatable {
         case unsupportedVersion(Int)
         case wrongKind(expected: String, got: String)
@@ -51,34 +73,32 @@ public final class WispritIMPayload: NSObject, NSSecureCoding, @unchecked Sendab
     }
 
     public func command() throws -> IMCommandMessage {
-        guard WispritIMWire.isSupported(wireVersion) else {
-            throw DecodeError.unsupportedVersion(wireVersion)
-        }
-        guard kind == .command else {
-            throw DecodeError.wrongKind(expected: Kind.command.rawValue, got: kind.rawValue)
-        }
-        do {
-            let message = try WispritIMPayload.decoder.decode(IMCommandMessage.self, from: json)
-            guard WispritIMWire.isSupported(message.wireVersion) else {
-                throw DecodeError.unsupportedVersion(message.wireVersion)
-            }
-            return message
-        } catch let error as DecodeError {
-            throw error
-        } catch {
-            throw DecodeError.malformed("\(error)")
-        }
+        try decode(IMCommandMessage.self, kind: .command)
     }
 
     public func event() throws -> IMEventMessage {
+        try decode(IMEventMessage.self, kind: .event)
+    }
+
+    public func read() throws -> IMReadMessage {
+        try decode(IMReadMessage.self, kind: .read)
+    }
+
+    public func snapshot() throws -> IMSnapshotMessage {
+        try decode(IMSnapshotMessage.self, kind: .snapshot)
+    }
+
+    /// Version, then kind, then contents — in that order, so a message from a
+    /// build we cannot understand is refused before anything is parsed out of it.
+    private func decode<M: IMWireMessage>(_ type: M.Type, kind expected: Kind) throws -> M {
         guard WispritIMWire.isSupported(wireVersion) else {
             throw DecodeError.unsupportedVersion(wireVersion)
         }
-        guard kind == .event else {
-            throw DecodeError.wrongKind(expected: Kind.event.rawValue, got: kind.rawValue)
+        guard kind == expected else {
+            throw DecodeError.wrongKind(expected: expected.rawValue, got: kind.rawValue)
         }
         do {
-            let message = try WispritIMPayload.decoder.decode(IMEventMessage.self, from: json)
+            let message = try WispritIMPayload.decoder.decode(M.self, from: json)
             guard WispritIMWire.isSupported(message.wireVersion) else {
                 throw DecodeError.unsupportedVersion(message.wireVersion)
             }

@@ -57,6 +57,32 @@ final class DispatchTests: XCTestCase {
         XCTAssertTrue(client.ops.isEmpty)
     }
 
+    func testAReadArrivesAsAPayloadAndComesBackAsASnapshotToPost() throws {
+        let client = FakeClient(document: "dear Sharique, ", caret: 15)
+        let session = IMStreamSession()
+        session.clientAcquired(client)
+        session.handle(.beginSession(generation: 5))
+
+        let payload = try roundTrip(WispritIMPayload(read: .readContext(generation: 5)))
+        guard case .emit(let answer) = IMDispatch.handle(payload, session: session) else {
+            return XCTFail("a read is answered on the app's port, not on the command port")
+        }
+
+        XCTAssertEqual(try roundTrip(answer).snapshot().snapshot,
+                       .contextSnapshot(.read(before: "dear Sharique, ", selected: "", after: "")))
+        XCTAssertTrue(client.ops.isEmpty, "reading wrote nothing")
+    }
+
+    func testASnapshotPayloadSentToTheInputMethodIsRefused() throws {
+        let session = IMStreamSession()
+        let payload = try WispritIMPayload(snapshot: .committedSnapshot(generation: 1,
+                                                                        current: "",
+                                                                        detail: .unknown))
+        guard case .undecodable = IMDispatch.handle(payload, session: session) else {
+            return XCTFail("a snapshot is not something the input method answers")
+        }
+    }
+
     func testAnEventPayloadSentAsACommandIsRefused() throws {
         let session = IMStreamSession()
         let payload = try WispritIMPayload(event: .clientLost(generation: 1, reason: "x"))

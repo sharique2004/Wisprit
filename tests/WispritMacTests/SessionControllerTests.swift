@@ -44,7 +44,10 @@ final class SessionControllerTests: XCTestCase {
              enabled: Bool = true,
              debounceMs: Double = 150,
              reconcile: Bool = false,
-             vocabularyRetro: Bool = true) {
+             vocabularyRetro: Bool = true,
+             // Swap in a different pill for the tests whose subject is what the
+             // bubble renders rather than which calls it received.
+             pillPort: (any PillPort)? = nil) {
             inserter.history = history
             inserter.asr = asr
             session = SessionController(
@@ -55,7 +58,7 @@ final class SessionControllerTests: XCTestCase {
                 history: history,
                 metrics: metrics,
                 refiner: useRefiner ? refiner : nil,
-                pill: pill,
+                pill: pillPort ?? pill,
                 vocabulary: vocabulary,
                 corrections: dictionary,
                 corrector: corrector,
@@ -118,6 +121,87 @@ final class SessionControllerTests: XCTestCase {
         h.session.dispatch(HotkeyEvent(.press, ts: 0))
 
         XCTAssertEqual(h.pill.partials, ["hello", "hello world"])
+    }
+
+    // MARK: - live self-correction
+
+    /// The feature, on the surface that shows it when the field cannot: the
+    /// bubble says "friday" while the user is still holding the key.
+    func testTheSelfCorrectionReachesThePillBubbleWhileTheUserIsStillSpeaking() {
+        let pill = ModelPill()
+        let h = Harness(pillPort: pill)
+
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        for partial in LiveCorrectionScript.partials { h.asr.deliverPartial(partial) }
+
+        XCTAssertEqual(pill.bubble, "x on friday",
+                       "the rendered tail — PartialTail's window over the corrected text")
+        XCTAssertEqual(pill.partials.last, LiveCorrectionScript.corrected)
+        XCTAssertFalse(pill.bubble.contains("thuersday"))
+        // Verbatim-first: every partial before the marker completes is passed
+        // through untouched, because until "actually friday" lands there is no
+        // unambiguous correction to make.
+        XCTAssertEqual(Array(pill.partials.dropLast()),
+                       Array(LiveCorrectionScript.partials.dropLast()))
+    }
+
+    /// Partials arrive cumulatively-windowed and are corrected from scratch each
+    /// time, so the same partial twice is the same tail twice — no flicker, no
+    /// second bite at an already-resolved correction.
+    func testRepeatingThePartialLeavesTheCorrectedTailWhereItIs() {
+        let pill = ModelPill()
+        let h = Harness(pillPort: pill)
+
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        for partial in LiveCorrectionScript.partials { h.asr.deliverPartial(partial) }
+        h.asr.deliverPartial(LiveCorrectionScript.partials[3])
+        h.asr.deliverPartial(LiveCorrectionScript.corrected)
+
+        XCTAssertEqual(pill.bubble, "x on friday")
+        XCTAssertEqual(pill.partials.suffix(3),
+                       [LiveCorrectionScript.corrected, LiveCorrectionScript.corrected,
+                        LiveCorrectionScript.corrected])
+    }
+
+    /// The regression that matters: the preview is a preview. Finalize re-runs
+    /// the whole pipeline on the RAW final, so the corrected display text must
+    /// not reach the corrections/refine input, history, or `raw_chars`.
+    func testTheDisplayedCorrectionNeverLeaksIntoTheFinalizedText() {
+        let raw = "I want to have a meeting with person x on thuersday umm no actually friday"
+        let pill = ModelPill()
+        let h = Harness(pillPort: pill)
+        h.asr.result = UtteranceResult(text: raw, engine: "apple_live", finalizeMs: 130)
+
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        for partial in LiveCorrectionScript.partials { h.asr.deliverPartial(partial) }
+        h.session.dispatch(HotkeyEvent(.release, ts: 1.0))
+
+        XCTAssertEqual(h.refiner.lastInput, raw,
+                       "refine is handed what the engine heard, not what the pill showed")
+        XCTAssertEqual(h.metrics.last?.rawChars, raw.count)
+        XCTAssertEqual(h.metrics.last?.chars, raw.count)
+        // …and the finalize pass makes the same correction on its own, from the
+        // raw text, which is why nothing was lost by keeping the display out of it.
+        XCTAssertEqual(h.inserter.inserted,
+                       ["I want to have a meeting with person x on friday"])
+        XCTAssertEqual(h.history.added.map(\.text), h.inserter.inserted)
+    }
+
+    /// The budget. A pathological partial is shown verbatim rather than scanned
+    /// on the session thread; finalize still fixes it.
+    func testAPathologicalPartialIsShownVerbatimRatherThanCorrected() {
+        let h = Harness()
+        let filler = String(repeating: "word ", count: 500)     // 2 500 characters
+        let tail = "on thuersday umm no actually friday"
+        h.asr.partials = [filler + tail]
+
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+
+        XCTAssertGreaterThan(filler.count + tail.count, LivePartialCorrection.maxCharacters)
+        XCTAssertEqual(h.pill.partials, [filler + tail],
+                       "past the cap the tail passes through untouched")
+        XCTAssertEqual(LivePartialCorrection.display("on thuersday umm no actually friday"),
+                       "on friday", "…and anything inside it is still corrected")
     }
 
     // MARK: - debounce

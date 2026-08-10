@@ -1,6 +1,6 @@
 # human-v1 — the recording protocol
 
-131 utterances across 13 files, read aloud by real people into the real
+135 utterances across 13 files, read aloud by real people into the real
 microphone path. This corpus is what closes spike S4: every accuracy number
 Wisprit has published so far was measured on `say -v Samantha`, and a synthetic
 voice is a plumbing check, not evidence.
@@ -70,7 +70,7 @@ thing we are actually competing on.
 
 Pass 3, concretely:
 
-- **Subset**: files 01, 02, 03, 04, 06, 11 and one long-form piece — roughly 60
+- **Subset**: files 01, 02, 03, 04, 06, 11 and one long-form piece — roughly 70
   utterances. The homophones and the number formatting do not change with the
   room; the proper nouns, the product terms and the disfluent speech do.
 - **Background**: music at conversational volume, or a café recording, or an
@@ -180,12 +180,12 @@ the test suite, so a typo here fails `swift test` and not a recording session.
 | `08-spelled-runs.txt` | `spelled-runs` | 12 | `has_letter_run`; J-S-O-N and K-R-Z-Y-S-Z-T-O-F |
 | `09-numbers-dates.txt` | `numbers-dates` | 12 | the formatter's category |
 | `10-spoken-commands.txt` | `spoken-commands` | 10 | the obedience traps |
-| `11-disfluent-speech.txt` | `disfluent-speech` | 12 | how people actually talk |
+| `11-disfluent-speech.txt` | `disfluent-speech` | 16 | how people actually talk; ds-13…ds-16 are the self-correction pairs |
 | `12-long-form.txt` | `long-form` | 3 | 45-90 seconds each |
 | `13-adversarial-quiet.txt` | `adversarial-quiet` | 8 | instructions buried in ordinary dictation |
 
-**131 utterances.** One internal pass and one Bluetooth pass per speaker is 262
-clips; three speakers plus the real-conditions subset is a little over 900.
+**135 utterances.** One internal pass and one Bluetooth pass per speaker is 270
+clips; three speakers plus the real-conditions subset is a little over 1000.
 Budget about 25 minutes per full pass, plus 10 for `verify`.
 
 ## Where it lands

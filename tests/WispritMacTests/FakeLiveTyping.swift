@@ -59,6 +59,15 @@ final class FakeIMPeer: LiveTypingPeer, @unchecked Sendable {
         return commands.last { $0.command.name == name }
     }
 
+    /// Every provisional tail the input method was handed, in order.
+    var volatileTails: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return commands.compactMap {
+            guard case .updateVolatile(let tail) = $0.command else { return nil }
+            return tail
+        }
+    }
+
     func count(of name: String) -> Int {
         lock.lock(); defer { lock.unlock() }
         return commands.filter { $0.command.name == name }.count

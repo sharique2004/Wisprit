@@ -3,19 +3,19 @@
   {
    "bands": [
     {
-     "accepted": 0.142857,
+     "accepted": 0.174292,
      "metric": "wer",
      "stage": "raw",
      "tolerance": 0.015
     },
     {
-     "accepted": 0.135468,
+     "accepted": 0.165577,
      "metric": "wer",
      "stage": "final",
      "tolerance": 0.015
     },
     {
-     "accepted": 0.084777,
+     "accepted": 0.135697,
      "metric": "cer",
      "stage": "final",
      "tolerance": 0.015
@@ -27,7 +27,7 @@
      "tolerance": 0.03
     },
     {
-     "accepted": 0.295455,
+     "accepted": 0.26,
      "metric": "zeroEdit",
      "stage": "final",
      "tolerance": 0.05
@@ -39,13 +39,13 @@
   {
    "bands": [
     {
-     "accepted": 0.098522,
+     "accepted": 0.132898,
      "metric": "wer",
      "stage": "final",
      "tolerance": 0.015
     },
     {
-     "accepted": 0.074294,
+     "accepted": 0.126324,
      "metric": "cer",
      "stage": "final",
      "tolerance": 0.015
@@ -57,7 +57,7 @@
      "tolerance": 0.06
     },
     {
-     "accepted": 0.340909,
+     "accepted": 0.3,
      "metric": "zeroEdit",
      "stage": "final",
      "tolerance": 0.05
@@ -69,13 +69,13 @@
   {
    "bands": [
     {
-     "accepted": 0.098522,
+     "accepted": 0.11329,
      "metric": "wer",
      "stage": "final",
      "tolerance": 0.035
     },
     {
-     "accepted": 0.0561,
+     "accepted": 0.081907,
      "metric": "cer",
      "stage": "final",
      "tolerance": 0.035
@@ -87,7 +87,7 @@
      "tolerance": 0.09
     },
     {
-     "accepted": 0.386364,
+     "accepted": 0.36,
      "metric": "zeroEdit",
      "stage": "final",
      "tolerance": 0.06
@@ -99,13 +99,13 @@
   {
    "bands": [
     {
-     "accepted": 0.068966,
+     "accepted": 0.087146,
      "metric": "wer",
      "stage": "final",
      "tolerance": 0.035
     },
     {
-     "accepted": 0.0506,
+     "accepted": 0.077017,
      "metric": "cer",
      "stage": "final",
      "tolerance": 0.035
@@ -117,7 +117,7 @@
      "tolerance": 0.09
     },
     {
-     "accepted": 0.409091,
+     "accepted": 0.38,
      "metric": "zeroEdit",
      "stage": "final",
      "tolerance": 0.06

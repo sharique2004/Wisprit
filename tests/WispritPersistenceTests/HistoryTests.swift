@@ -84,6 +84,79 @@ final class HistoryTests: XCTestCase {
         sqlite3_finalize(stmt)
     }
 
+    /// The second table exists from open, is created separately from `schema`,
+    /// and — the point of the whole exercise — the `transcripts` statement is
+    /// still byte-for-byte what the Python wrote. Asserted here as well as above
+    /// because THIS is the test that would catch someone "just adding a column"
+    /// to the pinned schema.
+    func testDetailTableIsAdditiveAndLeavesTranscriptsByteIdentical() throws {
+        let p = dbPath()
+        let history = History(path: p, settings: nil)
+        XCTAssertTrue(history.isAvailable)
+        history.close()
+
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(p.path, &db, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
+        defer { sqlite3_close_v2(db) }
+
+        var sql: [String: String] = [:]
+        var stmt: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(
+            db, "SELECT name, sql FROM sqlite_master ORDER BY name", -1, &stmt, nil), SQLITE_OK)
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            guard let text = sqlite3_column_text(stmt, 1) else { continue }
+            sql[String(cString: sqlite3_column_text(stmt, 0))] = String(cString: text)
+        }
+        sqlite3_finalize(stmt)
+
+        XCTAssertEqual(sql["transcripts"], Golden.historyTableSQL)
+        XCTAssertEqual(sql["utterance_detail"], Golden.historyDetailTableSQL)
+
+        var info: [(Int, String, String, Int, String?, Int)] = []
+        XCTAssertEqual(sqlite3_prepare_v2(
+            db, "PRAGMA table_info(utterance_detail)", -1, &stmt, nil), SQLITE_OK)
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            info.append((
+                Int(sqlite3_column_int(stmt, 0)),
+                String(cString: sqlite3_column_text(stmt, 1)),
+                String(cString: sqlite3_column_text(stmt, 2)),
+                Int(sqlite3_column_int(stmt, 3)),
+                sqlite3_column_text(stmt, 4).map { String(cString: $0) },
+                Int(sqlite3_column_int(stmt, 5))))
+        }
+        sqlite3_finalize(stmt)
+        XCTAssertEqual(info.count, Golden.historyDetailTableInfo.count)
+        for (got, want) in zip(info, Golden.historyDetailTableInfo) {
+            XCTAssertEqual(got.0, want.0); XCTAssertEqual(got.1, want.1)
+            XCTAssertEqual(got.2, want.2); XCTAssertEqual(got.3, want.3)
+            XCTAssertEqual(got.4, want.4); XCTAssertEqual(got.5, want.5)
+        }
+    }
+
+    /// Opening a Python-era database adds the table without disturbing anything
+    /// the Python put there.
+    func testLegacyDatabaseGainsTheDetailTableOnOpen() throws {
+        let p = dbPath("legacy-detail.sqlite")
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(
+            p.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(db, History.schema, nil, nil, nil), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(db,
+            "INSERT INTO transcripts (ts, text, engine, duration_ms) "
+            + "VALUES (1700000000.5, 'legacy row', 'mlx_whisper', 12.5)",
+            nil, nil, nil), SQLITE_OK)
+        sqlite3_close_v2(db)
+
+        let history = History(path: p, settings: nil)
+        XCTAssertEqual(history.recent(limit: 5).map(\.text), ["legacy row"])
+        XCTAssertEqual(history.details(limit: 5), [])   // no detail for the old row
+        let id = history.add(text: "swift row", engine: "apple_live", durationMs: 1.0)
+        history.addDetail(transcriptId: id, raw: "swift roe", corrected: "swift row",
+                          refined: "swift row", inserted: "swift row")
+        XCTAssertEqual(history.details(limit: 5).map(\.raw), ["swift roe"])
+        history.close()
+    }
+
     /// Opening a database the Python already populated must not migrate or
     /// rewrite anything, and existing rows must read back.
     func testOpensAPreExistingPythonDatabaseUnchanged() throws {
@@ -233,6 +306,187 @@ final class HistoryTests: XCTestCase {
         }
         XCTAssertEqual(history.recent(limit: 100).count, 50)
         history.close()
+    }
+
+    // MARK: - utterance_detail (the flywheel's raw material)
+
+    func testDetailRoundTripsTheWholeTriple() throws {
+        let history = History(path: dbPath(), settings: nil)
+        let id = history.add(text: "Ship it to InsForge", engine: "apple_live", durationMs: 900.0)
+        let detailID = history.addDetail(
+            transcriptId: id,
+            raw: "ship it to in forge", corrected: "ship it to InsForge",
+            refined: "Ship it to InsForge", inserted: "Ship it to InsForge",
+            vocab: "applied", ai: "applied", termsHit: ["InsForge", "Wisprit"])
+        XCTAssertEqual(detailID, 1)
+
+        let rows = history.details(limit: 5)
+        XCTAssertEqual(rows.count, 1)
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertEqual(row.id, 1)
+        XCTAssertEqual(row.transcriptId, id)
+        XCTAssertEqual(row.raw, "ship it to in forge")
+        XCTAssertEqual(row.corrected, "ship it to InsForge")
+        XCTAssertEqual(row.refined, "Ship it to InsForge")
+        XCTAssertEqual(row.inserted, "Ship it to InsForge")
+        XCTAssertEqual(row.vocab, "applied")
+        XCTAssertEqual(row.ai, "applied")
+        XCTAssertEqual(row.termsHit, ["InsForge", "Wisprit"])   // order preserved
+        // Joined from transcripts, so the review UI needs one query, not two.
+        XCTAssertEqual(row.text, "Ship it to InsForge")
+        XCTAssertEqual(row.engine, "apple_live")
+        XCTAssertGreaterThan(row.ts, 0)
+        XCTAssertGreaterThan(row.created, 0)
+        history.close()
+    }
+
+    /// "the vocabulary pass did not run" must not read back as "it ran and said
+    /// nothing" — the optional columns stay NULL.
+    func testDetailOptionalColumnsStayNil() throws {
+        let history = History(path: dbPath(), settings: nil)
+        let id = history.add(text: "plain", engine: "e", durationMs: nil)
+        history.addDetail(transcriptId: id, raw: "plain", corrected: "plain",
+                          refined: "plain", inserted: "plain")
+        let row = try XCTUnwrap(history.details(limit: 1).first)
+        XCTAssertNil(row.vocab)
+        XCTAssertNil(row.ai)
+        XCTAssertEqual(row.termsHit, [])
+        history.close()
+    }
+
+    func testDetailIsNewestFirstAndHonoursLimit() throws {
+        let history = History(path: dbPath(), settings: nil)
+        for i in 0..<4 {
+            let id = history.add(text: "t\(i)", engine: "e", durationMs: nil)
+            history.addDetail(transcriptId: id, raw: "r\(i)", corrected: "c\(i)",
+                              refined: "f\(i)", inserted: "i\(i)")
+        }
+        XCTAssertEqual(history.details(limit: 2).map(\.raw), ["r3", "r2"])
+        XCTAssertEqual(history.details(limit: 0), [])
+        history.close()
+    }
+
+    /// The whole reason the cascade is written by hand: SQLite foreign keys are
+    /// off, so nothing deletes these rows unless we do.
+    func testTrimCascadesDetailsWithTheirTranscripts() throws {
+        let history = History(path: dbPath(), settings: try settings(enabled: true, limit: 3))
+        for i in 0..<6 {
+            let id = history.add(text: "t\(i)", engine: "e", durationMs: nil)
+            history.addDetail(transcriptId: id, raw: "r\(i)", corrected: "c\(i)",
+                              refined: "f\(i)", inserted: "i\(i)")
+        }
+        XCTAssertEqual(history.recent(limit: 10).map(\.text), ["t5", "t4", "t3"])
+        XCTAssertEqual(history.details(limit: 10).map(\.raw), ["r5", "r4", "r3"])
+
+        // And no orphans are left lying in the table for the join to hide.
+        XCTAssertEqual(try detailRowCount(dbPath()), 3)
+        history.close()
+    }
+
+    /// The join, not just the cascade: a detail whose transcript is gone is a
+    /// half-record and must not surface between trims.
+    func testDetailWithoutItsTranscriptIsNotReturned() throws {
+        let history = History(path: dbPath(), settings: nil)
+        history.addDetail(transcriptId: 999, raw: "orphan", corrected: "orphan",
+                          refined: "orphan", inserted: "orphan")
+        XCTAssertEqual(history.details(limit: 5), [])
+        history.close()
+    }
+
+    func testPurgeClearsBothTables() throws {
+        let history = History(path: dbPath(), settings: nil)
+        for i in 0..<3 {
+            let id = history.add(text: "t\(i)", engine: "e", durationMs: nil)
+            history.addDetail(transcriptId: id, raw: "r\(i)", corrected: "c\(i)",
+                              refined: "f\(i)", inserted: "i\(i)")
+        }
+        history.purge()
+        XCTAssertEqual(history.recent(limit: 10), [])
+        XCTAssertEqual(history.details(limit: 10), [])
+        XCTAssertEqual(try detailRowCount(dbPath()), 0)
+        history.close()
+    }
+
+    func testDetailWritesAreAbsentWhenTheFlagIsOff() throws {
+        let p = dbPath("nodetail.sqlite")
+        let history = History(path: p, settings: nil, detailEnabled: false)
+        let id = history.add(text: "kept", engine: "e", durationMs: nil)
+        XCTAssertEqual(id, 1)                                  // history still writes
+        XCTAssertEqual(history.addDetail(transcriptId: id, raw: "r", corrected: "c",
+                                         refined: "f", inserted: "i"), -1)
+        XCTAssertEqual(history.details(limit: 5), [])
+        XCTAssertEqual(try detailRowCount(p), 0)
+        // The table itself is still created, so flipping the flag on needs no
+        // migration — and rows written while it was on stay readable.
+        XCTAssertEqual(history.recent(limit: 5).map(\.text), ["kept"])
+        history.close()
+    }
+
+    /// Turning the flag off must not strand the rows written while it was on:
+    /// they keep ageing out with their transcripts.
+    func testDetailRowsStillTrimAfterTheFlagIsTurnedOff() throws {
+        let p = dbPath("flagflip.sqlite")
+        let config = try settings(enabled: true, limit: 2)
+        let on = History(path: p, settings: config, detailEnabled: true)
+        for i in 0..<2 {
+            let id = on.add(text: "t\(i)", engine: "e", durationMs: nil)
+            on.addDetail(transcriptId: id, raw: "r\(i)", corrected: "c\(i)",
+                         refined: "f\(i)", inserted: "i\(i)")
+        }
+        on.close()
+
+        let off = History(path: p, settings: config, detailEnabled: false)
+        off.add(text: "t2", engine: "e", durationMs: nil)   // trims t0
+        off.add(text: "t3", engine: "e", durationMs: nil)   // trims t1
+        XCTAssertEqual(try detailRowCount(p), 0)
+        off.close()
+    }
+
+    func testDetailIsSkippedWhenHistoryIsDisabledOrTheIdIsMissing() throws {
+        let config = try settings(enabled: true, limit: 1000)
+        let history = History(path: dbPath(), settings: config)
+        XCTAssertEqual(history.addDetail(transcriptId: -1, raw: "r", corrected: "c",
+                                         refined: "f", inserted: "i"), -1)
+        config.set(SettingsKey.historyEnabled, false)
+        XCTAssertEqual(history.addDetail(transcriptId: 1, raw: "r", corrected: "c",
+                                         refined: "f", inserted: "i"), -1)
+        history.close()
+    }
+
+    func testDetailDegradesWhenTheDatabaseIsUnavailable() throws {
+        let p = dbPath("blocked-detail.sqlite")
+        try FileManager.default.createDirectory(at: p, withIntermediateDirectories: true)
+        let history = History(path: p, settings: nil)
+        XCTAssertEqual(history.addDetail(transcriptId: 1, raw: "r", corrected: "c",
+                                         refined: "f", inserted: "i"), -1)
+        XCTAssertEqual(history.details(limit: 5), [])
+        history.close()
+    }
+
+    func testDetailTextWithQuotesAndUnicodeRoundTrips() throws {
+        let history = History(path: dbPath(), settings: nil)
+        let raw = "it's a \"quote\"; DROP TABLE utterance_detail; — é 😀"
+        let id = history.add(text: "x", engine: "e", durationMs: nil)
+        history.addDetail(transcriptId: id, raw: raw, corrected: raw, refined: raw,
+                          inserted: raw, termsHit: ["é 😀", "quote\"s"])
+        let row = try XCTUnwrap(history.details(limit: 1).first)
+        XCTAssertEqual(row.raw, raw)
+        XCTAssertEqual(row.termsHit, ["é 😀", "quote\"s"])
+        history.close()
+    }
+
+    /// Counts straight out of the file, bypassing the join, so an orphan cannot
+    /// hide behind it.
+    private func detailRowCount(_ url: URL) throws -> Int {
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil), SQLITE_OK)
+        defer { sqlite3_close_v2(db) }
+        var stmt: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(
+            db, "SELECT COUNT(*) FROM utterance_detail", -1, &stmt, nil), SQLITE_OK)
+        defer { sqlite3_finalize(stmt) }
+        XCTAssertEqual(sqlite3_step(stmt), SQLITE_ROW)
+        return Int(sqlite3_column_int64(stmt, 0))
     }
 
     func testOverrideRootDrivesTheDefaultPath() throws {

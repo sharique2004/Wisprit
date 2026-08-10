@@ -310,15 +310,21 @@ public final class SessionController: @unchecked Sendable {
         let live = self.liveTyping
         runBlocking { [asr] in
             await asr.begin(onPartial: { text in
+                // Resolve "Thursday umm no actually Friday" HERE, once, before
+                // the partial forks: both surfaces below are a preview of the
+                // same words and must never disagree about them. `text` itself
+                // is untouched — nothing downstream of this closure reads a
+                // partial, so the raw final is still what finalize sees.
+                let shown = LivePartialCorrection.display(text)
                 // The pill bubble is the feedback for every rung that CANNOT put
                 // provisional text in the field. When rung 1 is actually
                 // streaming, showing it too would print the same words twice —
                 // and the check is live, so losing the client mid-utterance hands
                 // the preview straight back to the pill.
                 if let live, live.isStreaming {
-                    live.streamPartial(text)
+                    live.streamPartial(shown)
                 } else {
-                    pill?.livePartial(text)
+                    pill?.livePartial(shown)
                 }
             })
         }

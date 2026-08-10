@@ -132,9 +132,45 @@ enum Golden {
         (4, "duration_ms", "REAL", 0, nil, 0),
     ]
 
-    /// AUTOINCREMENT bookkeeping table the Python DB also carries.
-    static let historyMasterNames = ["sqlite_sequence", "transcripts"]
+    /// AUTOINCREMENT bookkeeping table the Python DB also carries, plus the
+    /// native-era `utterance_detail`. Adding the second table is the ONLY change
+    /// this file's history section has taken: `historyTableSQL` above still has
+    /// to come back byte-identical from a Swift-created database, which is the
+    /// proof that a Python-era file and a Swift-era one are still the same file.
+    static let historyMasterNames = ["sqlite_sequence", "transcripts", "utterance_detail"]
     static let historyJournalMode = "wal"
+
+    /// `sqlite_master.sql` for the per-utterance detail table, read back out of a
+    /// database `History` created — same generation discipline as the transcripts
+    /// row above, so a whitespace edit to `detailSchema` fails the test.
+    static let historyDetailTableSQL = """
+    CREATE TABLE utterance_detail (
+        id            INTEGER PRIMARY KEY,
+        transcript_id INTEGER NOT NULL,
+        raw           TEXT,
+        corrected     TEXT,
+        refined       TEXT,
+        inserted      TEXT,
+        vocab         TEXT,
+        ai            TEXT,
+        terms_hit     TEXT,
+        created       REAL
+    )
+    """
+
+    /// `PRAGMA table_info(utterance_detail)`: (cid, name, type, notnull, dflt_value, pk)
+    static let historyDetailTableInfo: [(Int, String, String, Int, String?, Int)] = [
+        (0, "id", "INTEGER", 0, nil, 1),
+        (1, "transcript_id", "INTEGER", 1, nil, 0),
+        (2, "raw", "TEXT", 0, nil, 0),
+        (3, "corrected", "TEXT", 0, nil, 0),
+        (4, "refined", "TEXT", 0, nil, 0),
+        (5, "inserted", "TEXT", 0, nil, 0),
+        (6, "vocab", "TEXT", 0, nil, 0),
+        (7, "ai", "TEXT", 0, nil, 0),
+        (8, "terms_hit", "TEXT", 0, nil, 0),
+        (9, "created", "REAL", 0, nil, 0),
+    ]
 
     // MARK: metrics
 

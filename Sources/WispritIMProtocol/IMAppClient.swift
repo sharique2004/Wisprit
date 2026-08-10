@@ -17,11 +17,27 @@ import Foundation
 public final class WispritIMClient: @unchecked Sendable {
 
     public typealias EventHandler = @Sendable (IMEventMessage) -> Void
+    /// Wire v2 read-backs (`contextSnapshot`, `committedSnapshot`). Nil means
+    /// "drop them", which is what a build that consumes no context should do —
+    /// and what every build did before v2.
+    public typealias SnapshotHandler = @Sendable (IMSnapshotMessage) -> Void
 
     private let remote: WispritIMRemotePort
     private let events: WispritIMPortServer
     private let queue = DispatchQueue(label: "com.wisprit.im.client")
     private let onEvent: EventHandler
+    private let snapshots = SnapshotSink()
+
+    /// Where read-back answers land. Set it before `startListeningForEvents()`.
+    ///
+    /// Deliberately a property rather than an init parameter: the write path is
+    /// wired at startup and must not gain a second required argument, and a
+    /// consumer that is switched off (`context_awareness == false`) simply never
+    /// sets this, so the snapshots are dropped at the door.
+    public var onSnapshot: SnapshotHandler? {
+        get { snapshots.handler }
+        set { snapshots.handler = newValue }
+    }
 
     public init(portName: String = WispritIMNaming.machServiceName,
                 eventPortName: String = WispritIMNaming.eventPortName,
@@ -29,11 +45,30 @@ public final class WispritIMClient: @unchecked Sendable {
         self.remote = WispritIMRemotePort(name: portName)
         self.onEvent = onEvent
         let handler = onEvent
+        let sink = snapshots
         self.events = WispritIMPortServer(name: eventPortName) { payload in
-            guard let event = try? payload.event() else { return nil }
-            handler(event)
+            switch payload.kind {
+            case .snapshot:
+                if let snapshot = try? payload.snapshot() { sink.deliver(snapshot) }
+            default:
+                if let event = try? payload.event() { handler(event) }
+            }
             return nil
         }
+    }
+
+    /// Lock-guarded box, so `onSnapshot` can be set from anywhere while the port
+    /// callback reads it on the run loop.
+    private final class SnapshotSink: @unchecked Sendable {
+        private let lock = NSLock()
+        private var stored: SnapshotHandler?
+
+        var handler: SnapshotHandler? {
+            get { lock.lock(); defer { lock.unlock() }; return stored }
+            set { lock.lock(); stored = newValue; lock.unlock() }
+        }
+
+        func deliver(_ snapshot: IMSnapshotMessage) { handler?(snapshot) }
     }
 
     /// Start listening for unsolicited events (`clientAcquired`, `clientLost`).
@@ -86,6 +121,46 @@ public final class WispritIMClient: @unchecked Sendable {
     @discardableResult
     public func post(_ message: IMCommandMessage, timeout: TimeInterval = 0.25) -> Bool {
         guard let payload = try? WispritIMPayload(command: message) else { return false }
+        return remote.post(payload, timeout: timeout)
+    }
+
+    // MARK: Reading (wire v2)
+
+    /// Ask for the bounded window around the cursor. Posted, never awaited: this
+    /// is called at key-down, concurrently with starting capture, and the
+    /// utterance must not spend a microsecond waiting for it.
+    ///
+    /// The answer arrives later on `onSnapshot` as `contextSnapshot`, stamped
+    /// with `generation` — compare it against the utterance in flight and drop it
+    /// if it lost the race. `false` here, or no answer at all, both mean "no
+    /// context signal for this utterance": an input method older than wire v2
+    /// cannot decode the request and stays silent by construction.
+    ///
+    /// Ask at key-down. Later in the utterance the window also contains this
+    /// session's own provisional tail, which is not context — it is our own guess
+    /// coming back to bias the next one.
+    @discardableResult
+    public func readContext(generation: UInt64, timeout: TimeInterval = 0.25) -> Bool {
+        post(.readContext(generation: generation), timeout: timeout)
+    }
+
+    /// Ask what the field says now about the run this session committed — the
+    /// edit-observation read. Posted after the words have landed (and legal after
+    /// `endSession`, which is when the user actually fixes a word).
+    ///
+    /// The answer arrives on `onSnapshot` as `committedSnapshot`. `.unchanged`
+    /// is a zero-edit observation; `.changed` means our text is no longer there;
+    /// anything else is not evidence and must not enter a zero-edit rate.
+    @discardableResult
+    public func readCommitted(generation: UInt64, timeout: TimeInterval = 0.25) -> Bool {
+        post(.readCommitted(generation: generation), timeout: timeout)
+    }
+
+    /// Fire and forget, read channel. There is no blocking counterpart on
+    /// purpose: nothing about a read is worth making the user wait for.
+    @discardableResult
+    public func post(_ message: IMReadMessage, timeout: TimeInterval = 0.25) -> Bool {
+        guard let payload = try? WispritIMPayload(read: message) else { return false }
         return remote.post(payload, timeout: timeout)
     }
 

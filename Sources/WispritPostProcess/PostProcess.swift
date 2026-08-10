@@ -14,7 +14,10 @@
 // 3. Spoken email + URL joining — "a dot b at c dot com" -> "a.b@c.com".
 // 4. Voice commands — "new line" / "new paragraph" and trailing punctuation
 //    words ("period", "question mark" …).
-// 5. Explicit self-correction — "X no wait Y" / "… scratch that Y" -> keep Y.
+// 5. Explicit self-correction — "X no wait Y" / "… scratch that Y" -> keep Y,
+//    plus the closed-class pair rule ("Thursday no actually Friday" -> Friday).
+//    The engine lives in SelfCorrection.swift because the live path runs it on
+//    raw partials too; this stage is just its finalize-path caller.
 // 6. Spoken emoji — "fire emoji" -> 🔥 (config-gated). Same family as #4, one
 //    step later: it runs AFTER self-correction on purpose, because the
 //    noun-phrase guard treats "that" as a determiner, and "that" is also the
@@ -117,7 +120,10 @@ public enum PostProcess {
 // Fillers removed only as isolated, word-bounded tokens. Deliberately excludes
 // "like", "so", "well", "you know" (context-free removal mangles meaning) and
 // "err" (a real verb — "err on the side of caution").
-private let fillerWords = ["um", "umm", "uh", "uhh", "uhm", "erm"]
+// Internal, not private: SelfCorrection.swift compiles the same vocabulary into
+// its joint separator, because the live path hands that engine text this stage
+// has not run on yet.
+let fillerWords = ["um", "umm", "uh", "uhh", "uhm", "erm"]
 private let fillerRx = Rx(#"(?<!\w)(?:"# + fillerWords.joined(separator: "|") + #")(?!\w)[,]?"#)
 
 // Known TLDs for spoken-URL joining. Conservative list — real, common TLDs.
@@ -216,16 +222,9 @@ private let letterRunRx = Rx(#"^[A-Z][A-Z\-.]{2,}[A-Z]$"#, [])
 private let letterRunEdgePunctuation =
     CharacterSet(charactersIn: ",.!?;:\"'\u{201C}\u{201D}\u{2018}\u{2019}()[]{}")
 
-// Self-correction: drop the single word before "no wait" (+ the marker).
-private let noWaitRx = Rx(#"\b[\w']+[,]?\s+no\s+wait[,]?\s+"#)
-// "scratch that" — keep only what follows the LAST occurrence (greedy).
-private let scratchRx = Rx(#"^.*\bscratch\s+that\b[,.]?\s*"#, [.caseInsensitive, .dotMatchesLineSeparators])
-private let scratchProbeRx = Rx(#"\bscratch\s+that\b"#)
-// Collapse an immediate duplicate of a function word, which self-correction can
-// leave behind ("... to InsForge no wait to production" -> "... to to ...").
-// Restricted to words whose consecutive repetition is virtually always an
-// artifact — "that"/"had" are excluded because "that that"/"had had" are valid.
-private let dupRx = Rx(#"\b(to|the|a|an|of|in|on|at|and|or|for|with|is|was|it|i)\s+\1\b"#)
+// Self-correction lives in SelfCorrection.swift — the markers, the closed-class
+// pair rule and the duplicate collapse are all one engine there, because the
+// live path needs to run it on raw partials without the rest of the pipeline.
 
 // Space before sentence punctuation; multiple spaces.
 private let spaceBeforePunctRx = Rx(#"\s+([,.;:!?])"#, [])
@@ -416,18 +415,11 @@ extension PostProcess {
         return text
     }
 
+    /// Stage 5. Unconditional, like the Python rule it ports — self-correction
+    /// has no settings key of its own, so the closed-class tier does not get
+    /// one either: it is the same product surface, not a new one.
     static func selfCorrect(_ text: String) -> String {
-        var text = noWaitRx.replacingAll(in: text, with: "")
-        if scratchProbeRx.matches(text) {
-            text = scratchRx.replacingAll(in: text, with: "")
-        }
-        // Repeat until stable so "to to to" fully collapses.
-        while true {
-            let collapsed = dupRx.replacingAll(in: text, with: "$1")
-            if collapsed == text { break }
-            text = collapsed
-        }
-        return text
+        SelfCorrection.apply(text)
     }
 
     static func cleanupWhitespace(_ text: String) -> String {
@@ -456,8 +448,9 @@ extension PostProcess {
 
 /// Thin wrapper over NSRegularExpression with Python-`re`-shaped operations.
 /// A pattern that fails to compile degrades to a no-op, preserving the Python
-/// contract that `process()` never raises.
-private struct Rx {
+/// contract that `process()` never raises. Internal, not private, so
+/// SelfCorrection.swift shares one piece of regex plumbing with the pipeline.
+struct Rx {
     private let re: NSRegularExpression?
 
     init(_ pattern: String, _ options: NSRegularExpression.Options = [.caseInsensitive]) {
@@ -490,6 +483,16 @@ private struct Rx {
         }
         out += ns.substring(from: cursor)
         return out
+    }
+
+    /// Leftmost match at or after `from`. The text before `from` stays visible
+    /// to `\b` and lookbehind (transparent, non-anchoring bounds), so a cursor
+    /// parked mid-word cannot manufacture a word boundary — the scanning
+    /// primitive `SelfCorrection` drives its sweep with.
+    func firstMatch(_ s: String, _ ns: NSString, from: Int) -> NSTextCheckingResult? {
+        guard let re, from >= 0, from <= ns.length else { return nil }
+        return re.firstMatch(in: s, options: [.withTransparentBounds, .withoutAnchoringBounds],
+                             range: NSRange(location: from, length: ns.length - from))
     }
 
     /// `re.split` on a group-less pattern.

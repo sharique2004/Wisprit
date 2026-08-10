@@ -165,6 +165,45 @@ final class SessionLiveTypingTests: XCTestCase {
         XCTAssertEqual(h.pill.partials, ["second partial"])
     }
 
+    // MARK: - live self-correction, in the field
+
+    /// The feature, on rung 1: the words the user is watching appear, the
+    /// misspoken weekday disappears, and none of it has been committed yet.
+    func testTheSelfCorrectionLandsInTheMarkedTextWhileTheUserIsStillSpeaking() {
+        let h = Harness()
+
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        for partial in LiveCorrectionScript.partials { h.asr.deliverPartial(partial) }
+
+        XCTAssertEqual(h.peer.snapshot.marked, LiveCorrectionScript.corrected)
+        XCTAssertEqual(h.peer.snapshot.document, "",
+                       "the tail is still provisional — nothing is committed until Fn ↑")
+        XCTAssertTrue(h.pill.partials.isEmpty, "one preview, not two")
+        // Verbatim until the marker completes, exactly as the bubble shows it.
+        XCTAssertEqual(h.peer.volatileTails,
+                       LiveCorrectionScript.partials.dropLast() + [LiveCorrectionScript.corrected])
+    }
+
+    /// The commit is the raw final's turn through the whole pipeline, not the
+    /// corrected tail the field is already showing.
+    func testTheCommittedTextComesFromTheRawFinalNotTheDisplayedTail() {
+        let h = Harness()
+        let raw = "I want to have a meeting with person x on thuersday umm no actually friday"
+        h.asr.result = UtteranceResult(text: raw, engine: "apple_live", finalizeMs: 130)
+
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        for partial in LiveCorrectionScript.partials { h.asr.deliverPartial(partial) }
+        h.session.dispatch(HotkeyEvent(.release, ts: 1.0))
+
+        XCTAssertEqual(h.peer.snapshot.document,
+                       "I want to have a meeting with person x on friday",
+                       "capitalised as the engine said it — the preview never edited the record")
+        XCTAssertEqual(h.peer.snapshot.marked, "")
+        XCTAssertEqual(h.refiner.lastInput, raw)
+        XCTAssertEqual(h.metrics.last?.rawChars, raw.count)
+        XCTAssertEqual(h.metrics.last?.outcome, "im_streaming")
+    }
+
     // MARK: - falling off the ladder
 
     func testClientLostMidUtteranceFallsBackToPasteWithoutLosingText() {

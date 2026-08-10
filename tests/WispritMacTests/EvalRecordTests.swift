@@ -409,7 +409,7 @@ final class EvalRecordTests: XCTestCase {
     /// Parses all of `tools/eval/scripts/human-v1`. A typo in a directive, a
     /// missing header, a bypass that is not one, or two categories abbreviating
     /// to the same prefix all fail HERE — at `swift test` — rather than in front
-    /// of somebody who has just sat down to read 131 sentences.
+    /// of somebody who has just sat down to read 135 sentences.
     func testTheShippedHumanScriptsParseAndAreInternallyConsistent() throws {
         let root = try XCTUnwrap(EvalPaths.repoRoot(), "no checkout")
         let directory = root.appendingPathComponent("tools/eval/scripts/human-v1")
@@ -423,7 +423,7 @@ final class EvalRecordTests: XCTestCase {
         ], "filename order is the recording order and the README's table order")
 
         let total = scripts.reduce(0) { $0 + $1.lines.count }
-        XCTAssertEqual(total, 131, "the README quotes this number")
+        XCTAssertEqual(total, 135, "the README quotes this number")
 
         // Ids are unique across the whole set once the speaker and mic are on
         // them — which is what the corpus actually stores.

@@ -58,6 +58,11 @@ public final class IMService {
         switch IMDispatch.handle(payload, session: session) {
         case .reply(let response):
             return response
+        case .emit(let snapshot):
+            // The app posted the read and moved on, so the answer travels the
+            // same way every other unsolicited message does.
+            events.post(snapshot, timeout: 0.2)
+            return nil
         case .undecodable(let reason):
             log.error("undecodable payload: \(reason, privacy: .public)")
             return nil

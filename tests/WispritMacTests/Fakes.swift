@@ -2,6 +2,7 @@ import Foundation
 import WispritEngine
 import WispritKit
 import WispritMacInput
+import WispritMacUI
 import WispritPersistence
 import WispritRefine
 @testable import WispritMac
@@ -39,6 +40,8 @@ final class FakeAsr: AsrPort, @unchecked Sendable {
     /// Called as each reconcile enters, before it parks.
     var onReconcileEnter: (@Sendable () -> Void)?
     private var parked: [CheckedContinuation<Void, Never>] = []
+    /// The live callback, retained so `deliverPartial` can use it later.
+    private var partialHandler: (@Sendable (String) -> Void)?
 
     var lastRetained: RetainedUtterance {
         lock.lock(); defer { lock.unlock() }
@@ -53,7 +56,17 @@ final class FakeAsr: AsrPort, @unchecked Sendable {
     var reconcileTally: Int { lock.lock(); defer { lock.unlock() }; return reconcileCount }
 
     func begin(onPartial: @escaping @Sendable (String) -> Void) async {
-        for partial in noteBegin() { onPartial(partial) }
+        for partial in noteBegin(onPartial) { onPartial(partial) }
+    }
+
+    /// Deliver one partial the way the engine really does — after `begin` has
+    /// returned and the machine is RECORDING — rather than inline inside
+    /// `begin`. `partials` still fires inline, so every test that predates this
+    /// seam is unchanged; the difference only matters to a test that asserts on
+    /// something the RECORDING state gates, like the pill bubble.
+    func deliverPartial(_ text: String) {
+        lock.lock(); let handler = partialHandler; lock.unlock()
+        handler?(text)
     }
 
     func finalize() async -> UtteranceResult { noteFinalize() }
@@ -77,10 +90,11 @@ final class FakeAsr: AsrPort, @unchecked Sendable {
 
     // NSLock is unavailable from async contexts, so every mutation goes through
     // a synchronous helper.
-    private func noteBegin() -> [String] {
+    private func noteBegin(_ onPartial: @escaping @Sendable (String) -> Void) -> [String] {
         lock.lock(); defer { lock.unlock() }
         beginCount += 1
         utteranceID += 1
+        partialHandler = onPartial
         return partials
     }
 
@@ -278,6 +292,37 @@ final class FakePill: PillPort, @unchecked Sendable {
     func snapshot() -> [String] { lock.lock(); defer { lock.unlock() }; return calls }
 }
 
+/// A `PillPort` backed by the REAL `PillModel` — `MainThreadPill` with the
+/// AppKit half removed.
+///
+/// `FakePill` is the right double nearly everywhere: it records the calls, and
+/// the calls are the contract. This one exists for the claims that are about
+/// what is *on screen* — the live self-correction tests assert the rendered
+/// tail, which is `PartialTail`'s windowing of what the session emitted, and
+/// asserting the emitted string instead would prove the wrong half of it.
+final class ModelPill: PillPort, @unchecked Sendable {
+    private let lock = NSLock()
+    private let model = PillModel()
+    private(set) var partials: [String] = []
+
+    /// The rendered tail: what the bubble actually says.
+    var bubble: String { lock.lock(); defer { lock.unlock() }; return model.bubble }
+
+    func showRecording() { lock.lock(); model.showRecording(); lock.unlock() }
+    func updateLevel(_ level: Double) { lock.lock(); model.updateLevel(level); lock.unlock() }
+    func livePartial(_ text: String) {
+        lock.lock(); partials.append(text); model.livePartial(text); lock.unlock()
+    }
+    func showFinalizing() { lock.lock(); model.showFinalizing(); lock.unlock() }
+    func flashSuccess() { lock.lock(); model.flashSuccess(); lock.unlock() }
+    func flashError(_ message: String) { lock.lock(); model.flashError(message); lock.unlock() }
+    func transientNotice(_ text: String) { lock.lock(); model.transientNotice(text); lock.unlock() }
+    func hide() { lock.lock(); model.hide(); lock.unlock() }
+    func showPrewarming() { lock.lock(); model.showPrewarming(); lock.unlock() }
+    func showRefining() { lock.lock(); model.showRefining(); lock.unlock() }
+    func flashBlockedSecure() { lock.lock(); model.flashBlockedSecure(); lock.unlock() }
+}
+
 final class FakeVocabulary: VocabularyPort, @unchecked Sendable {
     private let lock = NSLock()
     private(set) var reloadCount = 0
@@ -311,6 +356,27 @@ final class FakeGate: RecordingGate, @unchecked Sendable {
     func setRecording(_ recording: Bool) {
         lock.lock(); transitions.append(recording); lock.unlock()
     }
+}
+
+/// The sentence from the feature request, as the engine delivers it:
+/// cumulative, windowed, several partials a second, and only resolvable on the
+/// last one — "no" alone is not a correction marker, so the tail stays verbatim
+/// right up until "actually friday" arrives.
+///
+/// Shared by both surfaces' tests so they cannot drift apart: the claim is that
+/// the pill bubble and the input method's marked text show the same words.
+enum LiveCorrectionScript {
+    static let partials = [
+        "i want to have a meeting",
+        "i want to have a meeting with person x on thuersday",
+        "i want to have a meeting with person x on thuersday umm no",
+        "i want to have a meeting with person x on thuersday umm no actually friday",
+    ]
+
+    /// What both surfaces must be showing once the last partial lands. Lower
+    /// case, exactly as the partial had it — self-correction resolves the
+    /// *words*; casing is the final pipeline's business, not the preview's.
+    static let corrected = "i want to have a meeting with person x on friday"
 }
 
 /// A minimal in-memory `CorrectionApplying` + `VocabularySource` for the

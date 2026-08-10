@@ -46,16 +46,16 @@ public enum RetroEditPlanner {
         guard let window else { return .abort(.readFailed) }
 
         let haystack = window.text as NSString
-        let needle = committed as NSString
 
         // 1. Where is the text WE committed, right now? (`committedRange` is a
         //    liveness precondition only — the location is re-derived from the
         //    document, never trusted.)
-        let occurrences = locateOwnedRun(haystack: haystack, needle: needle)
-        guard occurrences.count == 1 else {
-            return .abort(occurrences.isEmpty ? .fieldChanged : .ambiguousRelocation)
+        let ownedRel: NSRange
+        switch locate(committed: committed, in: window) {
+        case .found(let range): ownedRel = range
+        case .gone: return .abort(.fieldChanged)
+        case .ambiguous: return .abort(.ambiguousRelocation)
         }
-        let ownedRel = occurrences[0]
 
         // 2. Where is the word to fix, inside our own run only? Correcting text
         //    the user typed themselves is never our business.
@@ -76,6 +76,34 @@ public enum RetroEditPlanner {
                                length: (newCommitted as NSString).length)
         return .replace(range: absolute, text: edit.with,
                         newCommitted: newCommitted, newCommittedRange: newRange)
+    }
+
+    /// Where the run this session committed sits in a freshly read window — or
+    /// why we cannot say.
+    ///
+    /// Shared by the correction path and the read-back path (`readCommitted`) so
+    /// there is exactly one answer in this process to "is that still our text?".
+    /// The ranges are relative to `window.text`; add `window.base` for document
+    /// coordinates.
+    public enum OwnedRun: Sendable, Equatable {
+        /// Exactly one match. This, and only this, is knowledge.
+        case found(NSRange)
+        /// No match: our text is not in the field any more. Something changed it.
+        case gone
+        /// More than one match. We genuinely cannot tell which run is ours, and
+        /// picking one is how the wrong words get rewritten.
+        case ambiguous
+    }
+
+    public static func locate(committed: String, in window: IMDocumentWindow) -> OwnedRun {
+        guard !committed.isEmpty else { return .gone }
+        let occurrences = locateOwnedRun(haystack: window.text as NSString,
+                                         needle: committed as NSString)
+        switch occurrences.count {
+        case 0: return .gone
+        case 1: return .found(occurrences[0])
+        default: return .ambiguous
+        }
     }
 
     // CONTRACT-DEVIATION (stricter, not looser): the brief said re-read the client
