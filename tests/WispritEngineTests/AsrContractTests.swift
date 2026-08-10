@@ -211,10 +211,33 @@ final class AsrManagerFallbackTests: XCTestCase {
         await m.begin { _ in }
         m.feed(pcm: pcm(0.5))
         m.feed(pcm: pcm(0.5))
-        XCTAssertEqual(m.retainedPcm.count, 32_000)
-        XCTAssertEqual(m.retainedSeconds, 1.0, accuracy: 1e-9)
+        _ = await m.finalize()
+        XCTAssertEqual(m.lastRetained.pcm.count, 32_000)
+        XCTAssertEqual(m.lastRetained.durationSeconds, 1.0, accuracy: 1e-9)
+        XCTAssertEqual(m.lastRetained.id, 1)
+
         await m.begin { _ in }
-        XCTAssertEqual(m.retainedPcm.count, 0, "begin() starts a fresh utterance")
+        _ = await m.finalize()
+        XCTAssertTrue(m.lastRetained.isEmpty, "begin() starts a fresh utterance")
+        XCTAssertEqual(m.lastRetained.id, 2, "ids are monotonic per utterance")
+    }
+
+    /// The race the value type exists to kill: a vocabulary pass spawned after
+    /// utterance N used to read the retention buffer when it finally got around
+    /// to it, which — after a second Fn press — was utterance N+1's audio.
+    func testFinalizeDetachesTheUtteranceSoTheNextOneCannotOverwriteIt() async {
+        let engine = FakeAsrEngine(script: .init(beginSucceeds: false))
+        let (m, _) = manager(engine: engine, batchText: nil)
+        await m.begin { _ in }
+        m.feed(pcm: pcm(1))
+        _ = await m.finalize()
+        let retained = m.lastRetained
+
+        await m.begin { _ in }
+        m.feed(pcm: pcm(0.25))
+
+        XCTAssertEqual(retained.pcm.count, 32_000, "the value the caller holds is its own")
+        XCTAssertEqual(m.lastRetained, retained, "and so is the snapshot, until the next finalize")
     }
 
     func testCancelClearsRetentionAndEngine() async {
@@ -224,7 +247,9 @@ final class AsrManagerFallbackTests: XCTestCase {
         m.feed(pcm: pcm(1))
         await m.cancel()
         XCTAssertEqual(engine.cancelCount, 1)
-        XCTAssertTrue(m.retainedPcm.isEmpty)
+        XCTAssertTrue(m.lastRetained.isEmpty, "a cancelled utterance has no audio to hand anyone")
+        _ = await m.finalize()
+        XCTAssertTrue(m.lastRetained.isEmpty)
     }
 
     func testEmptyRetentionNeverReachesTheBatchEngine() async {

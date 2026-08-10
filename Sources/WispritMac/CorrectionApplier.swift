@@ -17,6 +17,8 @@ import WispritKit
 /// - the directive is always **suppressed** from the inserted text;
 /// - `tailReplace` and a same-utterance `retroReplace` are applied to the text
 ///   before insertion;
+/// - `abstain` — the run failed the learn plausibility gate — suppresses the
+///   directive, edits nothing, learns nothing, and says so;
 /// - a cross-utterance `retroReplace` — the antecedent lives in an EARLIER
 ///   utterance, already committed to some other app's text field — does not
 ///   touch that field. It learns the term and flashes "Learned Sharique". The
@@ -26,16 +28,24 @@ struct CorrectionOutcome: Equatable {
     var text: String
     /// Persist to the dictionary AFTER insertion, never on the paste path.
     var learn: LearnedTerm?
+    /// True when `learn` has not earned a canonical entry yet: the run was
+    /// believable but attested exactly once, so it belongs in the dictionary as
+    /// `pending: true` via `DictionaryStore.addPending(term:observation:)`,
+    /// where a second sighting promotes it. A vocabulary port that predates the
+    /// quarantine seam still calls `add` and gets v1 behaviour — the flag is
+    /// additive, and ignoring it is the status quo, not a new failure.
+    var learnIsPending: Bool
     /// Pill notice to flash after insertion, e.g. "Learned Sharique".
     var notice: String?
     /// True when the antecedent lived in an earlier utterance — the branch that
     /// deliberately declines to edit already-committed text.
     var wasCrossUtterance: Bool
 
-    init(text: String, learn: LearnedTerm? = nil, notice: String? = nil,
-         wasCrossUtterance: Bool = false) {
+    init(text: String, learn: LearnedTerm? = nil, learnIsPending: Bool = false,
+         notice: String? = nil, wasCrossUtterance: Bool = false) {
         self.text = text
         self.learn = learn
+        self.learnIsPending = learnIsPending
         self.notice = notice
         self.wasCrossUtterance = wasCrossUtterance
     }
@@ -56,23 +66,34 @@ enum CorrectionApplier {
             // dictionary fills up with garbage.
             return CorrectionOutcome(text: splice(text, replace, with: word))
 
+        case .abstain(let suppress, _):
+            // The plausibility gate says the ASR misread the letters. There is
+            // no replacement to trust and nothing worth learning, so the whole
+            // directive goes and the user is told — inserting "SHARHUUE" or
+            // promoting it to a canonical term are both worse than saying so.
+            return CorrectionOutcome(text: tidy(splice(text, suppress, with: "")),
+                                     notice: "Couldn't read that spelling")
+
         case .tailReplace(let target, let replacement, let suppress, let learn):
             // Antecedent is in THIS utterance and the run is its tail, so the
             // edit only ever touches text that has not been inserted yet.
             var out = splice(text, suppress, with: "")
             out = replaceLastWord(target, with: replacement, in: out) ?? out
-            return CorrectionOutcome(text: tidy(out), learn: learn)
+            return CorrectionOutcome(text: tidy(out), learn: learn.term,
+                                     learnIsPending: learn.isPending)
 
         case .retroReplace(let target, let replacement, let suppress, let learn):
             // Drop the whole directive (trigger phrase included) either way.
             let stripped = splice(text, suppress, with: "")
             if let edited = replaceLastWord(target, with: replacement, in: stripped) {
                 // Same utterance: the antecedent is still in the pending text.
-                return CorrectionOutcome(text: tidy(edited), learn: learn)
+                return CorrectionOutcome(text: tidy(edited), learn: learn.term,
+                                         learnIsPending: learn.isPending)
             }
             // Cross-utterance: the wrong word is already in the user's document.
             // Learn it so it never comes back, and say so.
-            return CorrectionOutcome(text: tidy(stripped), learn: learn,
+            return CorrectionOutcome(text: tidy(stripped), learn: learn.term,
+                                     learnIsPending: learn.isPending,
                                      notice: "Learned \(replacement)",
                                      wasCrossUtterance: true)
         }

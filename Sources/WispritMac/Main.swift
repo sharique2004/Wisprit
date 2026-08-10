@@ -16,6 +16,10 @@ enum WispritMacMain {
         switch arguments.first {
         case "doctor":
             exit(runDoctor())
+        case "stats":
+            exit(StatsCommand.run(arguments: Array(arguments.dropFirst())))
+        case "eval":
+            exit(EvalCommand.run(arguments: Array(arguments.dropFirst())))
         case "window":
             // Same app, but it opens showing itself. The point of a front end is
             // that there is always a way to make it appear.
@@ -47,6 +51,11 @@ enum WispritMacMain {
           Wisprit window [page]   run it with the window open (status|dictionary|
                                   history|settings|setup)
           Wisprit doctor          permission + engine checklist (exit 0 when ready)
+          Wisprit stats [--days N]
+                                  what metrics.log says: outcomes, empty
+                                  reasons, timings (default: all time)
+          Wisprit eval <verb>     accuracy harness (asr|stages|score|refine|
+                                  report|all) — see `Wisprit eval` for flags
           Wisprit bootstrap       create ~/.wisprit and seed config + dictionary
           Wisprit hotkey [secs]   print hotkey events (needs WISPRIT_MANUAL_INPUT=1)
           Wisprit insert "text"   insert text after a 3 s countdown (same gate)

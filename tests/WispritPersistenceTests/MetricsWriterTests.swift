@@ -80,6 +80,125 @@ final class MetricsWriterTests: XCTestCase {
         ])
     }
 
+    // MARK: post-Python telemetry (additive, strictly after `ai`)
+
+    func testTelemetryFieldsSerializeAfterAiInOrder() {
+        let record = MetricsRecord(
+            ts: 1785871825.3455071, heldMs: 47416.04, engine: "apple_live",
+            finalizeMs: 604.44, timedOut: false, postMs: 3.29, insertMs: 517.31,
+            outcome: "paste", chars: 525,
+            releaseToTextMs: 3171.23, aiMs: 1923.91, ai: "applied",
+            emptyReason: "produced_nothing", peakLevel: 0.03712345,
+            audioMs: 47250.0, rawChars: 540, refineDelta: 31)
+        XCTAssertEqual(record.jsonLine(), Golden.metricsTelemetryFull)
+    }
+
+    func testClassifiedEmptyRowCarriesTheReasonRightAfterChars() {
+        let record = MetricsRecord(
+            ts: 1786327400.10842, heldMs: 2153.61, engine: "apple_live",
+            finalizeMs: 118.42, timedOut: false, postMs: 0.0, insertMs: 0.0,
+            outcome: "empty", chars: 0,
+            emptyReason: "produced_nothing", peakLevel: 0.18423456, audioMs: 2100.0)
+        XCTAssertEqual(record.jsonLine(), Golden.metricsTelemetryEmptyRow)
+    }
+
+    /// The whole point of "additive": the new build writing an old-shaped event
+    /// must produce the old bytes, or the merged stream forks.
+    func testOmittedTelemetryReproducesTheLegacyShapeByteForByte() {
+        let record = MetricsRecord(
+            ts: 1785872035.681684, heldMs: 1468.75, engine: "apple_live",
+            finalizeMs: 1500.9, timedOut: false, postMs: 0.0, insertMs: 0.0,
+            outcome: "empty", chars: 0)
+        XCTAssertEqual(record.jsonLine(), Golden.metricsLegacyEmptyRow)
+        for key in ["empty_reason", "peak_level", "audio_ms", "raw_chars", "refine_delta"] {
+            XCTAssertFalse(record.jsonLine().contains(key), "\(key) must be omitted, not null")
+        }
+    }
+
+    func testTelemetryFieldOrderIsTheOnDiskOrder() throws {
+        let record = MetricsRecord(
+            ts: 1.0, heldMs: 2.0, engine: "e", finalizeMs: 3.0, timedOut: false,
+            postMs: 4.0, insertMs: 5.0, outcome: "paste", chars: 6,
+            releaseToTextMs: 7.0, aiMs: 8.0, ai: "applied",
+            emptyReason: "silent", peakLevel: 0.5, audioMs: 9.0,
+            rawChars: 10, refineDelta: 11)
+        guard case .object(let object) = try WispritJSON.parse(record.jsonLine()) else {
+            return XCTFail("not an object")
+        }
+        XCTAssertEqual(object.keys, [
+            "ts", "held_ms", "engine", "finalize_ms", "timed_out", "post_ms",
+            "insert_ms", "outcome", "chars", "release_to_text_ms", "ai_ms", "ai",
+            "empty_reason", "peak_level", "audio_ms", "raw_chars", "refine_delta",
+        ])
+    }
+
+    /// `peak_level` arrives as a `Float` widened to `Double`
+    /// (0.02 → 0.019999999552965164), which would otherwise print in full.
+    func testPeakLevelRoundsToFourDecimalsThroughTheFloatWidening() {
+        // The engine's peak is a Float: `Double(Float(0.02))` is
+        // 0.019999999552965164, which would otherwise print in full.
+        let cases: [(Float, String)] = [
+            (0.02, "0.02"), (0.0371, "0.0371"), (0.4123456, "0.4123"),
+            (0, "0.0"), (1, "1.0"),
+        ]
+        for (level, expected) in cases {
+            let line = MetricsRecord(
+                ts: 0.0, heldMs: 0.0, engine: "", finalizeMs: 0.0, timedOut: false,
+                postMs: 0.0, insertMs: 0.0, outcome: "empty", chars: 0,
+                peakLevel: Double(level)).jsonLine()
+            XCTAssertTrue(line.contains(#""peak_level": \#(expected)}"#), "\(level) → \(line)")
+        }
+    }
+
+    func testCountersStayIntegers() {
+        let line = MetricsRecord(
+            ts: 0.0, heldMs: 0.0, engine: "", finalizeMs: 0.0, timedOut: false,
+            postMs: 0.0, insertMs: 0.0, outcome: "paste", chars: 6,
+            rawChars: 540, refineDelta: 0).jsonLine()
+        XCTAssertTrue(line.contains(#""raw_chars": 540, "refine_delta": 0}"#), line)
+    }
+
+    func testLegacyAndTelemetryLinesCoexistInOneStream() throws {
+        try (Golden.metricsRealPythonLine + "\n" + Golden.metricsLegacyEmptyRow)
+            .write(to: path, atomically: true, encoding: .utf8)
+        let writer = MetricsWriter(path: path)
+        writer.write(MetricsRecord(
+            ts: 1786327400.10842, heldMs: 2153.61, engine: "apple_live",
+            finalizeMs: 118.42, timedOut: false, postMs: 0.0, insertMs: 0.0,
+            outcome: "empty", chars: 0,
+            emptyReason: "produced_nothing", peakLevel: 0.18423456, audioMs: 2100.0))
+        let rows = writer.readAll()
+        XCTAssertEqual(rows.count, 3)
+        XCTAssertNil(rows[1]["empty_reason"], "a legacy row has no reason to report")
+        XCTAssertEqual(rows[2]["empty_reason"], .string("produced_nothing"))
+        XCTAssertEqual(rows[2]["peak_level"], .double(0.1842))
+    }
+
+    func testBridgeCarriesTheTelemetryFields() throws {
+        let metrics = UtteranceMetrics(
+            fields: [
+                MetricsField.ts: 1786327400.10842,
+                MetricsField.heldMs: 2153.61,
+                MetricsField.finalizeMs: 118.42,
+                MetricsField.peakLevel: 0.18423456,
+                MetricsField.audioMs: 2100.0,
+            ],
+            outcome: "empty", engine: "apple_live")
+        let writer = MetricsWriter(path: path)
+        writer.write(metrics, emptyReason: "produced_nothing")
+        XCTAssertEqual(try String(contentsOf: path, encoding: .utf8),
+                       Golden.metricsTelemetryEmptyRow)
+    }
+
+    func testBridgeRoundsTheCountersToIntegers() {
+        let metrics = UtteranceMetrics(
+            fields: [MetricsField.ts: 1.0, MetricsField.rawChars: 540,
+                     MetricsField.refineDelta: 31],
+            outcome: "paste", engine: "e")
+        XCTAssertTrue(MetricsWriter(path: path).lineFor(metrics)
+            .contains(#""raw_chars": 540, "refine_delta": 31}"#))
+    }
+
     /// `chars` is an int and `timed_out` a bool in the Python dict; emitting
     /// `525.0` or `"false"` would break every consumer of the stream.
     func testCharsIsAnIntegerAndTimedOutIsABool() {

@@ -40,6 +40,10 @@ public enum SetupFixKind: String, Sendable, Equatable {
     /// The existing "Enable Live Typing…" onboarding (installs + registers the
     /// input method, raises the system activation dialog).
     case enableLiveTyping
+    /// Fold the learn loop's junk entries back into the terms they are garbled
+    /// spellings of. The user's dictionary is never edited without this button:
+    /// see `LearnedTermCleanup`, which writes `dictionary.json.bak` first.
+    case cleanLearnedTerms
 
     /// System Settings deep link, when the fix is "open a pane".
     public var settingsURL: String? {
@@ -54,7 +58,7 @@ public enum SetupFixKind: String, Sendable, Equatable {
             return "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
         case .openAppleIntelligenceSettings:
             return "x-apple.systempreferences:com.apple.Siri-Settings.extension"
-        case .none, .requestMicrophone, .relaunch, .enableLiveTyping:
+        case .none, .requestMicrophone, .relaunch, .enableLiveTyping, .cleanLearnedTerms:
             return nil
         }
     }
@@ -168,6 +172,7 @@ public enum SetupChecklist {
     public static let speechID = "speech"
     public static let appleIntelligenceID = "apple_intelligence"
     public static let liveTypingID = "live_typing"
+    public static let learnedTermsID = "learned_terms"
 
     /// The nuance that cost the user an hour: the grant binds when the event tap
     /// is created, so a toggle flipped while Wisprit is running changes nothing
@@ -371,6 +376,29 @@ public enum SetupChecklist {
             fixTitle: (installed && !switchedOff)
                 ? ""
                 : (switchedOff && installed ? "Turn On Live Typing…" : "Enable Live Typing…")))
+
+        // 8. Learned spellings that need folding back — the one row that
+        //    appears only when there is something to do. It is not a permission
+        //    and not a setup step: a clean dictionary has nothing to say here,
+        //    and an always-green eighth row would be noise on every install.
+        if !facts.learnedTerms.suspects.isEmpty {
+            let learned = check(Doctor.learnedTermsLabel)
+            let count = facts.learnedTerms.suspects.count
+            items.append(SetupItem(
+                id: learnedTermsID,
+                doctorLabel: Doctor.learnedTermsLabel,
+                title: "Learned spellings",
+                mark: learned.mark,
+                isRequired: learned.isRequired,
+                isEssential: false,
+                summary: "Wisprit learned \(count) spelling\(count == 1 ? "" : "s") that "
+                    + "look like garbled versions of words it already knows. Cleaning them "
+                    + "up folds each one back into the right word — your own entries are "
+                    + "left alone, and a backup is written first.",
+                detail: learned.detail,
+                fix: .cleanLearnedTerms,
+                fixTitle: Doctor.cleanLearnedTermsTitle))
+        }
 
         return items
     }

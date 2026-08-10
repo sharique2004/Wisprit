@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wisprit — dictation that never leaves your Mac</title>
+<meta name="description" content="Fully-local push-to-talk dictation for macOS. Hold the Fn key, speak, release — cleaned-up text appears at your cursor. No cloud, no account, no telemetry.">
+<meta property="og:title" content="Wisprit — dictation that never leaves your Mac">
+<meta property="og:description" content="Hold Fn, speak, release. On-device speech recognition and AI cleanup on Apple silicon. No cloud, no account, no telemetry.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://wisprit.shariquekhatri.com">
+<link rel="icon" href="icon.svg" type="image/svg+xml">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="nav">
+  <a class="wordmark" href="#top" aria-label="Wisprit home">
+    <span class="dot" aria-hidden="true"></span>Wisprit
+  </a>
+  <nav>
+    <a href="#how">How it works</a>
+    <a href="#compare">Compare</a>
+    <a href="https://github.com/sharique2004/Wisprit">GitHub</a>
+    <a class="nav-cta" href="#download">Download</a>
+  </nav>
+</header>
+
+<main id="top">
+
+  <!-- ======================= hero: the demo ======================= -->
+  <section class="hero">
+    <h1>Dictation that never<br>leaves <em>your&nbsp;Mac.</em></h1>
+    <p class="sub">Hold a key. Speak. Release. Your words appear at the cursor, cleaned up —
+    transcribed and polished entirely on this machine.</p>
+
+    <div class="demo" id="demo">
+      <div class="demo-field" aria-live="polite">
+        <span class="committed" id="demo-committed"></span><span class="volatile" id="demo-volatile"></span><span class="caret" aria-hidden="true"></span>
+      </div>
+      <div class="demo-hint" id="demo-hint">
+        <button class="keycap" id="keycap" aria-label="Hold to dictate (or hold the space bar)">
+          <span class="keycap-glyph">🌐</span>
+          <span class="keycap-label">fn</span>
+        </button>
+        <p><span class="mic-dot" id="mic-dot" aria-hidden="true"></span><span id="demo-state">Hold the key to dictate — or just watch.</span></p>
+      </div>
+    </div>
+
+    <div class="cta-row" id="download">
+      <a class="button-primary" href="Wisprit.dmg" download>Download for macOS</a>
+      <a class="button-quiet" href="https://github.com/sharique2004/Wisprit">View the source</a>
+    </div>
+    <p class="fineprint">Free &amp; open source · Apple silicon · macOS 26 (Tahoe) or later ·
+    <a href="Wisprit.dmg.sha256">SHA-256</a> · Notarized by Apple</p>
+  </section>
+
+  <!-- ======================= the signal chain ======================= -->
+  <section class="studio" id="how">
+    <div class="studio-inner">
+      <h2><em>The whole pipeline</em> fits in the room.</h2>
+      <p class="studio-lede">Every stage runs on your Mac's own silicon. There is no networking code
+      on any path — not disabled, not opted out. Absent.</p>
+
+      <ol class="chain">
+        <li>
+          <span class="chain-stage">Microphone</span>
+          <span class="chain-note">records only while the key is held</span>
+        </li>
+        <li>
+          <span class="chain-stage">Speech engine</span>
+          <span class="chain-note">Apple SpeechAnalyzer, on the Neural Engine — words stream in while you speak</span>
+        </li>
+        <li>
+          <span class="chain-stage">Cleanup cage</span>
+          <span class="chain-note">on-device Apple Intelligence fixes misheard words, strips filler — verbatim always wins</span>
+        </li>
+        <li>
+          <span class="chain-stage">Your rules</span>
+          <span class="chain-note">personal dictionary and voice commands, guaranteed by regex, not a model</span>
+        </li>
+        <li>
+          <span class="chain-stage">Your cursor</span>
+          <span class="chain-note">69–108&nbsp;ms from key-release to final text</span>
+        </li>
+      </ol>
+
+      <pre class="netlog" aria-label="Network activity during dictation">$ network requests made while you dictated
+  0   — and 0 yesterday, and 0 forever. Audio and text stay here.</pre>
+    </div>
+  </section>
+
+  <!-- ======================= features ======================= -->
+  <section class="features">
+    <h2>Built like a tool, <em>not a service.</em></h2>
+    <div class="grid">
+      <article>
+        <h3>Live Typing</h3>
+        <p>Words land in the field <strong>while you're still speaking</strong> — underlined and
+        provisional, committed as one clean insert. One ⌘Z undoes the whole utterance. No other
+        dictation app ships this.</p>
+      </article>
+      <article>
+        <h3>AI cleanup, caged</h3>
+        <p>The on-device model fixes homophones ("right heavy" → "write-heavy") and punctuation, inside
+        strict guard rails: if it rewrites, summarizes, or answers instead of cleaning, you get your
+        verbatim words back. Cleanup can win, never lose.</p>
+      </article>
+      <article>
+        <h3>Spell it once, keep it forever</h3>
+        <p>"Add Sharique to the invite — that's S-H-A-R-I-Q-U-E." The misheard word is fixed in place
+        and the spelling joins your dictionary, so recognition itself improves next time.</p>
+      </article>
+      <article>
+        <h3>Your dictionary, enforced</h3>
+        <p>Names, jargon, and product terms are corrected by deterministic rules on every utterance
+        and fed to the recognizer as biasing hints. Your vocabulary is a guarantee, not a suggestion.</p>
+      </article>
+      <article>
+        <h3>Privacy by construction</h3>
+        <p>No account, no subscription, no telemetry, no network calls anywhere in the binary. History
+        is plain text in a local file you can purge from the menu. The mic is hard-off between holds.</p>
+      </article>
+      <article>
+        <h3>Fast where it counts</h3>
+        <p>The speech engine pre-warms on key-down. Partial words appear about a second into the hold,
+        and the finished, cleaned text lands 69–108&nbsp;ms after release.</p>
+      </article>
+    </div>
+  </section>
+
+  <!-- ======================= comparison ======================= -->
+  <section class="compare" id="compare">
+    <h2>Where your <em>voice goes.</em></h2>
+    <div class="table-scroll">
+      <table>
+        <thead>
+          <tr><th scope="col">&nbsp;</th><th scope="col" class="us">Wisprit</th><th scope="col">Wispr Flow</th><th scope="col">macOS Dictation</th></tr>
+        </thead>
+        <tbody>
+          <tr><th scope="row">Speech processed</th><td class="us">On your Mac</td><td>Cloud (AWS)</td><td>On your Mac</td></tr>
+          <tr><th scope="row">AI cleanup</th><td class="us">On-device, caged</td><td>Cloud LLM</td><td>None</td></tr>
+          <tr><th scope="row">Works offline</th><td class="us">Always</td><td>No</td><td>Yes</td></tr>
+          <tr><th scope="row">Account &amp; price</th><td class="us">None · free</td><td>Account · $15/mo</td><td>None · built-in</td></tr>
+          <tr><th scope="row">Custom vocabulary</th><td class="us">Yes, learns &amp; biases</td><td>Yes, cloud-synced</td><td>No</td></tr>
+          <tr><th scope="row">Live text while speaking</th><td class="us">In the field itself</td><td>No</td><td>Yes</td></tr>
+          <tr><th scope="row">Your exact words</th><td class="us">Verbatim-first, always recoverable</td><td>Rewrites by default</td><td>Verbatim only</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="compare-note">Wispr Flow is excellent software with a different architecture: your audio,
+    screen context, and history are processed on its servers. Wisprit exists for people who want the
+    same class of experience with none of that leaving the room.</p>
+  </section>
+
+  <!-- ======================= requirements + faq ======================= -->
+  <section class="reqs">
+    <h2>What you need</h2>
+    <ul>
+      <li><strong>An Apple silicon Mac</strong> on macOS 26 (Tahoe) or later — the on-device speech engine ships with the OS.</li>
+      <li><strong>Apple Intelligence enabled</strong> for AI cleanup. Without it, dictation still runs with deterministic cleanup only.</li>
+      <li><strong>Three permissions</strong>, granted once: Microphone, Accessibility, Input Monitoring. The built-in <code>doctor</code> command walks you through every one.</li>
+    </ul>
+  </section>
+
+</main>
+
+<footer>
+  <p><span class="dot" aria-hidden="true"></span><strong>Wisprit</strong> — built by
+  <a href="https://shariquekhatri.com">Sharique Khatri</a> ·
+  <a href="https://github.com/sharique2004/Wisprit">Source on GitHub</a></p>
+  <p class="footer-quiet">This site serves static files. No analytics, no cookies — same rules as the app.</p>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>

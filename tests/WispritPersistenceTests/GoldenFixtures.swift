@@ -146,6 +146,24 @@ enum Golden {
     static let metricsMinimal =
         #"{"ts": 1.0, "held_ms": 10.0, "engine": "", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "error", "chars": 0}"# + "\n"
 
+    /// Every post-Python field present at once. No real utterance produces this
+    /// combination (`empty_reason` only ever rides on `outcome=empty`); its job
+    /// is to pin the five new keys' position — strictly after `ai` — their order,
+    /// the 4-decimal `peak_level` rounding and the int-ness of the two counters.
+    static let metricsTelemetryFull =
+        #"{"ts": 1785871825.3455071, "held_ms": 47416.0, "engine": "apple_live", "finalize_ms": 604.4, "timed_out": false, "post_ms": 3.3, "insert_ms": 517.3, "outcome": "paste", "chars": 525, "release_to_text_ms": 3171.2, "ai_ms": 1923.9, "ai": "applied", "empty_reason": "produced_nothing", "peak_level": 0.0371, "audio_ms": 47250.0, "raw_chars": 540, "refine_delta": 31}"# + "\n"
+
+    /// The realistic new-era empty row: classified, no insertion and no refine,
+    /// so the telemetry follows `chars` directly.
+    static let metricsTelemetryEmptyRow =
+        #"{"ts": 1786327400.10842, "held_ms": 2153.6, "engine": "apple_live", "finalize_ms": 118.4, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "empty", "chars": 0, "empty_reason": "produced_nothing", "peak_level": 0.1842, "audio_ms": 2100.0}"# + "\n"
+
+    /// The same event as written before the telemetry existed — the shape 62 of
+    /// the 342 pre-telemetry rows have, and the one a record with all five new
+    /// fields nil must still reproduce byte for byte.
+    static let metricsLegacyEmptyRow =
+        #"{"ts": 1785872035.681684, "held_ms": 1468.8, "engine": "apple_live", "finalize_ms": 1500.9, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "empty", "chars": 0}"# + "\n"
+
     /// A real line from `~/.wisprit/metrics.log` (Python era) — the stream this
     /// writer must keep appending to.
     static let metricsRealPythonLine =

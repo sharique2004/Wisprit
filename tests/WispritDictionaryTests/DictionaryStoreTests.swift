@@ -295,6 +295,154 @@ final class DictionaryStoreTests: XCTestCase {
         XCTAssertEqual(store.stats(for: "Wispr Flow")?.source, "manual")
     }
 
+    // MARK: - Quarantined (pending) entries
+
+    /// All four derived structures at once. A quarantined entry is a note that
+    /// the loop once heard this spelling — it must not correct text, must not
+    /// self-case, must not answer `isKnownTerm`, and above all must not reach
+    /// the recogniser as a biasing string, where it would make the very
+    /// misrecognition that produced it likelier.
+    func testPendingEntriesAreExcludedFromEverythingDerived() throws {
+        try writeDictionary("""
+        {"terms": [
+          {"term": "Sharique", "hear": ["shariq"]},
+          {"term": "Sharhuue", "hear": ["Sharik"], "source": "spoken_spelling",
+           "pending": true, "observations": ["Sharik"]}
+        ]}
+        """)
+        let store = DictionaryStore()
+        XCTAssertEqual(store.terms(), ["Sharique"])
+        XCTAssertFalse(store.isKnownTerm("Sharhuue"))
+        XCTAssertEqual(store.vocabularyTerms(), ["Sharique"])
+        XCTAssertEqual(store.corrections().map(\.source).sorted(), ["Sharique", "shariq"])
+        XCTAssertEqual(store.applyCorrections(to: "hi sharhuue and shariq"),
+                       "hi sharhuue and Sharique")
+        // The record itself is still readable — an audit needs to see it.
+        XCTAssertEqual(store.heardPhrases(for: "Sharhuue"), ["Sharik"])
+    }
+
+    /// The live bug, in the shape that would have hurt. Three junk terms were
+    /// written from spelled runs the ASR misread; they were survivable only
+    /// because "Sharique" happens to sit earlier in the file and wins the
+    /// equal-length tie in the compiled correction order. Quarantining takes
+    /// the entry out of the running entirely, so file order stops mattering.
+    func testAQuarantinedJunkTermCannotShadowARealOneEvenWhenItComesFirst() throws {
+        let junkFirst = """
+        {"terms": [
+          {"term": "Sharhuue", "hear": ["Sharik"], "source": "spoken_spelling",
+           "pending": true, "observations": ["Sharik"]},
+          {"term": "Sharique", "hear": ["shariq", "sharik", "shreek"]}
+        ]}
+        """
+        try writeDictionary(junkFirst)
+        XCTAssertEqual(DictionaryStore().applyCorrections(to: "Hi Sharik how are you"),
+                       "Hi Sharique how are you")
+
+        // Without the flag the same file really does shadow: both `hear`
+        // phrases are six characters, so the tie goes to whichever entry the
+        // file lists first. That is the outcome the learn gate exists to
+        // prevent at write time.
+        try writeDictionary(junkFirst.replacingOccurrences(
+            of: #""pending": true, "observations": ["Sharik"]"#, with: #""x": 1"#))
+        XCTAssertEqual(DictionaryStore().applyCorrections(to: "Hi Sharik how are you"),
+                       "Hi Sharhuue how are you")
+    }
+
+    func testAddPendingWritesTheQuarantineFieldsAndLearnsNothingYet() throws {
+        try writeDictionary(#"{"terms": []}"#)
+        let store = DictionaryStore()
+        XCTAssertFalse(store.addPending(term: "Sharifue", observation: "Shariq"))
+
+        XCTAssertEqual(store.terms(), [])
+        XCTAssertFalse(store.isKnownTerm("Sharifue"))
+        XCTAssertEqual(store.applyCorrections(to: "hi shariq"), "hi shariq")
+        let text = try fileText()
+        XCTAssertTrue(text.contains(#""pending": true"#), text)
+        XCTAssertTrue(text.contains(#""observations": ["#), text)
+        XCTAssertEqual(store.stats(for: "Sharifue")?.source, "spoken_spelling")
+        XCTAssertNotNil(store.stats(for: "Sharifue")?.learnedAt)
+    }
+
+    /// The evidence rule: a second sighting of the same run promotes it, and
+    /// only then does it become vocabulary. One utterance is exactly what the
+    /// three live junk terms each had.
+    func testASecondObservationPromotesTheEntry() throws {
+        try writeDictionary(#"{"terms": []}"#)
+        let store = DictionaryStore()
+        store.addPending(term: "Sharifue", observation: "Shariq")
+        XCTAssertTrue(store.addPending(term: "sharifue", observation: "Cherie"),
+                      "the match is case-insensitive, like every other entry lookup")
+
+        XCTAssertEqual(store.terms(), ["Sharifue"], "the first spelling's casing is kept")
+        XCTAssertTrue(store.isKnownTerm("SHARIFUE"))
+        XCTAssertEqual(store.heardPhrases(for: "Sharifue"), ["Shariq", "Cherie"],
+                       "observations fold into hear, in the order they were seen")
+        XCTAssertEqual(store.applyCorrections(to: "hi shariq"), "hi Sharifue")
+        XCTAssertEqual(store.stats(for: "Sharifue")?.hitCount, 1)
+        let text = try fileText()
+        XCTAssertFalse(text.contains("pending"), text)
+        XCTAssertFalse(text.contains("observations"), text)
+    }
+
+    func testAddPendingOnAnAlreadyRealTermJustTeachesTheMisrecognition() throws {
+        try writeDictionary(#"{"terms": [{"term": "Sharique", "hear": ["shariq"]}]}"#)
+        let store = DictionaryStore()
+        XCTAssertTrue(store.addPending(term: "Sharique", observation: "Sharik"))
+        XCTAssertEqual(store.terms(), ["Sharique"])
+        XCTAssertEqual(store.heardPhrases(for: "Sharique"), ["shariq", "Sharik"])
+        XCTAssertFalse(try fileText().contains("pending"))
+    }
+
+    func testAddPendingIgnoresBlankTerms() throws {
+        try writeDictionary(#"{"terms": []}"#)
+        let store = DictionaryStore()
+        XCTAssertFalse(store.addPending(term: "  ", observation: "Shariq"))
+        XCTAssertEqual(store.learnedEntries(), [])
+    }
+
+    /// Only a JSON `true` is the flag — a hand-written "true" or a 1 must not
+    /// silently disable an entry the user meant to keep.
+    func testOnlyABooleanTrueQuarantinesAnEntry() throws {
+        try writeDictionary("""
+        {"terms": [
+          {"term": "Alpha", "pending": "true"},
+          {"term": "Bravo", "pending": 1},
+          {"term": "Charlie", "pending": false},
+          {"term": "Delta", "pending": true}
+        ]}
+        """)
+        XCTAssertEqual(DictionaryStore().terms(), ["Alpha", "Bravo", "Charlie"])
+    }
+
+    // MARK: - Audit seam
+
+    /// What a later plausibility check runs over: everything the learn loop
+    /// wrote, pending ones included, in file order. The store reports what is
+    /// on disk; deciding what counts as suspect is the classifier's job.
+    func testLearnedEntriesReportProvenanceIncludingPendingOnes() throws {
+        try writeDictionary("""
+        {"terms": [
+          {"term": "InsForge", "hear": ["in forge"]},
+          {"term": "Sharhuue", "hear": ["Sharik"], "source": "spoken_spelling",
+           "hit_count": 2},
+          {"term": "Sharifue", "source": "spoken_spelling", "pending": true,
+           "observations": ["Shariq"]},
+          {"term": "Manual", "source": "manual"}
+        ]}
+        """)
+        let store = DictionaryStore()
+        let learned = store.learnedEntries(source: "spoken_spelling")
+        XCTAssertEqual(learned.map(\.term), ["Sharhuue", "Sharifue"])
+        XCTAssertEqual(learned.first?.hear, ["Sharik"])
+        XCTAssertEqual(learned.first?.isPending, false)
+        XCTAssertEqual(learned.first?.stats.hitCount, 2)
+        XCTAssertEqual(learned.last?.isPending, true)
+        XCTAssertEqual(learned.last?.observations, ["Shariq"])
+        XCTAssertEqual(store.learnedEntries().map(\.term),
+                       ["InsForge", "Sharhuue", "Sharifue", "Manual"])
+        XCTAssertEqual(store.learnedEntries(source: "manual").map(\.term), ["Manual"])
+    }
+
     // MARK: - Atomic writes
 
     func testWritesLeaveNoTemporaryFilesBehind() throws {

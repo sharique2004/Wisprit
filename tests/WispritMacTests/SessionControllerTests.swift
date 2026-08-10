@@ -42,8 +42,10 @@ final class SessionControllerTests: XCTestCase {
         init(useRefiner: Bool = true,
              corrector: SpokenSpellingCorrector? = nil,
              enabled: Bool = true,
-             debounceMs: Double = 150) {
+             debounceMs: Double = 150,
+             reconcile: Bool = false) {
             inserter.history = history
+            inserter.asr = asr
             session = SessionController(
                 events: events,
                 asr: asr,
@@ -63,7 +65,7 @@ final class SessionControllerTests: XCTestCase {
                     // The ticker and the reconciliation pass both spawn
                     // background work; off here so assertions stay deterministic.
                     levelTickInterval: nil,
-                    reconcileVocabulary: false))
+                    reconcileVocabulary: reconcile))
         }
 
         /// One complete hold: press at t=0, release at t=`heldSeconds`.
@@ -246,13 +248,72 @@ final class SessionControllerTests: XCTestCase {
 
         XCTAssertTrue(h.inserter.inserted.isEmpty)
         XCTAssertTrue(h.history.added.isEmpty)
-        XCTAssertEqual(h.pill.errors, ["nothing recognized"])
+        XCTAssertEqual(h.pill.errors, ["Didn't hear anything — is the right mic selected?"],
+                       "a full second of hold with nothing audible in it is a user who did "
+                       + "not speak, and the pill now says so")
         XCTAssertEqual(h.metrics.records.count, 1)
         XCTAssertEqual(h.metrics.last?.outcome, "empty")
+        XCTAssertEqual(h.metrics.last?.emptyReason, EmptyReason.silent.rawValue)
         XCTAssertEqual(h.metrics.last?.chars, 0)
         XCTAssertNil(h.metrics.last?.releaseToTextMs,
                      "the empty branch omits release_to_text_ms, exactly like session.py")
         XCTAssertEqual(h.session.state, .idle)
+    }
+
+    /// The whole point of `empty_reason`: one row per fault, and pill copy that
+    /// tells the user which of them just happened.
+    func testEmptyBranchNamesTheReasonAndSaysTheRightThing() {
+        // Anything at or above the voiced threshold means the audio really did
+        // contain speech; MetricsSummary restates the engine's constant.
+        let voiced = Float(MetricsSummary.voicedPeakThreshold) + 0.1
+        let cases: [(reason: EmptyReason, result: UtteranceResult, heldSeconds: Double,
+                     error: String?, notice: String?)] = [
+            (.starved,
+             UtteranceResult(text: "", engine: "apple_live", finalizeMs: 1500, starvedInput: true),
+             2.0, "Microphone delivered no audio", nil),
+            (.silent,
+             UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40, peakLevel: 0.001),
+             2.0, "Didn't hear anything — is the right mic selected?", nil),
+            (.shortHold,
+             UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40, peakLevel: 0.001),
+             0.4, nil, "Hold the key while you speak"),
+            (.producedNothing,
+             UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40, peakLevel: voiced),
+             2.0, "nothing recognized", nil),
+            (.timedOut,
+             UtteranceResult(text: "", engine: "apple_live", finalizeMs: 1500,
+                             timedOut: true, peakLevel: voiced),
+             2.0, "nothing recognized", nil),
+            (.crashed,
+             UtteranceResult(text: "", engine: "apple_live", finalizeMs: 12,
+                             crashed: true, peakLevel: voiced),
+             2.0, "nothing recognized", nil),
+        ]
+
+        for c in cases {
+            let h = Harness()
+            h.asr.result = c.result
+
+            h.utterance(heldSeconds: c.heldSeconds)
+
+            XCTAssertEqual(h.metrics.last?.outcome, "empty", "\(c.reason)")
+            XCTAssertEqual(h.metrics.last?.emptyReason, c.reason.rawValue, "\(c.reason)")
+            XCTAssertEqual(h.pill.errors, c.error.map { [$0] } ?? [], "\(c.reason)")
+            XCTAssertEqual(h.pill.notices, c.notice.map { [$0] } ?? [], "\(c.reason)")
+        }
+    }
+
+    func testTextThatSurvivesAsrButNotTheCleanupHasNoEmptyReason() {
+        let h = Harness()
+        h.asr.result = UtteranceResult(text: "um", engine: "apple_live", finalizeMs: 40,
+                                       peakLevel: 0.5)
+
+        h.utterance()
+
+        XCTAssertEqual(h.metrics.last?.outcome, "empty")
+        XCTAssertNil(h.metrics.last?.emptyReason,
+                     "the engine did produce text — nothing about it is unexplained")
+        XCTAssertEqual(h.pill.errors, ["nothing recognized"])
     }
 
     // MARK: - insertion failures
@@ -436,10 +497,14 @@ final class SessionControllerTests: XCTestCase {
                                        engine: "apple_live", finalizeMs: 70)
         h.utterance()
 
-        XCTAssertEqual(h.vocabulary.learned.count, 1, "the term is learned forever")
-        XCTAssertEqual(h.vocabulary.learned.first?.term, "Sharique")
-        XCTAssertEqual(h.vocabulary.learned.first?.heard, ["Cherie"])
-        XCTAssertEqual(h.vocabulary.learned.first?.source, "spoken_spelling")
+        // A first observation of a brand-new term is QUARANTINED, not made live
+        // vocabulary — a second spelling (or the user) promotes it. This is the
+        // plausibility gate's core guarantee against one-shot pollution.
+        XCTAssertEqual(h.vocabulary.learned.count, 0,
+                       "a single observation never creates live vocabulary")
+        XCTAssertEqual(h.vocabulary.pending.count, 1)
+        XCTAssertEqual(h.vocabulary.pending.first?.term, "Sharique")
+        XCTAssertEqual(h.vocabulary.pending.first?.observation, "Cherie")
         XCTAssertEqual(h.pill.notices, ["Learned Sharique"])
         XCTAssertTrue(h.pill.errors.isEmpty,
                       "a directive-only utterance is a success, not \"nothing recognized\"")
@@ -465,7 +530,8 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertFalse(second.contains("-"), "the spelled run never reaches the field: \(second)")
         XCTAssertFalse(second.lowercased().contains("actually"), "the trigger is suppressed too")
         XCTAssertTrue(second.contains("Send the invite"))
-        XCTAssertEqual(h.vocabulary.learned.count, 1)
+        XCTAssertEqual(h.vocabulary.pending.count, 1, "first observation quarantines")
+        XCTAssertEqual(h.vocabulary.learned.count, 0)
     }
 
     func testDictionaryWritesHappenAfterInsertion() {
@@ -482,9 +548,10 @@ final class SessionControllerTests: XCTestCase {
         h.utterance()
 
         XCTAssertEqual(h.inserter.inserted.count, 2)
-        XCTAssertEqual(h.vocabulary.learned.count, 1,
+        XCTAssertEqual(h.vocabulary.pending.count, 1,
                        "the learn write is off the paste path — after insertion")
-        XCTAssertEqual(h.vocabulary.uses, ["Sharique"])
+        XCTAssertEqual(h.vocabulary.uses, [],
+                       "a quarantined term is not live vocabulary, so no use is recorded")
     }
 
     func testSpelledRunWithNoAntecedentIsInsertedLiterallyAndNeverLearned() {
@@ -509,6 +576,137 @@ final class SessionControllerTests: XCTestCase {
         h.utterance()
 
         XCTAssertEqual(h.inserter.inserted, ["the payload is J-S-O-N"])
+    }
+
+    // MARK: - telemetry fields
+
+    func testEveryRowCarriesPeakLevelAndAudioMs() {
+        let h = Harness()
+        h.asr.result = UtteranceResult(text: "hello there", engine: "apple_live",
+                                       finalizeMs: 20, peakLevel: 0.42)
+        h.asr.retainedPcm = Data(count: 32_000)         // 1.0 s of 16 kHz mono Int16
+
+        h.utterance()
+
+        let record = try? XCTUnwrap(h.metrics.last)
+        guard let record else { return }
+        XCTAssertEqual(record.peakLevel ?? -1, 0.42, accuracy: 1e-6)
+        XCTAssertEqual(record.audioMs ?? -1, 1000, accuracy: 0.001)
+        XCTAssertEqual(record.rawChars, record.chars, "raw_chars restates chars for the new schema")
+    }
+
+    func testRefineDeltaIsWrittenOnlyWhenRefineRan() {
+        let h = Harness()
+        h.asr.result = UtteranceResult(text: "hello there", engine: "apple_live", finalizeMs: 20)
+        h.refiner.transform = { RefineResult(text: $0 + "!", outcome: .applied) }
+
+        h.utterance()
+
+        XCTAssertEqual(h.metrics.last?.refineDelta, 1, "one character moved")
+
+        let off = Harness(useRefiner: false)
+        off.asr.result = UtteranceResult(text: "hello there", engine: "apple_live",
+                                         finalizeMs: 20, peakLevel: 0.3)
+
+        off.utterance()
+
+        XCTAssertNil(off.metrics.last?.refineDelta, "no refine stage, no delta to report")
+        XCTAssertEqual(off.metrics.last?.peakLevel ?? -1, 0.3, accuracy: 1e-6,
+                       "peak_level rides every row, refine or not")
+    }
+
+    func testRefineDeltaCountsCharactersAndIsZeroForAVerbatimPass() {
+        XCTAssertEqual(SessionController.refineDelta(raw: "same", refined: "same"), 0)
+        XCTAssertEqual(SessionController.refineDelta(raw: "teh cat", refined: "the cat"), 2)
+        XCTAssertEqual(SessionController.refineDelta(raw: "", refined: "added"), 5)
+    }
+
+    // MARK: - retention race
+
+    func testNoReconcileRunsBeforeInsertion() {
+        let h = Harness(reconcile: true)
+
+        h.utterance()
+
+        XCTAssertEqual(h.inserter.reconcileDepthAtInsert, [0],
+                       "the vocabulary pass costs seconds — none of it may run before the "
+                       + "text reaches the field")
+        // …but it does run, off the path, or the assertion above proves nothing.
+        let deadline = Date().addingTimeInterval(5)
+        while h.asr.reconcileTally == 0 && Date() < deadline { usleep(5_000) }
+        XCTAssertEqual(h.asr.reconcileTally, 1)
+    }
+
+    func testReconcileKeepsTheUtteranceItWasSpawnedFor() {
+        let h = Harness(reconcile: true)
+        let first = Data(repeating: 1, count: 32_000)
+        let second = Data(repeating: 2, count: 16_000)
+        let entered = expectation(description: "the reconcile pass started")
+        h.asr.onReconcileEnter = { entered.fulfill() }
+        h.asr.parkReconciles = true
+        h.asr.retainedPcm = first
+
+        h.utterance()
+        wait(for: [entered], timeout: 5)
+
+        // A second Fn press inside the 0.5–2.5 s reconcile window: this is the
+        // race. The engine's live retention buffer now holds the NEW utterance.
+        h.asr.retainedPcm = second
+        h.session.dispatch(HotkeyEvent(.press, ts: 2))
+        h.asr.releaseReconciles()
+
+        let deadline = Date().addingTimeInterval(5)
+        while h.asr.reconcileLog.isEmpty && Date() < deadline { usleep(5_000) }
+        let calls = h.asr.reconcileLog
+        XCTAssertEqual(calls.count, 1)
+        XCTAssertEqual(calls.first?.retained.id, 1, "utterance 1's pass, utterance 1's id")
+        XCTAssertEqual(calls.first?.retained.pcm, first,
+                       "the pass transcribes the audio snapshotted at ITS finalize")
+        XCTAssertEqual(calls.first?.live, second,
+                       "…and the live buffer had genuinely moved on by then")
+    }
+
+    // MARK: - deferred work
+
+    func testDeferredWorkRunsOnlyOnceTheMachineIsIdle() {
+        let h = Harness()
+        let ran = Recorder<String>()
+
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        h.session.enqueueDeferred("retro") { ran.append("retro") }
+        h.session.drainDeferred()
+        XCTAssertEqual(ran.values, [], "never mid-utterance")
+
+        h.session.dispatch(HotkeyEvent(.release, ts: 1.0))
+        h.session.drainDeferred()
+        XCTAssertEqual(ran.values, ["retro"])
+
+        h.session.drainDeferred()
+        XCTAssertEqual(ran.values, ["retro"], "the slot is consumed, not repeated")
+    }
+
+    func testEnqueueingDeferredWorkReplacesThePendingSlot() {
+        let h = Harness()
+        let ran = Recorder<String>()
+
+        h.session.enqueueDeferred("stale") { ran.append("stale") }
+        h.session.enqueueDeferred("fresh") { ran.append("fresh") }
+        h.session.drainDeferred()
+
+        XCTAssertEqual(ran.values, ["fresh"], "one slot: the newer reconciliation wins")
+    }
+
+    func testANewUtteranceDropsPendingDeferredWork() {
+        let h = Harness()
+        let ran = Recorder<String>()
+        h.session.enqueueDeferred("stale") { ran.append("stale") }
+
+        h.utterance()
+        h.session.drainDeferred()
+
+        XCTAssertEqual(ran.values, [],
+                       "an edit planned against the previous utterance's document must never "
+                       + "land after the next one")
     }
 
     // MARK: - interrupt mapping

@@ -17,10 +17,14 @@ import WispritRefine
 public protocol AsrPort: Sendable {
     func begin(onPartial: @escaping @Sendable (String) -> Void) async
     func finalize() async -> UtteranceResult
+    /// The audio `finalize()` detached. The session captures it on its own
+    /// thread the instant finalize returns; anything off-path gets the value,
+    /// never another look at this property.
+    var lastRetained: RetainedUtterance { get }
     func cancel() async
-    /// Off-path reconciliation over the retained PCM. Contractually only ever
-    /// called AFTER insertion — it takes hundreds of ms to seconds.
-    func reconcileVocabulary() async -> VocabularyReconciliation?
+    /// Off-path reconciliation over one utterance's audio. Contractually only
+    /// ever called AFTER insertion — it takes hundreds of ms to seconds.
+    func reconcileVocabulary(_ retained: RetainedUtterance) async -> VocabularyReconciliation?
 }
 
 public protocol AudioPort: Sendable {
@@ -74,6 +78,9 @@ public protocol VocabularyPort: Sendable {
     @discardableResult
     func maybeReload() -> Bool
     func add(_ learned: LearnedTerm)
+    /// Quarantine path: the run was believable but unverified, so it must not
+    /// become live vocabulary until a second observation confirms it.
+    func addPending(term: String, observation: String)
     func recordUse(term: String)
 }
 
@@ -90,7 +97,12 @@ public protocol RecordingGate: Sendable {
 extension History: HistoryPort {}
 extension MetricsWriter: MetricsPort {}
 extension HotkeyMonitor: RecordingGate {}
-extension DictionaryStore: VocabularyPort {}
+extension DictionaryStore: VocabularyPort {
+    public func addPending(term: String, observation: String) {
+        addPending(term: term, observation: observation,
+                   source: "spoken_spelling")
+    }
+}
 
 public struct AsrManagerPort: AsrPort {
     let manager: AsrManager
@@ -100,9 +112,10 @@ public struct AsrManagerPort: AsrPort {
         await manager.begin(onPartial: onPartial)
     }
     public func finalize() async -> UtteranceResult { await manager.finalize() }
+    public var lastRetained: RetainedUtterance { manager.lastRetained }
     public func cancel() async { await manager.cancel() }
-    public func reconcileVocabulary() async -> VocabularyReconciliation? {
-        await manager.reconcileVocabulary()
+    public func reconcileVocabulary(_ retained: RetainedUtterance) async -> VocabularyReconciliation? {
+        await manager.reconcileVocabulary(retained)
     }
 }
 

@@ -97,6 +97,9 @@ final class RapidSessionMatrixTests: XCTestCase {
         /// Volatile callbacks seen. 0 with audio fed == the engine produced nothing
         /// at all; >0 with an empty result == finals never landed but text existed.
         var partials: Int
+        /// The audio this utterance's finalize detached — what an off-path pass
+        /// spawned for THIS row must be handed.
+        var retained: RetainedUtterance
     }
 
     private func runUtterance(_ i: Int, pcm: Data, manager: AsrManager,
@@ -108,7 +111,8 @@ final class RapidSessionMatrixTests: XCTestCase {
         let r = await manager.finalize()
         let row = Row(index: i, finalizeMs: r.finalizeMs, empty: r.text.isEmpty,
                       timedOut: r.timedOut, crashed: r.crashed, text: r.text,
-                      reconcilesInFlight: overlapping, partials: partials.value)
+                      reconcilesInFlight: overlapping, partials: partials.value,
+                      retained: manager.lastRetained)
         print(String(format: "MATRIX utt %d | finalize %7.1f ms | %@ | timedOut=%@ crashed=%@ | inflight=%d partials=%2d | %@",
                      i, r.finalizeMs, r.text.isEmpty ? "EMPTY" : "ok   ",
                      r.timedOut ? "Y" : "n", r.crashed ? "Y" : "n",
@@ -167,6 +171,7 @@ final class RapidSessionMatrixTests: XCTestCase {
             await manager.begin { _ in partials.increment() }
             if !starve { await feedRealtime(clips[(i - 1) % clips.count]) { manager.feed(pcm: $0) } }
             let r = await manager.finalize()
+            let retained = manager.lastRetained
             let bad = r.text.isEmpty && !starve
             if bad { empties += 1 }
             print(String(format: "MATRIX recover utt %d | %@ | finalize %7.1f ms | %@ | starved=%@ | %@",
@@ -180,7 +185,7 @@ final class RapidSessionMatrixTests: XCTestCase {
             if Self.config != "a" && !r.text.isEmpty {
                 inFlight.increment()
                 Task.detached(priority: .utility) {
-                    _ = await manager.reconcileVocabulary()
+                    _ = await manager.reconcileVocabulary(retained)
                     inFlight.decrement()
                 }
             }
@@ -217,8 +222,9 @@ final class RapidSessionMatrixTests: XCTestCase {
                 // detached and does NOT await it, so it can still be running when
                 // the next utterance starts.
                 inFlight.increment()
+                let retained = row.retained
                 Task.detached(priority: .utility) {
-                    let r = await manager.reconcileVocabulary()
+                    let r = await manager.reconcileVocabulary(retained)
                     print(String(format: "MATRIX   reconcile after utt %d took %.0f ms -> %@",
                                  row.index, r?.elapsedMs ?? -1, String((r?.transcript ?? "nil").prefix(50))))
                     if config == "c" { await SpeechModels.endRetention() }

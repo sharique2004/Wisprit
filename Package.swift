@@ -26,6 +26,9 @@ let package = Package(
         .target(name: "WispritPersistence", dependencies: ["WispritKit"], swiftSettings: v5),
         .target(name: "WispritRefine", dependencies: ["WispritKit"], swiftSettings: v5),
         .target(name: "WispritEngine", dependencies: ["WispritKit"], swiftSettings: v5),
+        // Accuracy measurement: WER/CER/term-recall scoring, corpus model, scoreboard,
+        // refine battery cases. Pure — no audio, no models, no network.
+        .target(name: "WispritEval", dependencies: ["WispritKit"], swiftSettings: v5),
 
         // Apple Intelligence polish modes (replaces the Python claude-CLI polish; on-device only).
         .target(name: "WispritPolish", dependencies: ["WispritKit", "WispritRefine"], swiftSettings: v5),
@@ -41,7 +44,7 @@ let package = Package(
             name: "WispritMac",
             dependencies: [
                 "WispritKit", "WispritPostProcess", "WispritDictionary", "WispritCorrections",
-                "WispritPersistence", "WispritRefine", "WispritEngine",
+                "WispritPersistence", "WispritRefine", "WispritEngine", "WispritEval",
                 "WispritMacInput", "WispritMacUI", "WispritPolish", "WispritIMProtocol",
             ],
             swiftSettings: v5),
@@ -52,7 +55,8 @@ let package = Package(
         .testTarget(name: "WispritDictionaryTests", dependencies: ["WispritDictionary"], path: "tests/WispritDictionaryTests", swiftSettings: v5),
         .testTarget(name: "WispritCorrectionsTests", dependencies: ["WispritCorrections"], path: "tests/WispritCorrectionsTests", swiftSettings: v5),
         .testTarget(name: "WispritPersistenceTests", dependencies: ["WispritPersistence"], path: "tests/WispritPersistenceTests", swiftSettings: v5),
-        .testTarget(name: "WispritRefineTests", dependencies: ["WispritRefine"], path: "tests/WispritRefineTests", swiftSettings: v5),
+        .testTarget(name: "WispritRefineTests", dependencies: ["WispritRefine", "WispritEval"], path: "tests/WispritRefineTests", swiftSettings: v5),
+        .testTarget(name: "WispritEvalTests", dependencies: ["WispritEval"], path: "tests/WispritEvalTests", swiftSettings: v5),
         .testTarget(name: "WispritEngineTests", dependencies: ["WispritEngine"], path: "tests/WispritEngineTests", swiftSettings: v5),
         .testTarget(name: "WispritMacInputTests", dependencies: ["WispritMacInput"], path: "tests/WispritMacInputTests", swiftSettings: v5),
         .testTarget(name: "WispritMacUITests", dependencies: ["WispritMacUI"], path: "tests/WispritMacUITests", swiftSettings: v5),

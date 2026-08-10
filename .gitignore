@@ -13,8 +13,16 @@ __pycache__/
 *.aiff
 *.wav
 
+# eval artifacts (aggregates are committed; transcripts and audio are not)
+docs/eval/runs/*.detail.jsonl
+tools/eval/corpus/**/audio/
+
 # Swift
 .build*/
 *.xcodeproj
 DerivedData/
 dist/
+
+# local tooling state (never ship)
+.claude/
+.wrangler/

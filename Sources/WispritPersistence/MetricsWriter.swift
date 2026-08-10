@@ -22,11 +22,21 @@ public struct MetricsRecord: Sendable {
     public var releaseToTextMs: Double?
     public var aiMs: Double?
     public var ai: String?           // refine outcome vocabulary
+    // Telemetry added after the Python era. Everything below is appended AFTER
+    // `ai` and omitted when nil, so a row written by this build is still a
+    // superset of a row written by any earlier one and the stream stays one file.
+    public var emptyReason: String?  // EmptyReason.rawValue; only on outcome == "empty"
+    public var peakLevel: Double?    // loudest metered level, 0…1
+    public var audioMs: Double?      // audio actually handed to the engine
+    public var rawChars: Int?        // chars before refine, so `chars` can be read as a delta
+    public var refineDelta: Int?     // edit distance raw → refined: the over-rewrite alarm
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
                 postMs: Double, insertMs: Double, outcome: String, chars: Int,
-                releaseToTextMs: Double? = nil, aiMs: Double? = nil, ai: String? = nil) {
+                releaseToTextMs: Double? = nil, aiMs: Double? = nil, ai: String? = nil,
+                emptyReason: String? = nil, peakLevel: Double? = nil,
+                audioMs: Double? = nil, rawChars: Int? = nil, refineDelta: Int? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -39,6 +49,11 @@ public struct MetricsRecord: Sendable {
         self.releaseToTextMs = releaseToTextMs
         self.aiMs = aiMs
         self.ai = ai
+        self.emptyReason = emptyReason
+        self.peakLevel = peakLevel
+        self.audioMs = audioMs
+        self.rawChars = rawChars
+        self.refineDelta = refineDelta
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -56,6 +71,13 @@ public struct MetricsRecord: Sendable {
         if let releaseToTextMs { entry["release_to_text_ms"] = .double(MetricsWriter.round1(releaseToTextMs)) }
         if let aiMs { entry["ai_ms"] = .double(MetricsWriter.round1(aiMs)) }
         if let ai { entry["ai"] = .string(ai) }
+        // Post-Python fields, strictly after `ai`: the prefix above must stay
+        // byte-identical or the merged stream stops being one stream.
+        if let emptyReason { entry["empty_reason"] = .string(emptyReason) }
+        if let peakLevel { entry["peak_level"] = .double(MetricsWriter.round4(peakLevel)) }
+        if let audioMs { entry["audio_ms"] = .double(MetricsWriter.round1(audioMs)) }
+        if let rawChars { entry["raw_chars"] = .int(rawChars) }
+        if let refineDelta { entry["refine_delta"] = .int(refineDelta) }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -72,6 +94,13 @@ public enum MetricsField {
     public static let chars = "chars"
     public static let releaseToTextMs = "release_to_text_ms"
     public static let aiMs = "ai_ms"
+    public static let peakLevel = "peak_level"
+    public static let audioMs = "audio_ms"
+    public static let rawChars = "raw_chars"
+    public static let refineDelta = "refine_delta"
+    // `empty_reason` is a string, so it has no slot in `UtteranceMetrics.fields`
+    // ([String: Double]) and rides beside `ai` on the bridge instead.
+    public static let emptyReason = "empty_reason"
 }
 
 public final class MetricsWriter: @unchecked Sendable {
@@ -100,7 +129,8 @@ public final class MetricsWriter: @unchecked Sendable {
     /// `fields` as 0/1 and `chars` as a whole number, because that struct's
     /// payload is `[String: Double]`; `ai` has no slot there at all, so the
     /// refine outcome is passed alongside.
-    public func write(_ metrics: UtteranceMetrics, ai: String? = nil) {
+    public func write(_ metrics: UtteranceMetrics, ai: String? = nil,
+                      emptyReason: String? = nil) {
         let f = metrics.fields
         write(MetricsRecord(
             ts: f[MetricsField.ts] ?? Date().timeIntervalSince1970,
@@ -114,7 +144,12 @@ public final class MetricsWriter: @unchecked Sendable {
             chars: Int((f[MetricsField.chars] ?? 0).rounded()),
             releaseToTextMs: f[MetricsField.releaseToTextMs],
             aiMs: f[MetricsField.aiMs],
-            ai: ai))
+            ai: ai,
+            emptyReason: emptyReason,
+            peakLevel: f[MetricsField.peakLevel],
+            audioMs: f[MetricsField.audioMs],
+            rawChars: f[MetricsField.rawChars].map { Int($0.rounded()) },
+            refineDelta: f[MetricsField.refineDelta].map { Int($0.rounded()) }))
     }
 
     /// Read the stream back, newest last, skipping unparsable lines (the file
@@ -135,5 +170,13 @@ public final class MetricsWriter: @unchecked Sendable {
     static func round1(_ x: Double) -> Double {
         guard x.isFinite, x.magnitude < 1e15 else { return x }
         return Double(String(format: "%.1f", x)) ?? x
+    }
+
+    /// Same rule at four decimals, for `peak_level`. The level is a `Float`
+    /// widened to `Double`, so it arrives as 0.03700000047683716; four decimals
+    /// is finer than the 0.02 voiced threshold needs and keeps the line short.
+    static func round4(_ x: Double) -> Double {
+        guard x.isFinite, x.magnitude < 1e11 else { return x }
+        return Double(String(format: "%.4f", x)) ?? x
     }
 }

@@ -201,7 +201,8 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
         return UtteranceResult(text: text.trimmingCharacters(in: .whitespaces),
                                engine: Self.engineName, finalizeMs: finalizeMs,
                                timedOut: timedOut, crashed: crashed,
-                               starvedInput: starved)
+                               starvedInput: starved, peakLevel: peakLevel,
+                               producedNothing: producedNothing)
     }
 
     public func cancel() async {

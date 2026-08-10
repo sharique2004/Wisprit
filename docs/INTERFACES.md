@@ -102,8 +102,10 @@ Helper: `packaging/wisprit_refine.swift`, compiled by
 on stdin until EOF → one JSON line `{"ok": true, "text": …}` /
 `{"ok": false, "error": …}` on stdout; `--check` prints availability.
 Requires macOS 26+, Apple Silicon, Apple Intelligence enabled. The
-instruction prompt is eval-locked by `tests/rehearsal_refine.sh` — run it
-after any prompt edit and after every macOS point release.
+instruction prompt is eval-locked by the Swift refine battery
+(`WISPRIT_REHEARSAL=1 swift test --filter RehearsalTests`; `Wisprit eval
+refine` records the scored artifact) — run it after any prompt edit and
+after every macOS point release.
 
 ## hotkey.py  (owner: agent A)
 

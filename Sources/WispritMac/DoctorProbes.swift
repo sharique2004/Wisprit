@@ -1,5 +1,6 @@
 #if os(macOS)
 import Foundation
+import WispritDictionary
 import WispritEngine
 import WispritIMProtocol
 import WispritKit
@@ -52,7 +53,116 @@ public extension Doctor {
         facts.dictionaryPath = WispritPaths.dictionaryPath.path
         facts.dictionaryValid = isValidJSON(WispritPaths.dictionaryPath)
 
+        // Its own store rather than the app's: `gather` is also the CLI's, and
+        // this is the only probe in here that reads a file the user edits. The
+        // window re-runs it every few seconds, which costs one dictionary load
+        // and one metrics.log read off the main thread — measured in
+        // milliseconds on the live 139-term file, and never on the paste path.
+        facts.metrics = recentMetrics()
+        facts.learnedTerms = LearnedTermCleanup.audit(
+            entries: DictionaryStore(path: WispritPaths.dictionaryPath).learnedEntries())
+        facts.osBuild = liveOSBuild()
+        if let baseline = repoFile(evalBaselineRelativePath) {
+            facts.evalBaselinePath = baseline.path
+            facts.evalBaselineOSBuild = (try? String(contentsOf: baseline, encoding: .utf8))
+                .flatMap(osBuild(inBaselineJSON:))
+        }
+
         return facts
+    }
+
+    // MARK: - accuracy & hygiene
+
+    /// The window the "Dictation health" row reads. Two weeks is what makes the
+    /// row about NOW: metrics.log spans three eras, and an all-time rate mixes
+    /// in failures that were fixed months ago.
+    static var dictationHealthWindow: MetricsWindow { MetricsWindow(days: 14) }
+
+    static func recentMetrics() -> MetricsSummary {
+        MetricsSummary.summarize(MetricsWriter().readAll(),
+                                 window: dictationHealthWindow,
+                                 now: Date().timeIntervalSince1970)
+    }
+
+    static var evalBaselineRelativePath: String { "docs/eval/BASELINE.json" }
+
+    /// A repo-relative file, when this build can see the checkout it came from.
+    ///
+    /// There is no repo-file idiom in doctor because until now no check needed
+    /// one, and the reason is worth keeping in mind: a shipped Wisprit.app has
+    /// no repo, so every caller must treat nil as ordinary. Walk up from the
+    /// executable (`.build/debug/Wisprit` in a checkout) and then from the
+    /// working directory, which is what `swift run` from the repo root gives.
+    static func repoFile(_ relativePath: String, levels: Int = 8) -> URL? {
+        var roots: [URL] = []
+        if let executable = Bundle.main.executableURL {
+            roots.append(executable.deletingLastPathComponent())
+        }
+        roots.append(URL(fileURLWithPath: FileManager.default.currentDirectoryPath))
+
+        for root in roots {
+            var directory = root.standardizedFileURL
+            for _ in 0...levels {
+                let candidate = directory.appendingPathComponent(relativePath)
+                if FileManager.default.fileExists(atPath: candidate.path) { return candidate }
+                let parent = directory.deletingLastPathComponent().standardizedFileURL
+                if parent.path == directory.path { break }
+                directory = parent
+            }
+        }
+        return nil
+    }
+
+    /// The `os_build` a baseline records, found by key rather than decoded.
+    ///
+    /// `Baseline` is the scoreboard's type and its shape is the scoreboard's to
+    /// change; a doctor row that stopped compiling — or worse, stopped
+    /// reporting — because a field moved would be a bad trade for a warn-only
+    /// check. So the file is searched for the key wherever it sits, and a
+    /// baseline that records none simply cannot be judged stale.
+    static func osBuild(inBaselineJSON text: String) -> String? {
+        guard let data = text.data(using: .utf8),
+              let root = try? JSONSerialization.jsonObject(with: data,
+                                                           options: [.fragmentsAllowed])
+        else { return nil }
+        return firstOSBuild(in: root)
+    }
+
+    static var osBuildKeys: [String] { ["os_build", "osBuild"] }
+
+    static func firstOSBuild(in value: Any) -> String? {
+        if let object = value as? [String: Any] {
+            for key in osBuildKeys {
+                if let found = object[key] as? String, !found.isEmpty { return found }
+            }
+            // Sorted so a nested hit is the same one on every run — an
+            // unordered walk would make the row flap between two builds.
+            for key in object.keys.sorted() {
+                if let value = object[key], let found = firstOSBuild(in: value) { return found }
+            }
+        }
+        if let array = value as? [Any] {
+            for item in array {
+                if let found = firstOSBuild(in: item) { return found }
+            }
+        }
+        return nil
+    }
+
+    /// The token `sw_vers -buildVersion` prints. Read from `ProcessInfo` rather
+    /// than by spawning `sw_vers`: the window re-runs this probe every few
+    /// seconds, and a subprocess per refresh for one string is not a trade
+    /// worth making.
+    static func liveOSBuild() -> String {
+        buildToken(inOSVersionString: ProcessInfo.processInfo.operatingSystemVersionString) ?? ""
+    }
+
+    /// "Version 26.0 (Build 25A123)" → "25A123".
+    static func buildToken(inOSVersionString text: String) -> String? {
+        guard let marker = text.range(of: "Build ") else { return nil }
+        let token = text[marker.upperBound...].prefix { $0 != ")" }
+            .trimmingCharacters(in: .whitespaces)
+        return token.isEmpty ? nil : token
     }
 
     /// Read-only inspection of the input-source database plus one liveness ping.

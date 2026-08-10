@@ -1,6 +1,7 @@
 import Foundation
 import WispritIMProtocol
 import WispritKit
+import WispritPersistence
 
 /// `wisprit doctor` — diagnose the environment and permissions.
 ///
@@ -143,6 +144,22 @@ public struct DoctorFacts: Sendable {
     public var dictionaryValid: Bool = false
     public var dictionaryPath: String = ""
 
+    // Accuracy and hygiene — how well dictation has been GOING, which is a
+    // different question from whether it can run at all. Nothing here is ever
+    // required; see the rows themselves.
+    /// A recent slice of `metrics.log`, already summarized. nil when it has not
+    /// been read — which is not the same as "no utterances".
+    public var metrics: MetricsSummary?
+    /// The learn loop's own entries in dictionary.json, re-judged.
+    public var learnedTerms = LearnedTermCleanup.Audit()
+    /// `docs/eval/BASELINE.json`, when this build can see the checkout it came
+    /// from. A shipped .app never can.
+    public var evalBaselinePath: String?
+    /// The macOS build that baseline was recorded on, nil when it records none.
+    public var evalBaselineOSBuild: String?
+    /// This Mac's build, as `sw_vers -buildVersion` prints it.
+    public var osBuild: String = ""
+
     public init() {}
 }
 
@@ -260,10 +277,123 @@ public enum Doctor {
             facts.dictionaryValid ? facts.dictionaryPath
                 : "missing/invalid at \(facts.dictionaryPath) (run once to create)"))
 
+        // --- accuracy & hygiene ----------------------------------------------
+        //
+        // None of the three can fail a doctor run, and none is ever `required`.
+        // They report on how well dictation has been going — a question a red
+        // mark cannot answer, because a Wisprit that works perfectly and has
+        // simply never been measured is not broken.
+        checks.append(dictationHealth(facts))
+        checks.append(learnedTerms(facts))
+        checks.append(evalBaseline(facts))
+
         return DoctorReport(executablePath: facts.executablePath,
                             checks: checks,
                             reminders: reminders)
     }
+
+    // MARK: - dictation health
+
+    public static let dictationHealthLabel = "Dictation health"
+
+    /// Share of utterances that may silently produce nothing before the row
+    /// says so. The live stream's real rate is ~2% (`produced_nothing` with
+    /// audible speech and a long enough hold); this is a REGRESSION alarm, not
+    /// a claim that 2% is fine.
+    public static let unexplainedEmptyWarn = 0.02
+
+    static func dictationHealth(_ facts: DoctorFacts) -> DoctorCheck {
+        guard let metrics = facts.metrics, metrics.total > 0 else {
+            let scope = facts.metrics.map { " (\($0.window.label))" } ?? ""
+            return DoctorCheck(.ok, dictationHealthLabel,
+                               "no utterances recorded\(scope) — see: Wisprit stats")
+        }
+        let detail = "\(metrics.total) utterances (\(metrics.window.label)); "
+            + "\(metrics.unexplainedEmpty) silently produced nothing "
+            + "(\(percent(metrics.unexplainedEmptyRate)) — audible speech, clean finish, no text)"
+        guard metrics.unexplainedEmptyRate > unexplainedEmptyWarn else {
+            return DoctorCheck(.ok, dictationHealthLabel, detail)
+        }
+        return DoctorCheck(.warn, dictationHealthLabel,
+                           detail + " — above the \(percent(unexplainedEmptyWarn)) expected; "
+                           + "run: Wisprit stats for the empty_reason breakdown")
+    }
+
+    // MARK: - learned terms
+
+    public static let learnedTermsLabel = "Learned terms"
+
+    /// Named so the row is actionable from a terminal, where there is no button.
+    public static let cleanLearnedTermsTitle = "Clean Up Learned Terms"
+    public static let learnedTermsRemedy =
+        "open the Wisprit window ▸ Setup and choose \"\(cleanLearnedTermsTitle)\": "
+        + "it writes dictionary.json.bak first, folds each one back into the term it is "
+        + "a spelling of, and quarantines the rest. Nothing you typed yourself is touched."
+
+    /// Warn-only, and quiet when the dictionary is clean. A learned spelling
+    /// that merges into a term the file already has is a duplicate of that
+    /// name, and every one of them makes the next misrecognition likelier —
+    /// but the user's own file is never edited without them asking.
+    static func learnedTerms(_ facts: DoctorFacts) -> DoctorCheck {
+        let audit = facts.learnedTerms
+        guard !audit.suspects.isEmpty else {
+            return DoctorCheck(.ok, learnedTermsLabel,
+                               audit.examined == 0
+                                   ? "nothing learned by spelling yet"
+                                   : "\(audit.examined) learned by spelling, all plausible")
+        }
+        return DoctorCheck(
+            .warn, learnedTermsLabel,
+            "\(audit.suspects.count) of \(audit.examined) learned spellings look wrong: "
+            + "\(audit.names) — \(learnedTermsRemedy)")
+    }
+
+    // MARK: - accuracy eval
+
+    public static let evalBaselineLabel = "Accuracy eval baseline"
+    public static let evalRerunCommand = "Wisprit eval all"
+
+    /// Info, not judgement. The baseline lives in the repo, so a shipped copy
+    /// has none and says so; a checkout whose baseline predates an OS update
+    /// gets a warn, because the on-device speech and refine models ship WITH
+    /// the OS and every recorded number is attributable to one build.
+    static func evalBaseline(_ facts: DoctorFacts) -> DoctorCheck {
+        guard facts.evalBaselinePath != nil else {
+            return DoctorCheck(.ok, evalBaselineLabel,
+                               "no eval baseline recorded — run: \(evalRerunCommand)")
+        }
+        guard let recorded = facts.evalBaselineOSBuild, !recorded.isEmpty else {
+            return DoctorCheck(.ok, evalBaselineLabel,
+                               "recorded, but with no os_build to compare against — "
+                               + "re-run: \(evalRerunCommand)")
+        }
+        guard !facts.osBuild.isEmpty else {
+            return DoctorCheck(.ok, evalBaselineLabel,
+                               "recorded on macOS build \(recorded); this Mac's build "
+                               + "could not be read, so staleness is unknown")
+        }
+        guard !osBuildMatches(recorded: recorded, live: facts.osBuild) else {
+            return DoctorCheck(.ok, evalBaselineLabel, "recorded on macOS build \(recorded)")
+        }
+        return DoctorCheck(
+            .warn, evalBaselineLabel,
+            "recorded on macOS build \(recorded); this Mac runs \(facts.osBuild) — the "
+            + "on-device speech and refine models ship with the OS, so the accepted "
+            + "numbers are stale. Re-run: \(evalRerunCommand)")
+    }
+
+    /// Lenient on shape, strict on identity: the scoreboard may record the
+    /// build alone ("25A123") or with the marketing version ("26.0 (25A123)"),
+    /// and a doctor row must not call two spellings of the same build a
+    /// regression.
+    public static func osBuildMatches(recorded: String, live: String) -> Bool {
+        let a = recorded.trimmingCharacters(in: .whitespaces).lowercased()
+        let b = live.trimmingCharacters(in: .whitespaces).lowercased()
+        guard !a.isEmpty, !b.isEmpty else { return false }
+        return a == b || a.contains(b) || b.contains(a)
+    }
+
+    static func percent(_ rate: Double) -> String { String(format: "%.1f%%", rate * 100) }
 
     // MARK: - live typing
 

@@ -22,12 +22,22 @@ import os
 ///     {"term": "InsForge", "hear": ["in forge", "ins forge"]},
 ///     {"term": "Sharique", "hear": ["Shariq", "Cherie"],
 ///      "source": "spoken_spelling", "learned_at": "2026-08-05T09:12:00Z",
-///      "hit_count": 3, "last_used": "2026-08-05T11:44:10Z"}
+///      "hit_count": 3, "last_used": "2026-08-05T11:44:10Z"},
+///     {"term": "Sharifue", "source": "spoken_spelling",
+///      "pending": true, "observations": ["Shariq"]}
 /// ]}
 /// ```
 /// Hand-edited entries that predate the extension fields must survive
 /// round-trips byte-identical, including keys this code has never heard of —
 /// hence the order-preserving `JSONValue` model instead of `Codable`.
+///
+/// `pending: true` marks a quarantined learn: a spelling the correction loop
+/// found believable but has seen exactly once. It is bookkeeping, not
+/// vocabulary, so it is excluded from all four derived structures — `terms()`,
+/// the compiled corrections, `isKnownTerm`, `vocabularyTerms()` — until a
+/// second observation promotes it. That exclusion is what keeps a
+/// misrecognised spelling out of the biasing list, where it would make the
+/// next misrecognition likelier.
 public final class DictionaryStore: CorrectionApplying, VocabularySource, @unchecked Sendable {
 
     /// One compiled substitution. `source` is the literal phrase the pattern was
@@ -46,6 +56,19 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
         public var source: String?
     }
 
+    /// One learned entry as the file records it — enough for an audit to
+    /// re-judge a term without reopening the JSON.
+    public struct LearnedEntry: Equatable, Sendable {
+        public var term: String
+        public var hear: [String]
+        /// Quarantined: not vocabulary yet, and excluded from everything derived.
+        public var isPending: Bool
+        /// Misrecognitions seen so far while pending; folded into `hear` on
+        /// promotion.
+        public var observations: [String]
+        public var stats: TermStats
+    }
+
     private struct Entry {
         var term: String
         var hear: [String]
@@ -53,6 +76,8 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
         var lastUsed: Date?
         var learnedAt: Date?
         var source: String?
+        var isPending: Bool
+        var observations: [String]
     }
 
     private let log = WLog.logger("dictionary")
@@ -153,7 +178,10 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
     public func vocabularyTerms() -> [String] {
         lock.lock(); defer { lock.unlock() }
         let now = Date()
-        let ranked = entries.enumerated().sorted { lhs, rhs in
+        // Pending entries are excluded here too: a quarantined spelling handed
+        // to the recogniser as a contextual string would bias the ASR toward
+        // the very misrecognition that produced it.
+        let ranked = entries.enumerated().filter { !$0.element.isPending }.sorted { lhs, rhs in
             let a = Self.usefulness(lhs.element, now: now)
             let b = Self.usefulness(rhs.element, now: now)
             if a != b { return a > b }
@@ -201,6 +229,70 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
 
             Self.store(entry: entry, term: term, into: &root, append: isNew)
         }
+    }
+
+    /// Record a quarantined learn — a spelling the correction loop found
+    /// believable but has seen exactly once.
+    ///
+    /// The first sighting writes `pending: true` plus `observations`, which
+    /// keeps the term out of every derived structure. The SECOND sighting of
+    /// the same run promotes it: `pending` and `observations` drop out, the
+    /// observations become the `hear` phrases the term was learned from, and
+    /// the entry starts ranking like any other learn. Two sightings is the
+    /// evidence the live junk terms — one utterance each — never had.
+    ///
+    /// - Parameters:
+    ///   - term: the collapsed run, matched case-insensitively like every other
+    ///     entry lookup.
+    ///   - observation: the misrecognition that prompted it (the antecedent).
+    /// - Returns: true once the term is live vocabulary — promoted here, or
+    ///   already real, in which case this is just another `hear` phrase.
+    @discardableResult
+    public func addPending(term: String, observation: String,
+                           source: String = "spoken_spelling") -> Bool {
+        let canonical = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !canonical.isEmpty else { return false }
+        var isLive = false
+        mutate { root in
+            let now = Self.iso8601.string(from: Date())
+            let existing = Self.entryObject(in: root, matching: canonical)
+            var entry = existing ?? JSONObject()
+            let wasPending = Self.flag(entry["pending"])
+
+            guard existing == nil || wasPending else {
+                // Already real vocabulary — there is nothing to quarantine, so
+                // this is simply another misrecognition to learn.
+                entry["hear"] = .array(
+                    Self.mergedHear(existing: entry["hear"], adding: [observation]))
+                entry["hit_count"] = .int((entry["hit_count"]?.intValue ?? 0) + 1)
+                entry["last_used"] = .string(now)
+                Self.store(entry: entry, term: canonical, into: &root, append: false)
+                isLive = true
+                return
+            }
+
+            guard wasPending else {
+                entry["term"] = .string(canonical)
+                entry.setIfAbsent("source", .string(source))
+                entry.setIfAbsent("learned_at", .string(now))
+                entry["pending"] = .bool(true)
+                entry["observations"] = .array(
+                    Self.mergedHear(existing: entry["observations"], adding: [observation]))
+                Self.store(entry: entry, term: canonical, into: &root, append: true)
+                return
+            }
+
+            let observations = Self.phrases(entry["observations"])
+            entry["hear"] = .array(
+                Self.mergedHear(existing: entry["hear"], adding: observations + [observation]))
+            entry["pending"] = nil
+            entry["observations"] = nil
+            entry["hit_count"] = .int((entry["hit_count"]?.intValue ?? 0) + 1)
+            entry["last_used"] = .string(now)
+            Self.store(entry: entry, term: canonical, into: &root, append: false)
+            isLive = true
+        }
+        return isLive
     }
 
     /// Python parity helper (`Dictionary.add_term`), routed through the same
@@ -254,6 +346,28 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
         return entries.first(where: { $0.term.lowercased() == needle })?.hear ?? []
     }
 
+    /// Every entry the file records, optionally narrowed to one provenance, in
+    /// file order and INCLUDING pending ones.
+    ///
+    /// This is the seam an audit sits on: the learn loop tags its own writes
+    /// `spoken_spelling`, so `learnedEntries(source: "spoken_spelling")` is
+    /// exactly the set a plausibility check has to re-judge — including the
+    /// junk written before the gate existed. What counts as suspect is the
+    /// classifier's call, not this type's; the store only reports what is on
+    /// disk.
+    public func learnedEntries(source: String? = nil) -> [LearnedEntry] {
+        lock.lock(); defer { lock.unlock() }
+        return entries
+            .filter { source == nil || $0.source == source }
+            .map { entry in
+                LearnedEntry(
+                    term: entry.term, hear: entry.hear, isPending: entry.isPending,
+                    observations: entry.observations,
+                    stats: TermStats(hitCount: entry.hitCount, lastUsed: entry.lastUsed,
+                                     learnedAt: entry.learnedAt, source: entry.source))
+            }
+    }
+
     // MARK: - Load
 
     private func load() {
@@ -270,19 +384,22 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
                 .trimmingCharacters(in: .whitespacesAndNewlines)
             guard !term.isEmpty else { continue }
 
-            let hear = (object["hear"]?.arrayValue ?? []).compactMap { value -> String? in
-                let phrase = (value.stringValue ?? "")
-                    .trimmingCharacters(in: .whitespacesAndNewlines)
-                return phrase.isEmpty ? nil : phrase
-            }
+            let hear = Self.phrases(object["hear"])
+            let isPending = Self.flag(object["pending"])
             parsed.append(Entry(
                 term: term,
                 hear: hear,
                 hitCount: object["hit_count"]?.intValue ?? 0,
                 lastUsed: Self.parseDate(object["last_used"]?.stringValue),
                 learnedAt: Self.parseDate(object["learned_at"]?.stringValue),
-                source: object["source"]?.stringValue))
+                source: object["source"]?.stringValue,
+                isPending: isPending,
+                observations: Self.phrases(object["observations"])))
 
+            // A quarantined entry contributes NOTHING: no substitution, no
+            // self-casing, no biasing string, no `isKnownTerm` hit. It is a
+            // record that the loop once heard this spelling, and that is all.
+            guard !isPending else { continue }
             // Self-correct the term's own casing (the pattern is case-insensitive,
             // so "insforge" → "InsForge" and the canonical form is a no-op).
             rawPairs.append((term, term))
@@ -312,11 +429,12 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
                                        pattern: regex))
         }
 
+        let live = parsed.filter { !$0.isPending }
         entries = parsed
-        loadedTerms = parsed.map(\.term)
+        loadedTerms = live.map(\.term)
         loadedCorrections = compiled
-        knownLowercased = Set(parsed.map { $0.term.lowercased() })
-        log.debug("dictionary loaded: \(parsed.count) terms, \(compiled.count) corrections")
+        knownLowercased = Set(live.map { $0.term.lowercased() })
+        log.debug("dictionary loaded: \(live.count) terms, \(compiled.count) corrections, \(parsed.count - live.count) pending")
     }
 
     // MARK: - Pattern construction
@@ -458,6 +576,22 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
     // reorders and re-cases a hand-edited `hear` array on every write. The learn
     // loop writes far more often than a human edits, so preserving what the user
     // typed wins over matching that sort.
+    /// Non-empty trimmed strings from a `hear`/`observations` array; anything
+    /// else in there is skipped the way a malformed `hear` entry always was.
+    private static func phrases(_ value: JSONValue?) -> [String] {
+        (value?.arrayValue ?? []).compactMap { item -> String? in
+            let phrase = (item.stringValue ?? "")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return phrase.isEmpty ? nil : phrase
+        }
+    }
+
+    /// A JSON `true`, and only that — a string "true" or a 1 is not a flag.
+    private static func flag(_ value: JSONValue?) -> Bool {
+        guard let value, case .bool(let flag) = value else { return false }
+        return flag
+    }
+
     private static func mergedHear(existing: JSONValue?, adding: [String]) -> [JSONValue] {
         var out = existing?.arrayValue ?? []
         var seen = Set(out.compactMap { $0.stringValue?.lowercased() })

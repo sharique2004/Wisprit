@@ -27,13 +27,23 @@ public struct UtteranceResult: Sendable, Equatable {
     /// for both "no audio at all" and "3 s of digital silence"), which is what
     /// made the 2026-08-05 incident unreadable from `metrics.log` alone.
     public var starvedInput: Bool
+    /// Loudest `PcmFormat.level` the engine saw across this utterance, 0 when it
+    /// never metered any (batch paths, a session that never started). It is the
+    /// only thing that separates "the user did not speak" from "the analyzer ate
+    /// speech and returned nothing" — see `EmptyReason`.
+    public var peakLevel: Float
+    /// Audible speech in, clean finish, no text out — the defect, as opposed to
+    /// the several benign ways an utterance legitimately comes back empty.
+    public var producedNothing: Bool
 
     public init(text: String, engine: String, finalizeMs: Double,
                 timedOut: Bool = false, crashed: Bool = false,
-                starvedInput: Bool = false) {
+                starvedInput: Bool = false, peakLevel: Float = 0,
+                producedNothing: Bool = false) {
         self.text = text; self.engine = engine; self.finalizeMs = finalizeMs
         self.timedOut = timedOut; self.crashed = crashed
-        self.starvedInput = starvedInput
+        self.starvedInput = starvedInput; self.peakLevel = peakLevel
+        self.producedNothing = producedNothing
     }
 }
 

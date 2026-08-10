@@ -224,9 +224,9 @@ final class SessionLiveTypingTests: XCTestCase {
                        "the word already committed to the user's document was corrected in place")
         XCTAssertEqual(h.pill.notices, ["Fixed Sharique"],
                        "the notice says what actually happened, not just what was learned")
-        XCTAssertEqual(h.vocabulary.learned.first?.term, "Sharique",
-                       "learning still happens — it is what stops the misrecognition recurring")
-        XCTAssertEqual(h.vocabulary.learned.first?.heard, ["Cherie"])
+        XCTAssertEqual(h.vocabulary.pending.first?.term, "Sharique",
+                       "learning still happens — quarantined until a second observation")
+        XCTAssertEqual(h.vocabulary.pending.first?.observation, "Cherie")
         XCTAssertTrue(h.inserter.inserted.isEmpty, "no paste, no clipboard, no keystroke")
         XCTAssertEqual(h.metrics.last?.outcome, "correction")
     }
@@ -249,7 +249,8 @@ final class SessionLiveTypingTests: XCTestCase {
         XCTAssertEqual(h.peer.snapshot.document, "Please ping Cherie about the migration.",
                        "the field is untouched rather than corrupted")
         XCTAssertEqual(h.pill.notices, ["Learned Sharique"])
-        XCTAssertEqual(h.vocabulary.learned.count, 1)
+        XCTAssertEqual(h.vocabulary.pending.count, 1,
+                       "first observation quarantines rather than creating live vocabulary")
     }
 
     func testRetroReplaceWithLiveTypingOffIsUnchangedFromPhaseOne() {

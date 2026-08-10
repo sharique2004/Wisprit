@@ -1,5 +1,6 @@
 import XCTest
 import WispritIMProtocol
+import WispritPersistence
 @testable import WispritMac
 
 /// The doctor's judgement — marks, remedies, and the exit-code rule — built
@@ -57,7 +58,30 @@ final class DoctorTests: XCTestCase {
             "Live Typing bundle",
             "config.json",
             "dictionary.json",
+            "Dictation health",
+            "Learned terms",
+            "Accuracy eval baseline",
         ])
+    }
+
+    func testTheAccuracyRowsCanNeverFailADoctorRun() {
+        // Every one of them reports on how dictation has been GOING. A machine
+        // that has never been measured, or whose dictionary needs tidying, is
+        // not a machine that cannot dictate.
+        var facts = green()
+        facts.metrics = metrics(total: 100, unexplained: 50)
+        facts.learnedTerms = LearnedTermCleanup.Audit(
+            examined: 3, suspects: [suspect("Sharhuue", .fold(into: "Sharique"))])
+        facts.evalBaselinePath = "/repo/docs/eval/BASELINE.json"
+        facts.evalBaselineOSBuild = "24F74"
+        facts.osBuild = "25A123"
+        let report = Doctor.report(from: facts)
+
+        XCTAssertTrue(report.isReady)
+        for label in ["Dictation health", "Learned terms", "Accuracy eval baseline"] {
+            XCTAssertEqual(report.check(label)?.isRequired, false, label)
+            XCTAssertNotEqual(report.check(label)?.mark, .bad, label)
+        }
     }
 
     // MARK: - permissions
@@ -214,5 +238,183 @@ final class DoctorTests: XCTestCase {
     func testExecutablePathIsPrintedBecauseTCCIsPerBinary() {
         let text = Doctor.report(from: green()).rendered()
         XCTAssertTrue(text.contains("/Applications/Wisprit.app/Contents/MacOS/Wisprit"))
+    }
+
+    // MARK: - dictation health
+
+    func testDictationHealthIsGreenBelowTheUnexplainedEmptyBar() {
+        var facts = green()
+        facts.metrics = metrics(total: 200, unexplained: 2)   // 1%
+        let check = Doctor.report(from: facts).check(Doctor.dictationHealthLabel)
+
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertTrue(check?.detail.contains("200 utterances") == true)
+        XCTAssertTrue(check?.detail.contains("last 14 days") == true)
+        XCTAssertTrue(check?.detail.contains("1.0%") == true)
+    }
+
+    func testDictationHealthWarnsAboveTheBarAndNamesTheCommand() {
+        var facts = green()
+        facts.metrics = metrics(total: 100, unexplained: 8)
+        let report = Doctor.report(from: facts)
+        let check = report.check(Doctor.dictationHealthLabel)
+
+        XCTAssertEqual(check?.mark, .warn)
+        XCTAssertTrue(check?.detail.contains("8.0%") == true)
+        XCTAssertTrue(check?.detail.contains("Wisprit stats") == true)
+        XCTAssertTrue(report.isReady, "a bad week of dictation is not a broken install")
+    }
+
+    func testDictationHealthSaysNoEvidenceRatherThanZeroPercent() {
+        // The unprobed default and an empty window are both "nothing recorded",
+        // and neither is a 0% failure rate to be reassured by.
+        XCTAssertEqual(Doctor.report(from: green()).check(Doctor.dictationHealthLabel)?.mark, .ok)
+
+        var facts = green()
+        facts.metrics = metrics(total: 0, unexplained: 0)
+        let check = Doctor.report(from: facts).check(Doctor.dictationHealthLabel)
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertTrue(check?.detail.contains("no utterances recorded") == true)
+    }
+
+    // MARK: - learned terms
+
+    func testLearnedTermsIsGreenWhenEveryLearnedSpellingIsPlausible() {
+        var facts = green()
+        facts.learnedTerms = LearnedTermCleanup.Audit(examined: 4, suspects: [])
+        let check = Doctor.report(from: facts).check(Doctor.learnedTermsLabel)
+
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertTrue(check?.detail.contains("4 learned by spelling") == true)
+    }
+
+    func testLearnedTermsSaysSoWhenNothingHasBeenLearnedAtAll() {
+        let check = Doctor.report(from: green()).check(Doctor.learnedTermsLabel)
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertTrue(check?.detail.contains("nothing learned by spelling yet") == true)
+    }
+
+    func testLearnedTermsWarnsListingTheSuspectsAndNamingTheFix() {
+        var facts = green()
+        facts.learnedTerms = LearnedTermCleanup.Audit(examined: 3, suspects: [
+            suspect("Sharhuue", .fold(into: "Sharique")),
+            suspect("Shaikd", .fold(into: "Sharique")),
+            suspect("Zzzt", .quarantine(reason: "noVowel")),
+        ])
+        let report = Doctor.report(from: facts)
+        let check = report.check(Doctor.learnedTermsLabel)
+
+        XCTAssertEqual(check?.mark, .warn)
+        XCTAssertTrue(check?.detail.contains("3 of 3") == true)
+        XCTAssertTrue(check?.detail.contains("Sharhuue → Sharique") == true)
+        XCTAssertTrue(check?.detail.contains("Zzzt (noVowel)") == true)
+        XCTAssertTrue(check?.detail.contains(Doctor.cleanLearnedTermsTitle) == true)
+        XCTAssertTrue(check?.detail.contains("dictionary.json.bak") == true,
+                      "the remedy has to say the user's file is backed up first")
+        XCTAssertTrue(report.isReady)
+    }
+
+    // MARK: - accuracy eval baseline
+
+    func testNoEvalBaselineIsAnInfoRowNamingTheCommandThatWritesOne() {
+        let check = Doctor.report(from: green()).check(Doctor.evalBaselineLabel)
+        XCTAssertEqual(check?.mark, .ok, "a shipped copy has no repo and is not broken")
+        XCTAssertTrue(check?.detail.contains("no eval baseline recorded") == true)
+        XCTAssertTrue(check?.detail.contains(Doctor.evalRerunCommand) == true)
+    }
+
+    func testEvalBaselineRecordedOnThisBuildIsGreen() {
+        var facts = green()
+        facts.evalBaselinePath = "/repo/docs/eval/BASELINE.json"
+        facts.evalBaselineOSBuild = "25A123"
+        facts.osBuild = "25A123"
+        let check = Doctor.report(from: facts).check(Doctor.evalBaselineLabel)
+
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertTrue(check?.detail.contains("25A123") == true)
+    }
+
+    func testEvalBaselineFromAnOlderOSBuildWarnsWithTheRerunCommand() {
+        var facts = green()
+        facts.evalBaselinePath = "/repo/docs/eval/BASELINE.json"
+        facts.evalBaselineOSBuild = "24F74"
+        facts.osBuild = "25A123"
+        let report = Doctor.report(from: facts)
+        let check = report.check(Doctor.evalBaselineLabel)
+
+        XCTAssertEqual(check?.mark, .warn)
+        XCTAssertTrue(check?.detail.contains("24F74") == true)
+        XCTAssertTrue(check?.detail.contains("25A123") == true)
+        XCTAssertTrue(check?.detail.contains(Doctor.evalRerunCommand) == true)
+        XCTAssertTrue(report.isReady, "a stale measurement is not a broken install")
+    }
+
+    func testEvalBaselineWithNoRecordedBuildCannotBeCalledStale() {
+        var facts = green()
+        facts.evalBaselinePath = "/repo/docs/eval/BASELINE.json"
+        facts.osBuild = "25A123"
+        let check = Doctor.report(from: facts).check(Doctor.evalBaselineLabel)
+
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertTrue(check?.detail.contains("no os_build") == true)
+    }
+
+    func testOSBuildComparisonToleratesTheScoreboardsLongerSpelling() {
+        // The scoreboard's own fixture records "26.0 (25A123)"; `sw_vers
+        // -buildVersion` prints "25A123". Calling those two a regression would
+        // make the row cry wolf on the machine that recorded the baseline.
+        XCTAssertTrue(Doctor.osBuildMatches(recorded: "26.0 (25A123)", live: "25A123"))
+        XCTAssertTrue(Doctor.osBuildMatches(recorded: "25A123", live: "25A123"))
+        XCTAssertFalse(Doctor.osBuildMatches(recorded: "24F74", live: "25A123"))
+        XCTAssertFalse(Doctor.osBuildMatches(recorded: "", live: "25A123"))
+    }
+
+    func testBuildTokenIsReadFromTheOSVersionStringSwVersAlsoPrints() {
+        XCTAssertEqual(Doctor.buildToken(inOSVersionString: "Version 26.0 (Build 25A123)"),
+                       "25A123")
+        XCTAssertNil(Doctor.buildToken(inOSVersionString: "Version 26.0"))
+    }
+
+    func testTheBaselinesOSBuildIsFoundWhereverTheScoreboardRecordsIt() {
+        // Searched by key, not decoded: the scoreboard owns that schema, and a
+        // warn-only doctor row must not be what breaks when a field moves.
+        XCTAssertEqual(Doctor.osBuild(inBaselineJSON: #"{"os_build": "25A123"}"#), "25A123")
+        XCTAssertEqual(
+            Doctor.osBuild(inBaselineJSON: #"{"records": [{"provenance": {"osBuild": "25A123"}}]}"#),
+            "25A123")
+        XCTAssertNil(Doctor.osBuild(inBaselineJSON: #"{"records": []}"#))
+        XCTAssertNil(Doctor.osBuild(inBaselineJSON: "not json"))
+    }
+
+    // MARK: - fixtures
+
+    /// Fixed clock: the rows are placed inside the doctor's 14-day window.
+    private let now: Double = 1_775_000_000
+
+    /// A summary built the way the real probe builds one — through the
+    /// aggregator, over rows shaped like the ones metrics.log holds — so this
+    /// test cannot disagree with `Wisprit stats` about what a rate is.
+    private func metrics(total: Int, unexplained: Int) -> MetricsSummary {
+        var rows: [JSONObject] = []
+        for index in 0..<total {
+            var row = JSONObject()
+            row["ts"] = .double(now - 3600)
+            if index < unexplained {
+                row["outcome"] = .string("empty")
+                row["empty_reason"] = .string("produced_nothing")
+                row["peak_level"] = .double(0.2)     // audible
+                row["held_ms"] = .double(2500)       // long enough to have said something
+            } else {
+                row["outcome"] = .string("paste")
+            }
+            rows.append(row)
+        }
+        return MetricsSummary.summarize(rows, window: MetricsWindow(days: 14), now: now)
+    }
+
+    private func suspect(_ term: String,
+                         _ action: LearnedTermCleanup.Suspect.Action)
+        -> LearnedTermCleanup.Suspect {
+        LearnedTermCleanup.Suspect(term: term, hear: ["Sharik"], action: action)
     }
 }

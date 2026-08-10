@@ -251,6 +251,7 @@ Phases are from [docs/research/apps-feasibility.md](docs/research/apps-feasibili
 swift build                                   # whole package
 swift test                                    # eleven test targets, all offline
 swift test --filter WispritCorrectionsTests   # one target
+WISPRIT_REHEARSAL=1 swift test --filter RehearsalTests   # live Apple Intelligence batteries
 ./scripts/build_app.sh                        # → ./dist/Wisprit.app
 ./scripts/build_im.sh --visible               # input method you can select by hand
 ```
@@ -266,6 +267,6 @@ Wisprit insert "text"    # insert after a 3 s countdown (same gate)
 Wisprit --version
 ```
 
-The manual smoke tests that post real events or touch real input sources are gated behind `WISPRIT_MANUAL_INPUT=1` / `WISPRIT_MANUAL_IM=1` so they can never fire during an ordinary `swift test`.
+The manual smoke tests that post real events or touch real input sources are gated behind `WISPRIT_MANUAL_INPUT=1` / `WISPRIT_MANUAL_IM=1` so they can never fire during an ordinary `swift test`. The live Apple Intelligence batteries are gated behind `WISPRIT_REHEARSAL=1` for the same reason: the refine one scores every case in `WispritEval.RefineBattery` against `docs/eval/BASELINE.json`, and `Wisprit eval refine` is what records a new accepted number.
 
 Repo layout: `Sources/` (one SPM target per concern — core targets are platform-neutral for the iOS shell, `WispritMac*` are the macOS shell, `WispritIM*` the input method), `tests/` (mirrored test targets + the Python-era fixtures), `scripts/` (bundle builders), `docs/` (contracts, spikes, research), `wisprit/` (legacy Python reference implementation), `packaging/` (icon generator, privacy manifest, and Python-era leftovers).

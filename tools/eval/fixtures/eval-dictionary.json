@@ -1,0 +1,14 @@
+{
+  "_comment": "The dictionary `Wisprit eval` loads. Deliberately NOT ~/.wisprit/dictionary.json: a scoreboard row has to mean the same thing on another machine, and the user's dictionary changes under their hands (that is what the learn loop is for). Keep it small and keep it honest — the control names in tools/eval/scripts/tts-v1.txt (Krzysztof, Anjali, Priyanka, Thorbjorn) must NEVER appear here. They are the arm that proves the dictionary recognizes names rather than inventing them.",
+  "terms": [
+    { "term": "Wisprit", "hear": ["whisper it", "wisper it", "whisprit", "wispirit", "whispered"] },
+    { "term": "InsForge", "hear": ["ins forge", "inns forge", "in sforge", "instal forge"] },
+    { "term": "MeetingScribe", "hear": ["meeting scribe", "meeting scribed"] },
+    { "term": "Sharique", "hear": ["shariq", "sharik", "sha reek", "sharee", "shreek"] },
+    { "term": "Khatri", "hear": ["khatry", "katri", "cutrie", "khatree"] },
+    { "term": "PostgreSQL", "hear": ["post gress sequel", "post grass sequel", "postgres sequel", "post gres sequel", "postgres sql"] },
+    { "term": "Ubuntu", "hear": ["you bun to", "ubunto", "you bantu"] },
+    { "term": "GitHub", "hear": ["get hub", "git hub", "gethub"] },
+    { "term": "Kubernetes", "hear": ["cuber netties", "kubernetis", "koobernetes"] }
+  ]
+}

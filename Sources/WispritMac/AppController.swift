@@ -224,7 +224,30 @@ public final class AppController: NSObject, NSApplicationDelegate {
     private func runFix(_ kind: SetupFixKind) {
         SetupFixRunner(
             enableLiveTyping: { [weak self] in self?.enableLiveTyping() },
-            relaunch: { [weak self] in self?.relaunch() }).run(kind)
+            relaunch: { [weak self] in self?.relaunch() },
+            cleanLearnedTerms: { [weak self] in self?.cleanLearnedTerms() }).run(kind)
+    }
+
+    /// Fold the learn loop's junk entries back into the terms they are garbled
+    /// spellings of.
+    ///
+    /// Only ever from the checklist button: the dictionary is the user's file,
+    /// and `LearnedTermCleanup` writes `dictionary.json.bak` before touching a
+    /// byte of it. A failure leaves the file exactly as it was.
+    func cleanLearnedTerms() {
+        do {
+            let outcome = try LearnedTermCleanup.run(store: dictionary)
+            log.info("learned-term cleanup: \(outcome.summary, privacy: .public)")
+            pill.transientNotice(outcome.changed
+                ? "Cleaned up learned spellings"
+                : "Nothing to clean up")
+        } catch {
+            log.error("""
+                learned-term cleanup failed, dictionary untouched: \
+                \(String(describing: error), privacy: .public)
+                """)
+            pill.transientNotice("Could not clean up learned spellings")
+        }
     }
 
     /// Quit and come back. The replacement is spawned first and only waits for

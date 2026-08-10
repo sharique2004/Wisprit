@@ -104,5 +104,5 @@ Requirement-by-requirement:
 
 - App Review inconsistency on macOS 2.4.5 (mitigation: Developer ID primary channel; clipboard-fallback build ready).
 - Apple is tightening the iOS keyboard round-trip (26.0 and 26.4 both regressed it) while giving away better system dictation (iOS 27 "Advanced Dictation"). Wisprit's durable moats are the local-only guarantee, the dictionary, and spoken-spelling learning — not raw streaming or generic cleanup.
-- Every Apple point release can silently change the refine model and the ITN spelling behavior: both the refine prompt **and** the correction detector need eval batteries re-run per OS update (extend `tests/rehearsal_refine.sh` pattern).
+- Every Apple point release can silently change the refine model and the ITN spelling behavior: both the refine prompt **and** the correction detector need eval batteries re-run per OS update (extend the `WispritEval.RefineBattery` pattern — `WISPRIT_REHEARSAL=1 swift test --filter RehearsalTests`, scored artifact via `Wisprit eval refine`).
 - All accuracy probes were TTS-based; S4 re-validation on human audio gates the correction feature's thresholds.

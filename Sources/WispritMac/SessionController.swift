@@ -84,6 +84,7 @@ public final class SessionController: @unchecked Sendable {
     /// The previous utterance's RAW final — the antecedent window for a
     /// cross-utterance spoken-spelling correction.
     private var previousUtterance: String = ""
+    private var deferredWork: DeferredWork?
 
     private let stopFlag = StopFlag()
     private var thread: Thread?
@@ -157,9 +158,64 @@ public final class SessionController: @unchecked Sendable {
                 // spawning a timer: it only ever has to notice that a whole
                 // idle timeout has gone by.
                 liveTyping?.tickIdle()
+                drainDeferred()
                 continue
             }
             dispatch(event)
+        }
+    }
+
+    // MARK: - deferred work
+
+    /// One piece of work parked for the next idle moment.
+    ///
+    /// The Phase-3 retro-correction pass is what this exists for: the vocabulary
+    /// channel finishes 0.5–2.5 s after insertion, and the edit it wants to make
+    /// goes through the input method, which this state machine owns. Running it
+    /// from the detached reconcile task would race whatever the user is doing by
+    /// then, so it is parked and drained from the run loop instead — which is
+    /// also what keeps it serialized with every other IM call.
+    struct DeferredWork: Sendable {
+        /// Log/test label; never shown to the user.
+        var label: String
+        var action: @Sendable () -> Void
+    }
+
+    /// Park work for the next idle tick. Deliberately a single slot: a second
+    /// enqueue REPLACES the first, because the newer reconciliation is the
+    /// better one and a queue of stale edits is worse than none.
+    func enqueueDeferred(_ label: String, _ action: @escaping @Sendable () -> Void) {
+        lock.lock()
+        let replaced = deferredWork?.label
+        deferredWork = DeferredWork(label: label, action: action)
+        lock.unlock()
+        if let replaced {
+            log.info("deferred \(replaced, privacy: .public) replaced by \(label, privacy: .public)")
+        }
+    }
+
+    /// Run the parked work, but only from IDLE: an edit computed for the last
+    /// utterance must never land in the middle of the next one.
+    func drainDeferred() {
+        guard state == .idle else { return }
+        lock.lock()
+        let work = deferredWork
+        deferredWork = nil
+        lock.unlock()
+        guard let work else { return }
+        log.info("deferred \(work.label, privacy: .public) running")
+        work.action()
+    }
+
+    /// Throw away parked work. A new utterance invalidates it outright — by the
+    /// time this one ends, the document the edit was planned against is gone.
+    private func dropDeferred() {
+        lock.lock()
+        let dropped = deferredWork?.label
+        deferredWork = nil
+        lock.unlock()
+        if let dropped {
+            log.info("deferred \(dropped, privacy: .public) dropped — new utterance")
         }
     }
 
@@ -186,6 +242,7 @@ public final class SessionController: @unchecked Sendable {
 
     private func begin(at timestamp: Double) {
         guard config.isEnabled() else { return }
+        dropDeferred()
 
         // Hot-reload the dictionary on key-down so an edit lands on the very
         // next utterance without a restart. Cheap (an mtime stat).
@@ -259,6 +316,11 @@ public final class SessionController: @unchecked Sendable {
         let tRelease = MonotonicClock.now()
         audio.stop()
         let result = runBlocking { [asr] in await asr.finalize() }
+        // Snapshot the utterance's audio HERE, on the session thread, while no
+        // other utterance can exist: every off-path consumer gets this value, so
+        // a slow pass can never be handed the NEXT utterance's bytes.
+        let retained = asr.lastRetained
+        let audioMs = retained.durationSeconds * 1000.0
         let tAsr = MonotonicClock.now()
 
         // An Esc during a slow finalize aborts — check before paying for AI
@@ -300,6 +362,7 @@ public final class SessionController: @unchecked Sendable {
         // queued fn-press finish the stage instantly with verbatim text.
         var aiOutcome = RefineOutcome.off
         var refined = correction.text
+        var refineDelta: Int?
         if let refiner {
             let events = self.events
             let corrected = correction.text
@@ -310,6 +373,7 @@ public final class SessionController: @unchecked Sendable {
             }
             refined = outcome.text
             aiOutcome = outcome.outcome
+            refineDelta = SessionController.refineDelta(raw: raw, refined: refined)
         }
         let tAi = MonotonicClock.now()
         // Refine was the last cancellable stage; stop emitting Esc now.
@@ -339,7 +403,7 @@ public final class SessionController: @unchecked Sendable {
             // the directive. Learn it and flash "Learned Sharique" — flashing
             // "nothing recognized" would call a successful correction a failure.
             if correction.learn != nil || correction.notice != nil {
-                completeCorrection(correction)
+                completeCorrection(correction, retained: retained)
                 if correction.notice == nil { pill?.hide() }
                 // CONTRACT-DEVIATION: a fourth `outcome` value beyond
                 // paste|type|blocked_secure|error|empty. Logging this as
@@ -347,13 +411,21 @@ public final class SessionController: @unchecked Sendable {
                 // utterances in the Python era) with successful corrections.
                 writeMetrics(heldMs: heldMs, result: result, postMs: 0, insertMs: 0,
                              outcome: "correction", releaseToTextMs: nil,
-                             aiMs: (tAi - tAsr) * 1000.0, ai: aiOutcome.rawValue)
+                             aiMs: (tAi - tAsr) * 1000.0, ai: aiOutcome.rawValue,
+                             audioMs: audioMs, refineDelta: refineDelta)
                 return
             }
-            flashError("nothing recognized")
+            // Split the one indistinguishable `outcome=empty` row into the
+            // reasons the 2026-08-05 incident needed and could not get — and
+            // tell the user the right thing while we are at it: a microphone
+            // that delivered nothing and a hold nobody spoke into are not the
+            // same problem, and only one of them is ours.
+            let reason = EmptyReason.classify(result: result, heldMs: heldMs)
+            flashEmpty(reason)
             writeMetrics(heldMs: heldMs, result: result, postMs: 0, insertMs: 0,
                          outcome: "empty", releaseToTextMs: nil,
-                         aiMs: (tAi - tAsr) * 1000.0, ai: aiOutcome.rawValue)
+                         aiMs: (tAi - tAsr) * 1000.0, ai: aiOutcome.rawValue,
+                         audioMs: audioMs, emptyReason: reason, refineDelta: refineDelta)
             return
         }
 
@@ -378,12 +450,14 @@ public final class SessionController: @unchecked Sendable {
                      outcome: insertion.outcome,
                      releaseToTextMs: (tInsert - tRelease) * 1000.0,
                      aiMs: (tAi - tAsr) * 1000.0,
-                     ai: aiOutcome.rawValue)
+                     ai: aiOutcome.rawValue,
+                     audioMs: audioMs,
+                     refineDelta: refineDelta)
         setState(.idle)
 
         // Strictly off the paste path: dictionary writes and the vocabulary
         // reconciliation pass cost hundreds of ms and must never delay text.
-        completeCorrection(correction)
+        completeCorrection(correction, retained: retained)
     }
 
     private func abort(reason: String) {
@@ -506,10 +580,21 @@ public final class SessionController: @unchecked Sendable {
 
     /// The learn + notice + reconciliation tail of a corrected utterance.
     /// Internal so tests can assert it without a detached task.
-    func completeCorrection(_ correction: CorrectionOutcome) {
+    ///
+    /// `retained` is the audio snapshotted at finalize, passed by value: the
+    /// pass below can still be running when the next utterance starts, and it
+    /// must keep transcribing the one it was spawned for.
+    func completeCorrection(_ correction: CorrectionOutcome, retained: RetainedUtterance) {
         if let learned = correction.learn {
-            vocabulary?.add(learned)
-            vocabulary?.recordUse(term: learned.term)
+            if correction.learnIsPending {
+                // Quarantined: recorded, excluded from corrections and biasing
+                // until a second observation (or the user) confirms it.
+                vocabulary?.addPending(term: learned.term,
+                                       observation: learned.heard.first ?? "")
+            } else {
+                vocabulary?.add(learned)
+                vocabulary?.recordUse(term: learned.term)
+            }
         }
         if let notice = correction.notice {
             pill?.transientNotice(notice)
@@ -518,7 +603,7 @@ public final class SessionController: @unchecked Sendable {
         let asr = self.asr
         let vocabulary = self.vocabulary
         Task.detached(priority: .utility) {
-            guard let reconciliation = await asr.reconcileVocabulary() else { return }
+            guard let reconciliation = await asr.reconcileVocabulary(retained) else { return }
             for (term, hits) in reconciliation.termHits where hits > 0 {
                 vocabulary?.recordUse(term: term)
             }
@@ -528,6 +613,38 @@ public final class SessionController: @unchecked Sendable {
     private func flashError(_ message: String) {
         log.warning("utterance error: \(message, privacy: .public)")
         pill?.flashError(message)
+    }
+
+    /// Pill copy for an utterance that produced nothing. "nothing recognized"
+    /// used to be the answer to every one of these, which told the user with a
+    /// muted microphone exactly what it told the user who never spoke.
+    private func flashEmpty(_ reason: EmptyReason?) {
+        switch reason {
+        case .starved:
+            flashError("Microphone delivered no audio")
+        case .silent:
+            flashError("Didn't hear anything — is the right mic selected?")
+        case .shortHold:
+            // A fumbled tap is a coaching moment, not a failure — the notice is
+            // the pill's non-error styling.
+            pill?.transientNotice("Hold the key while you speak")
+        case .timedOut, .crashed, .producedNothing, .none:
+            flashError("nothing recognized")
+        }
+    }
+
+    /// `refine_delta`: how many characters the model moved. The over-rewrite
+    /// alarm — a verbatim-first refiner that rewrites a third of an utterance is
+    /// not polishing it. Character Levenshtein is the cheap proxy; a novel-length
+    /// dictation falls back to the length difference rather than paying the
+    /// quadratic on a path that runs once per utterance.
+    static func refineDelta(raw: String, refined: String) -> Int {
+        guard raw != refined else { return 0 }
+        let cap = 2_000
+        guard raw.count <= cap, refined.count <= cap else {
+            return abs(refined.count - raw.count)
+        }
+        return StringMetrics.levenshtein(raw, refined)
     }
 
     private func setState(_ newState: State) {
@@ -548,7 +665,9 @@ public final class SessionController: @unchecked Sendable {
 
     private func writeMetrics(heldMs: Double, result: UtteranceResult,
                               postMs: Double, insertMs: Double, outcome: String,
-                              releaseToTextMs: Double?, aiMs: Double?, ai: String?) {
+                              releaseToTextMs: Double?, aiMs: Double?, ai: String?,
+                              audioMs: Double, emptyReason: EmptyReason? = nil,
+                              refineDelta: Int? = nil) {
         metrics.write(MetricsRecord(
             heldMs: heldMs,
             engine: result.engine,
@@ -562,7 +681,17 @@ public final class SessionController: @unchecked Sendable {
             chars: result.text.count,
             releaseToTextMs: releaseToTextMs,
             aiMs: aiMs,
-            ai: ai))
+            ai: ai,
+            emptyReason: emptyReason?.rawValue,
+            // Every row, not just the empty ones: the level is only readable as
+            // a threshold once there are rows on both sides of it.
+            peakLevel: Double(result.peakLevel),
+            audioMs: audioMs,
+            // Deliberately the same count as `chars` — `chars` keeps its Python
+            // meaning, `raw_chars` names it for the post-Python schema so a
+            // later reader never has to guess which side of refine it is on.
+            rawChars: result.text.count,
+            refineDelta: refineDelta))
     }
 
     // MARK: - level ticker

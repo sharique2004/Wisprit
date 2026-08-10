@@ -1,5 +1,6 @@
 import XCTest
 import WispritCorrections
+import WispritDictionary
 import WispritKit
 @testable import WispritMac
 
@@ -9,6 +10,13 @@ final class CorrectionApplierTests: XCTestCase {
 
     private func learned(_ term: String, _ heard: [String]) -> LearnedTerm {
         LearnedTerm(term: term, heard: heard, source: "spoken_spelling")
+    }
+
+    /// A learn the plausibility gate has cleared outright — what a merge into
+    /// an already-known term produces. `pending: true` is the quarantined form.
+    private func proposal(_ term: String, _ heard: [String],
+                          pending: Bool = false) -> LearnProposal {
+        LearnProposal(term: learned(term, heard), isPending: pending)
     }
 
     // MARK: - none
@@ -52,7 +60,7 @@ final class CorrectionApplierTests: XCTestCase {
         let runRange = text.count - 15 ..< text.count      // the spelled tail
         let outcome = CorrectionApplier.apply(
             .tailReplace(target: "Cherie", replacement: "Sharique",
-                         suppress: runRange, learn: learned("Sharique", ["Cherie"])),
+                         suppress: runRange, learn: proposal("Sharique", ["Cherie"])),
             to: text)
 
         XCTAssertEqual(outcome.text, "my name is Sharique")
@@ -72,7 +80,7 @@ final class CorrectionApplierTests: XCTestCase {
         let outcome = CorrectionApplier.apply(
             .retroReplace(target: "Cherie", replacement: "Sharique",
                           suppress: directiveStart..<text.count,
-                          learn: learned("Sharique", ["Cherie"])),
+                          learn: proposal("Sharique", ["Cherie"])),
             to: text)
 
         XCTAssertEqual(outcome.text, "email Sharique,")
@@ -88,13 +96,111 @@ final class CorrectionApplierTests: XCTestCase {
         let outcome = CorrectionApplier.apply(
             .retroReplace(target: "Cherie", replacement: "Sharique",
                           suppress: 0..<text.count,
-                          learn: learned("Sharique", ["Cherie"])),
+                          learn: proposal("Sharique", ["Cherie"])),
             to: text)
 
         XCTAssertEqual(outcome.text, "", "the whole directive is suppressed")
         XCTAssertTrue(outcome.wasCrossUtterance)
         XCTAssertEqual(outcome.notice, "Learned Sharique")
         XCTAssertEqual(outcome.learn?.term, "Sharique")
+    }
+
+    // MARK: - the plausibility gate
+
+    /// A merge carries the EXISTING canonical spelling as both the replacement
+    /// and the learn, so the dictionary gains a misrecognition rather than a
+    /// rival term for the same name.
+    func testMergeLearnsTheExistingTermAndNeedsNoProbation() {
+        let text = "my name is Sharik S-H-A-R-H-U-U-E"
+        let runRange = text.count - 15 ..< text.count
+        let outcome = CorrectionApplier.apply(
+            .tailReplace(target: "Sharik", replacement: "Sharique",
+                         suppress: runRange, learn: proposal("Sharique", ["Sharik"])),
+            to: text)
+
+        XCTAssertEqual(outcome.text, "my name is Sharique",
+                       "the user gets the spelling they approved, not the mangled run")
+        XCTAssertEqual(outcome.learn?.term, "Sharique")
+        XCTAssertEqual(outcome.learn?.heard, ["Sharik"])
+        XCTAssertFalse(outcome.learnIsPending)
+    }
+
+    /// A quarantined learn still edits the visible text — the user just spelled
+    /// it — but is flagged for `addPending`, so one utterance cannot mint a
+    /// permanent term.
+    func testQuarantinedLearnEditsTheTextButIsFlaggedPending() {
+        let text = "my name is Cherie K-R-Z-Y-S-Z-T-O-F"
+        let runRange = text.count - 17 ..< text.count
+        let outcome = CorrectionApplier.apply(
+            .tailReplace(target: "Cherie", replacement: "Krzysztof",
+                         suppress: runRange, learn: proposal("Krzysztof", ["Cherie"], pending: true)),
+            to: text)
+
+        XCTAssertEqual(outcome.text, "my name is Krzysztof")
+        XCTAssertEqual(outcome.learn?.term, "Krzysztof")
+        XCTAssertTrue(outcome.learnIsPending, "one sighting is not evidence")
+    }
+
+    /// The rejected run: the directive goes, nothing is replaced, nothing is
+    /// learned, and the user is told rather than handed the ASR's confusion.
+    func testAbstainSuppressesTheDirectiveAndLearnsNothing() {
+        let text = "email Cherie, actually it's S-H-R-Q-Z"
+        guard let directiveStart = text.range(of: "actually")
+            .map({ text.distance(from: text.startIndex, to: $0.lowerBound) }) else {
+            return XCTFail("fixture")
+        }
+        let outcome = CorrectionApplier.apply(
+            .abstain(suppress: directiveStart..<text.count, reason: .noVowel), to: text)
+
+        XCTAssertEqual(outcome.text, "email Cherie,",
+                       "the antecedent survives untouched — abstaining never edits")
+        XCTAssertNil(outcome.learn)
+        XCTAssertFalse(outcome.learnIsPending)
+        XCTAssertEqual(outcome.notice, "Couldn't read that spelling")
+        XCTAssertFalse(outcome.wasCrossUtterance)
+    }
+
+    /// A directive-only utterance that abstains inserts nothing at all, so the
+    /// notice is the whole user-visible outcome.
+    func testAbstainOnADirectiveOnlyUtteranceLeavesNothingToInsert() {
+        let text = "Actually, it's S-H-R-Q-Z."
+        let outcome = CorrectionApplier.apply(
+            .abstain(suppress: 0..<(text.count - 1), reason: .noVowel), to: text)
+        XCTAssertEqual(outcome.text, "")
+        XCTAssertEqual(outcome.notice, "Couldn't read that spelling")
+        XCTAssertNil(outcome.learn)
+    }
+
+    /// End to end over the real corrector and the real store: the utterance
+    /// that wrote "Sharhuue" into `~/.wisprit` must now leave the dictionary
+    /// with one Sharique and correct "Sharik" the way it always did.
+    func testTheLiveJunkUtteranceNoLongerMintsARivalTerm() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("wisprit-gate-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        WispritPaths.overrideRoot = root
+        defer {
+            WispritPaths.overrideRoot = nil
+            try? FileManager.default.removeItem(at: root)
+        }
+        try #"""
+        {"terms": [{"term": "Sharique", "hear": ["shariq", "sharik", "shreek"]}]}
+        """#.write(to: WispritPaths.dictionaryPath, atomically: true, encoding: .utf8)
+
+        let store = DictionaryStore()
+        let corrector = SpokenSpellingCorrector(vocabulary: store)
+        let utterance = "Actually, it's S-H-A-R-H-U-U-E."
+        let outcome = CorrectionApplier.apply(
+            corrector.decide(utterance: utterance, previousUtterance: "Hi Sharik."),
+            to: utterance)
+
+        XCTAssertEqual(outcome.learn?.term, "Sharique", "no fourth name for the same person")
+        XCTAssertFalse(outcome.learnIsPending)
+        store.add(try XCTUnwrap(outcome.learn))
+
+        XCTAssertEqual(store.terms(), ["Sharique"])
+        XCTAssertEqual(store.applyCorrections(to: "Hi Sharik how are you"),
+                       "Hi Sharique how are you")
     }
 
     // MARK: - splicing primitives
@@ -151,7 +257,7 @@ final class CorrectionApplierTests: XCTestCase {
         let outcome = CorrectionApplier.apply(
             .retroReplace(target: "Cherie", replacement: "Sharique",
                           suppress: 0..<(text.count - 1),   // everything but the stop
-                          learn: learned("Sharique", ["Cherie"])),
+                          learn: proposal("Sharique", ["Cherie"])),
             to: text)
         XCTAssertEqual(outcome.text, "")
         XCTAssertEqual(outcome.notice, "Learned Sharique")

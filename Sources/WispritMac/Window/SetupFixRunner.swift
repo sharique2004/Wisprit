@@ -20,11 +20,17 @@ public struct SetupFixRunner {
     /// not reach into the app controller.
     public var enableLiveTyping: () -> Void
     public var relaunch: () -> Void
+    /// `LearnedTermCleanup.run` against the app's own store, injected for the
+    /// same reason as the two above: this type performs fixes, it does not own
+    /// the objects they act on.
+    public var cleanLearnedTerms: () -> Void
 
     public init(enableLiveTyping: @escaping () -> Void = {},
-                relaunch: @escaping () -> Void = {}) {
+                relaunch: @escaping () -> Void = {},
+                cleanLearnedTerms: @escaping () -> Void = {}) {
         self.enableLiveTyping = enableLiveTyping
         self.relaunch = relaunch
+        self.cleanLearnedTerms = cleanLearnedTerms
     }
 
     public func run(_ kind: SetupFixKind) {
@@ -51,6 +57,8 @@ public struct SetupFixRunner {
             open(kind.settingsURL)
         case .enableLiveTyping:
             enableLiveTyping()
+        case .cleanLearnedTerms:
+            cleanLearnedTerms()
         case .relaunch:
             relaunch()
         }

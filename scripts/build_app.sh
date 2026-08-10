@@ -27,7 +27,7 @@ set -e
 set -u
 
 REPO_DIR="${0:A:h:h}"
-VERSION="2.0.0-dev"
+VERSION="${WISPRIT_VERSION:-2.0.0-dev}"
 BUNDLE_ID="com.wisprit.app"
 CONFIGURATION="release"
 OUT_DIR="$REPO_DIR/dist"

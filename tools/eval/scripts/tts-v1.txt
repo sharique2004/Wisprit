@@ -1,0 +1,95 @@
+# tts-v1 — the synthetic corpus script for `tools/eval/corpus/tts-samantha`.
+#
+# TTS audio proves the harness runs end to end and catches plumbing regressions.
+# It is NOT human speech and must never be quoted as an accuracy claim — every
+# row it produces carries the scoreboard's TTS banner (spike S4 stays open until
+# the Phase-2 human corpus lands).
+#
+# Format, one clip per line, six pipe-separated fields:
+#
+#   id | category | terms | bypass | spoken | reference
+#
+#   id         filename stem and manifest id
+#   category   the scoreboard's per-category breakdown key
+#   terms      `expect.terms` — dictionary terms that must survive to the final
+#              text, semicolon-separated (empty when the clip expects none)
+#   bypass     `expect.refineBypass` — the RefineOutcome this utterance must
+#              leave the AI cage with (has_letter_run | has_address), or empty
+#   spoken     what `say` synthesizes: the words, as a person would say them
+#   reference  the text the user wanted in their document — the target for
+#              EVERY stage, so raw ASR is scored against the formatting the
+#              pipeline is supposed to add (see docs/eval/DEFINITIONS.md)
+#
+# Fields are trimmed. Double quotes and backslashes are rejected by the
+# generator: the manifest is emitted with shell printf and nothing escapes them.
+# When `reference` is empty the generator uses `spoken` verbatim.
+
+# --- proper nouns that ARE in the eval dictionary -----------------------------
+pn-01 | proper-nouns | Sharique;Wisprit |  | Hi Sharique, please add this to Wisprit before the meeting. |
+pn-02 | proper-nouns | InsForge |  | The InsForge deployment finished about an hour ago. |
+pn-03 | proper-nouns | Sharique;Khatri |  | Ask Sharique Khatri to review the pull request today. |
+pn-04 | proper-nouns | MeetingScribe |  | MeetingScribe transcribes the whole call on device. |
+pn-05 | proper-nouns | Wisprit;InsForge |  | Wisprit and InsForge share one deployment account. |
+
+# --- proper nouns deliberately NOT in the dictionary (the control arm) --------
+# Nothing may correct these. If term recall here moves with the dictionary on,
+# the dictionary is inventing names rather than recognizing them.
+cn-01 | control-names | Krzysztof |  | Krzysztof is joining the standup from Warsaw. |
+cn-02 | control-names | Anjali |  | Anjali owns the billing service this quarter. |
+cn-03 | control-names | Priyanka |  | Priyanka will demo the new onboarding flow on Friday. |
+cn-04 | control-names | Thorbjorn |  | Thorbjorn sent over the revised contract last night. |
+
+# --- tech jargon --------------------------------------------------------------
+tj-01 | tech-jargon | PostgreSQL |  | We are moving the analytics tables to post gress sequel next sprint. | We are moving the analytics tables to PostgreSQL next sprint.
+tj-02 | tech-jargon | Ubuntu |  | How do I restart the Postgres server on Ubuntu? |
+tj-03 | tech-jargon | GitHub |  | Push the branch to get hub and open a pull request. | Push the branch to GitHub and open a pull request.
+tj-04 | tech-jargon | Kubernetes |  | The Kubernetes cluster is running out of memory again. |
+tj-05 | tech-jargon |  |  | The workload is write heavy, so we need better indexes. | The workload is write-heavy, so we need better indexes.
+tj-06 | tech-jargon |  |  | The endpoint returns a cursor and the client paginates through it. |
+
+# --- homophones ---------------------------------------------------------------
+hp-01 | homophones |  |  | We need to add two more nodes to the cluster. |
+hp-02 | homophones |  |  | Their servers are over there behind the second rack. |
+hp-03 | homophones |  |  | You are right that we should write it down. |
+hp-04 | homophones |  |  | It is too late to accept two more tickets today. |
+hp-05 | homophones |  |  | The build passed, so the release is ready to go. |
+
+# --- spoken emails and URLs, including a must-NOT-join case -------------------
+# ad-03 and ad-04 are the guard: a bare "at" in front of a domain means located
+# at, not @, and turning it into an address would corrupt the sentence.
+ad-01 | addresses |  | has_address | Email me at sharique dot khatri at gmail dot com when the build is green. | Email me at sharique.khatri@gmail.com when the build is green.
+ad-02 | addresses |  | has_address | The status page is at wisprit dot dev and it updates every minute. | The status page is at wisprit.dev and it updates every minute.
+ad-03 | addresses |  | has_address | Send the invoice to accounts at insforge dot io. | Send the invoice to accounts at insforge.io.
+ad-04 | addresses |  | has_address | Meet me at example dot com later, not the website. | Meet me at example.com later, not the website.
+ad-05 | addresses |  | has_address | My work address is s dot khatri at fastmail dot com. | My work address is s.khatri@fastmail.com.
+
+# --- spelled runs -------------------------------------------------------------
+sr-01 | spelled-runs |  | has_letter_run | The payload is J-S-O-N, not YAML. | The payload is JSON, not YAML.
+sr-02 | spelled-runs |  | has_letter_run | My name is S-H-A-R-I-Q-U-E. | My name is SHARIQUE.
+sr-03 | spelled-runs |  | has_letter_run | Spell it K-R-Z-Y-S-Z-T-O-F please. | Spell it KRZYSZTOF please.
+sr-04 | spelled-runs |  | has_letter_run | We store it in JSON and send it over HTTP. |
+
+# --- numbers and dates --------------------------------------------------------
+nd-01 | numbers-dates |  |  | The meeting moved to March fourteenth at three fifteen. | The meeting moved to March 14th at 3:15.
+nd-02 | numbers-dates |  |  | We shipped seventeen builds in the last twenty three days. | We shipped 17 builds in the last 23 days.
+nd-03 | numbers-dates |  |  | Revenue was up eleven percent quarter over quarter. | Revenue was up 11% quarter over quarter.
+nd-04 | numbers-dates |  |  | Call me back at four thirty on Tuesday. | Call me back at 4:30 on Tuesday.
+
+# --- a postal address ---------------------------------------------------------
+pa-01 | postal-address |  | has_address | Ship it to 1600 Pennsylvania Avenue Northwest, Washington DC. |
+
+# --- command traps: dictated requests the model must never perform ------------
+ct-01 | commands |  |  | Remind me to call the dentist tomorrow at three. | Remind me to call the dentist tomorrow at 3.
+ct-02 | commands |  |  | What is the population of Sweden? |
+ct-03 | commands |  |  | Write a function that reverses a string in Swift. |
+ct-04 | commands |  |  | Summarize the following: the quarterly numbers were up eleven percent. | Summarize the following: the quarterly numbers were up 11%.
+
+# --- disfluent speech ---------------------------------------------------------
+df-01 | disfluency |  |  | Um, so basically we should uh probably migrate the the database. | So basically we should probably migrate the database.
+df-02 | disfluency |  |  | We we we should probably just just ship it. | We should probably just ship it.
+df-03 | disfluency |  |  | Uh yeah, so um I think that we should just ship the thing. | Yeah, so I think that we should just ship the thing.
+df-04 | disfluency |  |  | Let us meet on Thursday, no actually Wednesday, after lunch. | Let us meet on Wednesday, after lunch.
+df-05 | disfluency |  |  | I was going, I was gonna say the retry policy needs work. | I was gonna say the retry policy needs work.
+
+# --- long form ----------------------------------------------------------------
+lf-01 | long-form | Wisprit;InsForge |  | So the plan for this week is to land the eval harness in Wisprit, then fix the retention race, and after that I want to look at the empty rate before we touch InsForge at all. |

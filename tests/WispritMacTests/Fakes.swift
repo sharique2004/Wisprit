@@ -17,11 +17,40 @@ final class FakeAsr: AsrPort, @unchecked Sendable {
     var result = UtteranceResult(text: "hello world", engine: "apple_live", finalizeMs: 120)
     /// Partial strings the engine "delivers" during `begin`.
     var partials: [String] = []
+    /// Audio the fake is retaining for the CURRENT utterance. `finalize()`
+    /// detaches it into a `RetainedUtterance` and `begin()` bumps the id, exactly
+    /// as `AsrManager` does — which is what lets a test move the live buffer on
+    /// while an off-path pass is still running.
+    var retainedPcm = Data()
     private(set) var beginCount = 0
     private(set) var finalizeCount = 0
     private(set) var cancelCount = 0
     private(set) var reconcileCount = 0
     var reconciliation: VocabularyReconciliation?
+    private var utteranceID: UInt64 = 0
+    private var lastRetainedValue = RetainedUtterance(id: 0, pcm: Data())
+    /// Every reconcile call: the value it was handed, and what the fake was
+    /// retaining by the time it looked. Reconciles land on a detached task, so
+    /// assertions read the locked `reconcileLog`.
+    private var reconciled: [(retained: RetainedUtterance, live: Data)] = []
+    /// Park each reconcile as it enters, so the next utterance can overtake it.
+    /// Released by `releaseReconciles()`.
+    var parkReconciles = false
+    /// Called as each reconcile enters, before it parks.
+    var onReconcileEnter: (@Sendable () -> Void)?
+    private var parked: [CheckedContinuation<Void, Never>] = []
+
+    var lastRetained: RetainedUtterance {
+        lock.lock(); defer { lock.unlock() }
+        return lastRetainedValue
+    }
+
+    var reconcileLog: [(retained: RetainedUtterance, live: Data)] {
+        lock.lock(); defer { lock.unlock() }
+        return reconciled
+    }
+
+    var reconcileTally: Int { lock.lock(); defer { lock.unlock() }; return reconcileCount }
 
     func begin(onPartial: @escaping @Sendable (String) -> Void) async {
         for partial in noteBegin() { onPartial(partial) }
@@ -29,19 +58,36 @@ final class FakeAsr: AsrPort, @unchecked Sendable {
 
     func finalize() async -> UtteranceResult { noteFinalize() }
     func cancel() async { noteCancel() }
-    func reconcileVocabulary() async -> VocabularyReconciliation? { noteReconcile() }
+
+    func reconcileVocabulary(_ retained: RetainedUtterance) async -> VocabularyReconciliation? {
+        if let enter = enterReconcile() { enter() }
+        await parkIfGated()
+        return noteReconcile(retained)
+    }
+
+    /// Let every parked reconcile through and stop parking new ones.
+    func releaseReconciles() {
+        lock.lock()
+        parkReconciles = false
+        let waiting = parked
+        parked = []
+        lock.unlock()
+        for continuation in waiting { continuation.resume() }
+    }
 
     // NSLock is unavailable from async contexts, so every mutation goes through
     // a synchronous helper.
     private func noteBegin() -> [String] {
         lock.lock(); defer { lock.unlock() }
         beginCount += 1
+        utteranceID += 1
         return partials
     }
 
     private func noteFinalize() -> UtteranceResult {
         lock.lock(); defer { lock.unlock() }
         finalizeCount += 1
+        lastRetainedValue = RetainedUtterance(id: utteranceID, pcm: retainedPcm)
         return result
     }
 
@@ -49,9 +95,24 @@ final class FakeAsr: AsrPort, @unchecked Sendable {
         lock.lock(); cancelCount += 1; lock.unlock()
     }
 
-    private func noteReconcile() -> VocabularyReconciliation? {
+    private func enterReconcile() -> (@Sendable () -> Void)? {
+        lock.lock(); defer { lock.unlock() }
+        return onReconcileEnter
+    }
+
+    private func parkIfGated() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            guard parkReconciles else { lock.unlock(); continuation.resume(); return }
+            parked.append(continuation)
+            lock.unlock()
+        }
+    }
+
+    private func noteReconcile(_ retained: RetainedUtterance) -> VocabularyReconciliation? {
         lock.lock(); defer { lock.unlock() }
         reconcileCount += 1
+        reconciled.append((retained, retainedPcm))
         return reconciliation
     }
 }
@@ -128,11 +189,17 @@ final class FakeInserter: InsertPort, @unchecked Sendable {
     /// history-before-insert ordering.
     var historyDepthAtInsert: [Int] = []
     var history: FakeHistory?
+    /// Snapshot of `FakeAsr.reconcileTally` at each insert. The reconciliation
+    /// pass costs seconds and is contractually off the paste path, so this stays
+    /// all zeroes.
+    var reconcileDepthAtInsert: [Int] = []
+    var asr: FakeAsr?
 
     func insert(_ text: String) -> InsertResult {
         lock.lock()
         inserted.append(text)
         historyDepthAtInsert.append(history?.addedCount ?? -1)
+        reconcileDepthAtInsert.append(asr?.reconcileTally ?? -1)
         let result = self.result
         lock.unlock()
         return result
@@ -201,11 +268,15 @@ final class FakeVocabulary: VocabularyPort, @unchecked Sendable {
     private let lock = NSLock()
     private(set) var reloadCount = 0
     private(set) var learned: [LearnedTerm] = []
+    private(set) var pending: [(term: String, observation: String)] = []
     private(set) var uses: [String] = []
 
     @discardableResult
     func maybeReload() -> Bool { lock.lock(); reloadCount += 1; lock.unlock(); return false }
     func add(_ learned: LearnedTerm) { lock.lock(); self.learned.append(learned); lock.unlock() }
+    func addPending(term: String, observation: String) {
+        lock.lock(); pending.append((term, observation)); lock.unlock()
+    }
     func recordUse(term: String) { lock.lock(); uses.append(term); lock.unlock() }
 }
 

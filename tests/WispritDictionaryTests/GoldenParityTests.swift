@@ -95,6 +95,37 @@ final class GoldenParityTests: XCTestCase {
         XCTAssertEqual(store.corrections().count, golden.correctionPairs.count)
     }
 
+    /// The quarantine fields are additive, so they have to be invisible at real
+    /// scale: writing one must leave the other 137 entries — and the file's
+    /// exact Python `json.dumps` formatting — byte-identical, and must change
+    /// nothing the rest of the app reads. Removing it restores the file
+    /// exactly, the same guarantee `add`/`removeTerm` carry.
+    func testPendingEntriesRoundTripAndChangeNothingDerived() throws {
+        let before = try String(contentsOf: WispritPaths.dictionaryPath, encoding: .utf8)
+        store.addPending(term: "Sharifue", observation: "Shariq")
+
+        XCTAssertEqual(store.terms(), golden.terms)
+        XCTAssertEqual(store.corrections().count, golden.correctionPairs.count)
+        XCTAssertFalse(store.isKnownTerm("Sharifue"))
+        XCTAssertFalse(store.vocabularyTerms().contains("Sharifue"))
+        for testCase in golden.cases {
+            XCTAssertEqual(store.applyCorrections(to: testCase.input), testCase.expected,
+                           "a pending entry changed a golden correction")
+        }
+
+        // The written file is still exactly what our serialiser round-trips,
+        // and the 137 entries before it are untouched.
+        let after = try String(contentsOf: WispritPaths.dictionaryPath, encoding: .utf8)
+        XCTAssertEqual(try JSONValue.parse(after).serialized() + "\n", after)
+        let arrayClose = try XCTUnwrap(before.range(of: "\n  ]", options: .backwards))
+        XCTAssertTrue(after.hasPrefix(String(before[..<arrayClose.lowerBound])),
+                      "the 137 existing entries were rewritten")
+        XCTAssertTrue(after.contains(#""pending": true"#))
+
+        store.removeTerm("Sharifue")
+        XCTAssertEqual(try String(contentsOf: WispritPaths.dictionaryPath, encoding: .utf8), before)
+    }
+
     /// 521 regex passes is the per-utterance cost. Measured on this machine
     /// (M4): 0.60 ms debug / 0.47 ms release, against 0.22 ms for the same loop
     /// in Python — ICU is ~2× CPython's `re` here, and both are noise next to
