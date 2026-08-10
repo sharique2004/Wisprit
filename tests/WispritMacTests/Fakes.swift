@@ -34,6 +34,9 @@ final class FakeAsr: AsrPort, @unchecked Sendable {
     /// retaining by the time it looked. Reconciles land on a detached task, so
     /// assertions read the locked `reconcileLog`.
     private var reconciled: [(retained: RetainedUtterance, live: Data)] = []
+    /// The context candidates each reconcile was handed — the proof that one
+    /// utterance's terms reach the vocabulary channel and nothing else does.
+    private var reconciledExtraTerms: [[String]] = []
     /// Park each reconcile as it enters, so the next utterance can overtake it.
     /// Released by `releaseReconciles()`.
     var parkReconciles = false
@@ -51,6 +54,11 @@ final class FakeAsr: AsrPort, @unchecked Sendable {
     var reconcileLog: [(retained: RetainedUtterance, live: Data)] {
         lock.lock(); defer { lock.unlock() }
         return reconciled
+    }
+
+    var reconcileExtraTerms: [[String]] {
+        lock.lock(); defer { lock.unlock() }
+        return reconciledExtraTerms
     }
 
     var reconcileTally: Int { lock.lock(); defer { lock.unlock() }; return reconcileCount }
@@ -72,10 +80,11 @@ final class FakeAsr: AsrPort, @unchecked Sendable {
     func finalize() async -> UtteranceResult { noteFinalize() }
     func cancel() async { noteCancel() }
 
-    func reconcileVocabulary(_ retained: RetainedUtterance) async -> VocabularyReconciliation? {
+    func reconcileVocabulary(_ retained: RetainedUtterance,
+                             extraTerms: [String]) async -> VocabularyReconciliation? {
         if let enter = enterReconcile() { enter() }
         await parkIfGated()
-        return noteReconcile(retained)
+        return noteReconcile(retained, extraTerms: extraTerms)
     }
 
     /// Let every parked reconcile through and stop parking new ones.
@@ -123,11 +132,35 @@ final class FakeAsr: AsrPort, @unchecked Sendable {
         }
     }
 
-    private func noteReconcile(_ retained: RetainedUtterance) -> VocabularyReconciliation? {
+    private func noteReconcile(_ retained: RetainedUtterance,
+                               extraTerms: [String]) -> VocabularyReconciliation? {
         lock.lock(); defer { lock.unlock() }
         reconcileCount += 1
         reconciled.append((retained, retainedPcm))
+        reconciledExtraTerms.append(extraTerms)
         return reconciliation
+    }
+}
+
+/// A `ContextPort` double: scripted outcome, counted calls. The session's
+/// whole contract with context is three lines — begin at key-down, one finish
+/// per utterance, nothing awaited — and the counts pin all three.
+final class FakeContext: ContextPort, @unchecked Sendable {
+    private let lock = NSLock()
+    var outcome = ContextOutcome()
+    private(set) var beginCount = 0
+    private(set) var finishCount = 0
+
+    func beginCapture() { lock.lock(); beginCount += 1; lock.unlock() }
+
+    func finishCapture() -> ContextOutcome {
+        lock.lock(); defer { lock.unlock() }
+        finishCount += 1
+        // One consumption per utterance: like the real coordinator, whatever
+        // was scripted is handed out once and the slot reads empty after.
+        let handed = outcome
+        outcome = ContextOutcome()
+        return handed
     }
 }
 
@@ -227,11 +260,28 @@ final class FakeInserter: InsertPort, @unchecked Sendable {
 }
 
 final class FakeHistory: HistoryPort, @unchecked Sendable {
+    struct Detail: Equatable {
+        var transcriptId: Int64
+        var raw: String
+        var corrected: String
+        var refined: String
+        var inserted: String
+        var vocab: String?
+        var ai: String?
+        var termsHit: [String]
+    }
+
     private let lock = NSLock()
     private(set) var added: [(text: String, engine: String, durationMs: Double?)] = []
     var last: String?
+    private(set) var storedDetails: [Detail] = []
+    private(set) var detailUpdates: [(transcriptId: Int64, vocab: String)] = []
 
     var addedCount: Int { lock.lock(); defer { lock.unlock() }; return added.count }
+    var details: [Detail] { lock.lock(); defer { lock.unlock() }; return storedDetails }
+    var vocabUpdates: [(transcriptId: Int64, vocab: String)] {
+        lock.lock(); defer { lock.unlock() }; return detailUpdates
+    }
 
     @discardableResult
     func add(text: String, engine: String, durationMs: Double?) -> Int64 {
@@ -241,6 +291,29 @@ final class FakeHistory: HistoryPort, @unchecked Sendable {
         let id = Int64(added.count)
         lock.unlock()
         return id
+    }
+
+    @discardableResult
+    func addDetail(transcriptId: Int64, raw: String, corrected: String, refined: String,
+                   inserted: String, vocab: String?, ai: String?, termsHit: [String]) -> Int64 {
+        guard transcriptId > 0 else { return -1 }
+        lock.lock()
+        storedDetails.append(Detail(transcriptId: transcriptId, raw: raw, corrected: corrected,
+                                    refined: refined, inserted: inserted, vocab: vocab,
+                                    ai: ai, termsHit: termsHit))
+        let id = Int64(storedDetails.count)
+        lock.unlock()
+        return id
+    }
+
+    @discardableResult
+    func updateDetail(transcriptId: Int64, vocab: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        guard storedDetails.contains(where: { $0.transcriptId == transcriptId }) else {
+            return false
+        }
+        detailUpdates.append((transcriptId, vocab))
+        return true
     }
 
     func lastText() -> String? { lock.lock(); defer { lock.unlock() }; return last }

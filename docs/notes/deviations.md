@@ -174,3 +174,153 @@ are untouched and still literal Python output; the new behavior is pinned by
   `chars`/`raw_chars` all still read exactly what the engine heard. Partials
   longer than 2 000 characters are shown verbatim rather than scanned on the
   session thread; finalize corrects them a moment later either way.
+
+## Context awareness (Phase 4, 2026-08-10)
+
+SPEC risk #10 ruled any context awareness "out of bounds without explicit
+per-feature consent design". That design now exists and is implemented — this
+section records it, plus the two schema additions it made.
+
+**The consent contract, enforced in code rather than copy:**
+
+- `context_awareness` defaults to **false** and is flipped on ONLY by the
+  consent flow (`AppController.enableContextAwareness`): menu item / Settings
+  button → explanatory sheet (`ContextConsent` — what is read, what is never
+  read, where it goes) → `Permissions.requestAccessibilityPrompt()` only when
+  the AX path needs it → the flag. Every surface routes through the same flow;
+  the menu model tests pin that no menu state offers a consent-free toggle to
+  on. Switching OFF is always consent-free.
+- **What is read:** the text near the cursor in the focused field, captured at
+  key-down. Two readers, tried in order: the input method's wire-v2
+  `readContext` (bounded by `IMContextWindow` in the protocol itself, zero
+  permissions), else `AXContextReader` — at most FOUR AX calls against the
+  focused element (focused element → selected range → character count →
+  string-for-range over one clamped window), one serial utility queue, depth 1,
+  `AXUIElementSetMessagingTimeout` as the budget. Never a tree walk, never
+  another window, never a screenshot.
+- **Never read:** apps on `ContextPolicy.defaultExcludedBundleIDs` (password
+  managers — the user's `context_excluded_bundle_ids` can extend the list but
+  never shrink it below the core set), anything while Secure Event Input is
+  active, anything while `WISPRIT_NO_CONTEXT=1` (kill switch, mirrors
+  `WISPRIT_NO_IM`).
+- **Nothing stored:** the snapshot lives in one generation-stamped slot,
+  consumed (or discarded) at finalize, superseded at the next key-down. The
+  extracted candidates ride one `reconcileVocabulary(_:extraTerms:)` call and
+  die with it: `recordUse` ignores unknown terms and the retro learn fallback
+  is `isKnownTerm`-gated, so nothing derived from screen text can reach
+  dictionary.json. `ContextSnapshot.description` is redacted by design and
+  the integration logs statuses only.
+
+**Metrics: three additive utterance-row fields after the whole existing tail**
+(`ctx`, `ctx_ms`, `ctx_terms`). Omitted entirely while the feature is off, so
+every previously written row remains a byte-prefix of the new schema — the
+same rule as every post-Python addition. `ctx` is a closed status vocabulary
+(`read|late|busy|off`), never text.
+
+**`skipped_verbatim_app`: a refine outcome beyond the Python thirteen** (the
+`has_letter_run` precedent). `context_verbatim_bundle_ids` (default: the live
+`terminal_bundle_ids` ∪ a compiled-in IDE list) skips the refine stage — and
+its prewarm — outright when the frontmost app is on it. Its own value rather
+than a reuse of `off` because every recorded `off` row means "the setting is
+off" and has to keep meaning that; the master toggle still outranks the list.
+Only ever more verbatim + faster, so it ships independent of the consent flag:
+skipping a model pass reads nothing from anyone's screen.
+
+**Settings keys** (`ContextSettings`) follow the `LiveTypingSettings`
+string-key precedent — none of `context_awareness`, `context_max_terms`,
+`context_excluded_bundle_ids`, `context_verbatim_bundle_ids` enters the
+golden-pinned `Settings.defaults`; the config file preserves them as unknown
+keys across builds.
+
+## Edit capture (Phase 5, 2026-08-10)
+
+- **A third non-utterance `metrics.log` line, `outcome: "edit_observed"`** —
+  the `vocab_retro` precedent, one phase later. An edit can only be counted
+  when the pipeline finally sees what became of text it inserted, which is one
+  utterance (IM key-down read), a session close, or the next utterance's
+  context snapshot later — long after the utterance's own row was on disk in
+  an append-only stream. The line is reference-less by construction (nothing
+  but file order ties it to its utterance) and carries exactly two fields
+  after the frozen tail: `edit_dist` (character Levenshtein of our committed
+  text vs the field now; **0 is the zero-edit observation; omitted entirely**
+  when the input method reported `.changed` without text — an edit whose size
+  is unknowable joins the denominator and never the numerator) and
+  `edit_scope` (`"im"` for the wire-v2 `committedSnapshot`, `"ax"` for the
+  next-utterance context-window diff — the evidence ranking is recorded in
+  `docs/eval/DEFINITIONS.md`). `engine` is the empty string: no engine
+  produced this line, and `edit_scope` names the reader.
+  `MetricsSummary.nonUtteranceOutcomes` drops it from every utterance stat and
+  counts the zero-edit pair from it BEFORE that filter; pinned by
+  `Golden.metricsEditObservedRow` and `MetricsSummaryTests`. An utterance
+  nobody observed writes **no** line — never a guessed one — which is the
+  whole observable-denominator rule.
+- **The wire contract is wider than today's input method.** The app consumes
+  `.changed` snapshots that carry `current` text (diffing them through
+  `EditObservationGate` into learn proposals), but the shipping
+  `IMStreamSession.readCommitted` deliberately sends `.changed` with no text —
+  "which edit" would be a guess, and that refusal is pinned in
+  `ReadBackTests`. Today, therefore, the IM rung produces zero-edit and
+  changed-of-unknown-size observations only; single-token proposals flow from
+  the AX scope. A future IM-side anchored relocation can populate `current`
+  and light the IM proposal path up with **zero app changes** — the fake peer
+  in `SessionEditCaptureTests` already exercises that shape end to end.
+- **Propose-first, and the threshold lives in one place.** Accepted proposals
+  are only ever *recorded* (`PendingLearnStore`); at ≥2 distinct-utterance
+  observations the user sees `transientNotice("New word: <term> — review in
+  Dictionary")` plus the Dictionary page's proposals banner and nav-row badge
+  — Accept performs `DictionaryStore.add` + `promoteConsumed`, Dismiss is
+  forever. `learn_auto_accept` (string-key precedent, default false) turns the
+  threshold event into the same silent add the Accept button makes.
+
+## Parakeet vocabulary channel (Phase 6, 2026-08-10)
+
+Fork (b) of the B-0 spike verdict (docs/research/spikes-parakeet.md), complete
+inside `Sources/WispritParakeet/` and **deliberately not linked into
+WispritMac** until the human-corpus gate: the transitive binary xcframework
+(`NemoTextProcessing.xcframework` via FluidAudio) must not ride every install
+for an opt-in feature whose ship decision is scoreboard-gated.
+
+- **Evidence only, structurally.** `ParakeetDecodeOutput` carries the raw TDT
+  transcript plus `ParakeetSpotEvidence` (scores, alias, UTF-8 byte range) and
+  has NO rescored-text field — "never take the rescorer's rewrite" (23–50
+  measured false replacements) cannot regress by accident.
+  `ParakeetVocabularyChannel.substituted` splices ONLY applied,
+  comparison-passed, byte-aligned candidates whose canonical term was actually
+  requested; everything else is the TDT transcript byte-for-byte. The
+  downstream FP filter is `VocabularyReconciler`'s gates, unchanged.
+- **Model store is the ONE network file.** `ParakeetModelStore.swift` is
+  allowlisted in `NetworkInvariantTests` (tokens `URLSession`, `https://`);
+  download is explicit-user-invoked, `WISPRIT_NO_NETWORK=1` hard-refuses, and
+  every byte is verified against the 33-file SHA-256 manifest in
+  `ParakeetManifest`. The manifest is the pin — URLs use `resolve/main`
+  because HF model repos re-push and prune history, and a moved ref simply
+  fails verification closed. Hashes were recorded from the spike's validated
+  caches on this machine.
+- **The silent-download hole is double-locked.** `AsrModels.load` routes files
+  through ModelHub, which fetches anything missing; `ParakeetLiveDecoder`
+  (1) requires `ParakeetModelStore.state() == .verified` before any FluidAudio
+  call and (2) sets `ModelHub.offlineMode = true`, FluidAudio's own refusal.
+  CTC assets load via `CtcModels.loadDirect` + `CtcTokenizer.load(from:)`
+  (never `loadWithCtcTokens`, which hardcodes the Application Support cache);
+  terms are CTC-tokenized by hand into `ctcTokenIds`.
+  `spotterRescueEnabled: false` per the vendor's own #702/#724 guidance.
+- **Doctor row without linking.** WispritMac reports "Parakeet models: not
+  downloaded (optional)" / partial (warn) / verified from PATH ONLY:
+  `~/.wisprit/models/parakeet` + its `verified.json` marker
+  (`Doctor.parakeetModelsState` in DoctorProbes.swift mirrors the convention
+  documented on `ParakeetManifest`; drift is pinned on both sides by tests).
+- **Adoption recipe** (also in the `ParakeetVocabularyChannel.swift` header):
+  one Package.swift line adding `"WispritParakeet"` to WispritMac's
+  dependencies (orchestrator-owned), then a factory registration that builds
+  `ParakeetVocabularyChannel(decoder: ParakeetLiveDecoder(modelsDir:
+  ParakeetModelStore.productionModelsDir), terms: dictionary terms +
+  heardPhrases)`, calls `warmup()` off-path at app start, and maps
+  `ParakeetReconciliation` → `VocabularyReconciliation` field-for-field in the
+  `AsrPort` adapter (`ParakeetReconciling` mirrors the reconcile surface for
+  exactly this).
+- **Live integration test** (`WISPRIT_PARAKEET_LIVE=1`-gated, skips cleanly)
+  runs the real models via the spike's read-only caches symlinked into a temp
+  models dir. Measured on this machine: real-manifest `state()` = verified,
+  warmup 506 ms warm, reconcile 348 ms on pn-01, alias hit "whisper"/"whisper
+  it" → `Wisprit` recovered — the spike's numbers reproduced through the
+  shipping code path.

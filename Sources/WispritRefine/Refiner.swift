@@ -112,9 +112,10 @@ public actor Refiner {
     // MARK: - lifecycle
 
     /// Prewarm at record start so the model loads during the hold. Failure is
-    /// silent — `refine` will retry or fall back.
+    /// silent — `refine` will retry or fall back. A verbatim-app utterance
+    /// skips the prewarm too: that is the "faster" half of the skip.
     public func begin() async {
-        guard enabled() else { return }
+        guard enabled(), !configuration().verbatimApp else { return }
         await generator.prewarm()
     }
 
@@ -143,6 +144,13 @@ public actor Refiner {
         guard enabled() else {
             await cancel()
             return RefineResult(text: raw, outcome: .off)
+        }
+        // After the master toggle, before every content guard: `off` keeps
+        // meaning "the setting is off" in every previously recorded row, and a
+        // terminal/IDE utterance pays for no guard it will never use.
+        if configuration().verbatimApp {
+            await cancel()
+            return RefineResult(text: raw, outcome: .skippedVerbatimApp)
         }
         if RefineGuards.hasAddress(raw) {
             await cancel()

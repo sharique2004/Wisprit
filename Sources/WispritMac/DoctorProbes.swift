@@ -1,5 +1,6 @@
 #if os(macOS)
 import Foundation
+import WispritContext
 import WispritDictionary
 import WispritEngine
 import WispritIMProtocol
@@ -48,10 +49,17 @@ public extension Doctor {
 
         if liveTyping { gatherLiveTyping(into: &facts) }
 
+        // Read here rather than in the Live Typing half: the window's base
+        // probe skips that half, and the context row must not vanish with it.
+        facts.contextAwarenessEnabled = !ContextEnvironment.isDisabled
+            && ContextSettings.isEnabled(Settings.load())
+
         facts.configPath = WispritPaths.configPath.path
         facts.configValid = isValidJSON(WispritPaths.configPath)
         facts.dictionaryPath = WispritPaths.dictionaryPath.path
         facts.dictionaryValid = isValidJSON(WispritPaths.dictionaryPath)
+        facts.parakeetModelsPath = parakeetModelsDir.path
+        facts.parakeetModels = parakeetModelsState(at: parakeetModelsDir)
 
         // Its own store rather than the app's: `gather` is also the CLI's, and
         // this is the only probe in here that reads a file the user edits. The
@@ -85,6 +93,39 @@ public extension Doctor {
     }
 
     static var evalBaselineRelativePath: String { "docs/eval/BASELINE.json" }
+
+    // MARK: - Parakeet models (path convention, NO WispritParakeet import)
+
+    /// `ParakeetModelStore.productionModelsDir`, restated by path because this
+    /// executable deliberately does not link WispritParakeet (the transitive
+    /// binary xcframework must not ride every install while the feature is
+    /// human-corpus-gated). The convention lives on `ParakeetManifest` in that
+    /// target; a drift here shows up as a permanently-"partial" doctor row on
+    /// a machine with a verified download, which the model-store tests pin
+    /// against by asserting both spellings.
+    static var parakeetModelsDir: URL {
+        WispritPaths.stateDir
+            .appendingPathComponent("models", isDirectory: true)
+            .appendingPathComponent("parakeet", isDirectory: true)
+    }
+
+    /// Marker written by `ParakeetModelStore.download` after a full SHA pass.
+    static let parakeetMarkerFileName = "verified.json"
+
+    /// Path check only — the store re-hashes 586 MB when IT verifies; a doctor
+    /// row the window refreshes every few seconds trusts the marker instead:
+    /// empty/absent dir → not_downloaded; content without a valid marker →
+    /// partial (a torn download, or files changed since verification); valid
+    /// marker → verified.
+    static func parakeetModelsState(at dir: URL) -> String {
+        let contents = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        guard !contents.isEmpty else { return "not_downloaded" }
+        let marker = dir.appendingPathComponent(parakeetMarkerFileName)
+        guard let data = try? Data(contentsOf: marker),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              object["manifest_version"] is Int else { return "partial" }
+        return "verified"
+    }
 
     /// A repo-relative file, when this build can see the checkout it came from.
     ///

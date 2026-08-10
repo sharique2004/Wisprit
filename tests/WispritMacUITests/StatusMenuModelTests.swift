@@ -61,6 +61,7 @@ final class StatusMenuModelTests: XCTestCase {
             "AI Cleanup (Apple Intelligence)",
             "Polish Last",
             "Enable Live Typing…",
+            "Enable Context Awareness…",
             "---",
             "Recent transcripts",
             "  (none yet)",
@@ -285,6 +286,39 @@ final class StatusMenuModelTests: XCTestCase {
 
     func testThreeSeparators() {
         XCTAssertEqual(StatusMenuModel.build(StatusMenuState()).filter(\.isSeparator).count, 4)
+    }
+
+    // MARK: - Context awareness (Phase 4)
+
+    /// The `liveTypingRow` discipline, applied to consent: off runs the FLOW
+    /// (ellipsis title, `enableContextAwareness`), never a bare toggle to on;
+    /// on is a checked toggle whose only move is off; the kill switch is inert.
+    func testContextAwarenessRowPerState() {
+        func row(_ status: ContextAwarenessMenuStatus) -> MenuItemModel {
+            StatusMenuModel.build(StatusMenuState(contextAwareness: status))[6]
+        }
+
+        XCTAssertEqual(row(.off).title, "Enable Context Awareness…")
+        XCTAssertEqual(row(.off).action, .enableContextAwareness)
+        XCTAssertFalse(row(.off).isChecked)
+
+        XCTAssertEqual(row(.on).title, "Context Awareness")
+        XCTAssertEqual(row(.on).action, .toggleContextAwareness)
+        XCTAssertTrue(row(.on).isChecked)
+
+        XCTAssertNil(row(.disabledByEnvironment).action)
+        XCTAssertFalse(row(.disabledByEnvironment).isEnabled)
+        XCTAssertEqual(row(.disabledByEnvironment).title,
+                       "Context Awareness disabled (WISPRIT_NO_CONTEXT=1)")
+    }
+
+    /// No state of the menu offers a consent-free route to on.
+    func testThereIsNeverAToggleToOnWithoutTheConsentFlow() {
+        for status in ContextAwarenessMenuStatus.allCases where status != .on {
+            let items = StatusMenuModel.build(StatusMenuState(contextAwareness: status))
+            XCTAssertFalse(items.contains { $0.action == .toggleContextAwareness },
+                           "\(status): the toggle only ever exists to switch OFF")
+        }
     }
 
     // MARK: - Finish setup (§5.2)

@@ -88,6 +88,25 @@ public protocol LiveTypingPeer: AnyObject, Sendable {
     /// Unsolicited events (`clientLost` above all) arrive here.
     func startEvents(_ handler: @escaping @Sendable (IMEventMessage) -> Void)
     func stopEvents()
+
+    // Wire v2's read channel (Phase 4 context awareness). Defaulted below so a
+    // peer that predates reads — or a double that never needs them — conforms
+    // unchanged, and the default IS the documented degradation: a read that
+    // cannot be posted is simply no signal.
+
+    /// Fire-and-forget read request. There is no blocking counterpart on
+    /// purpose — nothing about a read is worth making the user wait for.
+    @discardableResult
+    func postRead(_ message: IMReadMessage) -> Bool
+    /// Where read-back answers land, generation-stamped. nil drops them at the
+    /// door, which is what a consumer that is switched off should do.
+    func setSnapshotHandler(_ handler: (@Sendable (IMSnapshotMessage) -> Void)?)
+}
+
+public extension LiveTypingPeer {
+    @discardableResult
+    func postRead(_ message: IMReadMessage) -> Bool { false }
+    func setSnapshotHandler(_ handler: (@Sendable (IMSnapshotMessage) -> Void)?) {}
 }
 
 // MARK: - Session controller seam
@@ -189,6 +208,18 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
     private var boundBundleID: String?
     private var lastActivity = Date.distantPast
     private var tailIsLive = false
+    /// Phase 5: the app-side mirror of the input method's own committed-text
+    /// record — every commit appended, every applied retro edit rewritten,
+    /// replaced when a new session opens. This is what a `committedSnapshot`
+    /// gets diffed against, so it deliberately SURVIVES session close: the
+    /// close-time read's answer arrives after `endSession`, and the input
+    /// method keeps its record until the next `beginSession` for the same
+    /// reason.
+    private var committedRecord: (generation: UInt64, text: String)?
+    /// Wire-v2 snapshot consumers. One peer handler slot exists, so the routes
+    /// live here and a single installed router fans out by snapshot kind.
+    private var contextRoute: (@Sendable (UInt64, IMContextSnapshot) -> Void)?
+    private var committedRoute: (@Sendable (UInt64, IMCommittedSnapshot) -> Void)?
 
     public init(peer: any LiveTypingPeer,
                 cache: BundleCapabilityCache = BundleCapabilityCache(),
@@ -211,6 +242,85 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
     public var capabilitySnapshot: IMClientCapabilities? {
         lock.lock(); defer { lock.unlock() }
         return capabilities
+    }
+
+    // MARK: Wire v2 reads (Phase 4)
+
+    /// Post `readContext` for the OPEN session and return the wire generation
+    /// the read named — the value the answer must match to be believed. nil
+    /// when the IM rung cannot serve a read right now (no live client, no open
+    /// session, or the post itself failed), which is the caller's cue to fall
+    /// back to the AX reader. Fire-and-forget, exactly like a live partial.
+    public func requestContextRead() -> UInt64? {
+        lock.lock()
+        let engaged = currentTier.usesInputMethod && clientAlive
+        let g = generation
+        lock.unlock()
+        guard engaged, let g else { return nil }
+        return peer.postRead(.readContext(generation: g)) ? g : nil
+    }
+
+    /// Route wire-v2 CONTEXT snapshots to one consumer, generation attached so
+    /// the consumer can drop an answer that lost the race.
+    public func onContextSnapshot(
+        _ handler: @escaping @Sendable (UInt64, IMContextSnapshot) -> Void
+    ) {
+        lock.lock(); contextRoute = handler; lock.unlock()
+        installSnapshotRouter()
+    }
+
+    /// Route wire-v2 COMMITTED snapshots (Phase 5's edit observation) the same
+    /// way. A build that never calls this drops them at the door — the
+    /// channel's own rule for an answer nothing consumes.
+    public func onCommittedSnapshot(
+        _ handler: @escaping @Sendable (UInt64, IMCommittedSnapshot) -> Void
+    ) {
+        lock.lock(); committedRoute = handler; lock.unlock()
+        installSnapshotRouter()
+    }
+
+    /// One peer handler, fanned out by snapshot kind. Idempotent — the second
+    /// consumer's registration re-installs the same router.
+    private func installSnapshotRouter() {
+        peer.setSnapshotHandler { [weak self] message in
+            guard let self else { return }
+            self.lock.lock()
+            let context = self.contextRoute
+            let committed = self.committedRoute
+            self.lock.unlock()
+            switch message.snapshot {
+            case .contextSnapshot(let snapshot):
+                context?(message.generation, snapshot)
+            case .committedSnapshot(let snapshot):
+                committed?(message.generation, snapshot)
+            }
+        }
+    }
+
+    /// The mirror `committedSnapshot` answers are diffed against: what this
+    /// session committed under `generation`, retro edits included. nil when the
+    /// record is for some other session or nothing was committed — in which
+    /// case an answer stamped with that generation is not ours to interpret.
+    public func committedText(for generation: UInt64) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        guard let record = committedRecord, record.generation == generation,
+              !record.text.isEmpty else { return nil }
+        return record.text
+    }
+
+    /// Post `readCommitted` for the run this session has committed. nil when
+    /// there is nothing to ask about — no open session, no live client, or no
+    /// commit on record. Fire-and-forget, exactly like a context read: a read
+    /// that cannot be posted is simply no signal.
+    @discardableResult
+    public func requestCommittedRead() -> UInt64? {
+        lock.lock()
+        let g = generation
+        let alive = clientAlive
+        let record = committedRecord
+        lock.unlock()
+        guard let g, alive, let record, record.generation == g else { return nil }
+        return peer.postRead(.readCommitted(generation: g)) ? g : nil
     }
 
     public var isSessionOpen: Bool {
@@ -275,6 +385,13 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
             && boundBundleID != front
         lock.unlock()
         if openElsewhere { closeSession(commit: true, releaseSource: false) }
+
+        // Phase 5, the key-down half of edit observation: before this utterance
+        // writes a character into a REUSED session's field, ask what became of
+        // the text the previous one left there. Fire-and-forget — the answer
+        // races nothing and lands off-path. (A session closed above already
+        // posted its own last read from `closeSession`.)
+        if isSessionOpen { requestCommittedRead() }
 
         if !isSessionOpen { openSession() }
 
@@ -347,7 +464,10 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
             // `commitFinal` answers only when something went wrong, so silence
             // from a reachable process is the success case.
             touch()
-            lock.lock(); tailIsLive = false; lock.unlock()
+            lock.lock()
+            tailIsLive = false
+            appendCommittedLocked(g, text)
+            lock.unlock()
             return .committed(tier)
 
         case .event(let message):
@@ -365,7 +485,10 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
                 return .fallback(reason: result.detail.rawValue)
             default:
                 touch()
-                lock.lock(); tailIsLive = false; lock.unlock()
+                lock.lock()
+                tailIsLive = false
+                appendCommittedLocked(g, text)
+                lock.unlock()
                 return .committed(tier)
             }
 
@@ -402,6 +525,11 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
                 if !result.ok {
                     cache.downgrade(for: caps?.bundleID, detail: result.detail, note: result.note)
                     lowerTier(after: result.detail)
+                } else {
+                    // The input method rewrote its committed record; the mirror
+                    // follows, or the next `committedSnapshot` would read our
+                    // own fix as somebody's edit.
+                    rewriteCommitted(g, replace: replace, with: replacement)
                 }
                 touch()
                 return result
@@ -456,6 +584,9 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
                 clientAlive = true
                 boundBundleID = caps.bundleID.isEmpty ? config.frontmostBundleID() : caps.bundleID
                 tailIsLive = false
+                // The input method's `beginSession` starts an empty committed
+                // record; the mirror starts empty with it.
+                committedRecord = nil
                 lock.unlock()
                 log.info("""
                     live typing session \(g, privacy: .public) open in \
@@ -477,8 +608,19 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
     private func closeSession(commit: Bool, releaseSource: Bool) {
         lock.lock()
         let g = generation
+        let record = committedRecord
         lock.unlock()
         if let g {
+            // Phase 5, the close half: the last chance to see what the user did
+            // to the run this session committed. Legal after `endSession` too —
+            // the input method answers for the last generation it served — but
+            // posted before it so the read cannot lose a race with a peer
+            // shutdown. The answer lands on the snapshot router whenever it
+            // lands; `committedRecord` survives `resetSessionState` for exactly
+            // that reason.
+            if let record, record.generation == g {
+                _ = peer.postRead(.readCommitted(generation: g))
+            }
             _ = peer.exchange(.endSession(generation: g, commit: commit),
                               timeout: max(config.commandTimeout, 0.5))
         }
@@ -567,6 +709,29 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
             break
         }
         lock.unlock()
+    }
+
+    /// Caller holds `lock`. Appends to the mirror for the session that owns it,
+    /// or starts it — the input method's own record accumulates across the
+    /// utterances one session spans, and the mirror must accumulate with it.
+    private func appendCommittedLocked(_ generation: UInt64, _ text: String) {
+        guard !text.isEmpty else { return }
+        if var record = committedRecord, record.generation == generation {
+            record.text += text
+            committedRecord = record
+        } else {
+            committedRecord = (generation, text)
+        }
+    }
+
+    /// Mirror an APPLIED retro edit: backwards-last occurrence, the same
+    /// occurrence rule `RetroEditPlanner` resolves inside the input method.
+    private func rewriteCommitted(_ generation: UInt64, replace: String, with replacement: String) {
+        lock.lock(); defer { lock.unlock() }
+        guard var record = committedRecord, record.generation == generation,
+              let range = record.text.range(of: replace, options: .backwards) else { return }
+        record.text.replaceSubrange(range, with: replacement)
+        committedRecord = record
     }
 
     /// Caller holds `lock`.

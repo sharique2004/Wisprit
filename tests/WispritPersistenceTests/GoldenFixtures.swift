@@ -213,6 +213,12 @@ enum Golden {
     static let metricsVocabRetroRow =
         #"{"ts": 1786399512.204418, "held_ms": 0.0, "engine": "apple_dictation", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "vocab_retro", "chars": 0, "vocab_ms": 1243.6, "vocab_hits": 2, "vocab_delta": 1, "applied": true}"# + "\n"
 
+    /// The `edit_observed` deviation row (Phase 5): a field re-read finally
+    /// showed what became of text some earlier utterance inserted. Reference-
+    /// less like `vocab_retro`, and engine-less — `edit_scope` names the reader.
+    static let metricsEditObservedRow =
+        #"{"ts": 1786399600.128455, "held_ms": 0.0, "engine": "", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "edit_observed", "chars": 0, "edit_dist": 0, "edit_scope": "im"}"# + "\n"
+
     /// A real line from `~/.wisprit/metrics.log` (Python era) — the stream this
     /// writer must keep appending to.
     static let metricsRealPythonLine =

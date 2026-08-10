@@ -211,6 +211,63 @@ final class MetricsSummaryTests: XCTestCase {
         XCTAssertEqual(one.finalizeMsP50, 120.0)
     }
 
+    // MARK: zero-edit rate (Phase 5)
+
+    /// The observable-denominator rule, as data: three observations — two
+    /// clean, one edited — over five utterances yield 2/3, never 2/5. The
+    /// unobserved utterances simply do not exist to this metric.
+    func testZeroEditRateIsOverObservedUtterancesOnly() {
+        let mixed = rows([
+            #"{"ts": 1786399000.0, "held_ms": 1200.0, "engine": "apple_live", "finalize_ms": 120.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 10.0, "outcome": "im_streaming", "chars": 43, "release_to_text_ms": 300.0}"#,
+            #"{"ts": 1786399001.0, "held_ms": 0.0, "engine": "", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "edit_observed", "chars": 0, "edit_dist": 0, "edit_scope": "im"}"#,
+            #"{"ts": 1786399002.0, "held_ms": 1300.0, "engine": "apple_live", "finalize_ms": 110.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 10.0, "outcome": "paste", "chars": 20, "release_to_text_ms": 700.0}"#,
+            #"{"ts": 1786399003.0, "held_ms": 0.0, "engine": "", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "edit_observed", "chars": 0, "edit_dist": 2, "edit_scope": "im"}"#,
+            #"{"ts": 1786399004.0, "held_ms": 1300.0, "engine": "apple_live", "finalize_ms": 100.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 10.0, "outcome": "paste", "chars": 20, "release_to_text_ms": 650.0}"#,
+            #"{"ts": 1786399005.0, "held_ms": 0.0, "engine": "", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "edit_observed", "chars": 0, "edit_dist": 0, "edit_scope": "ax"}"#,
+            #"{"ts": 1786399006.0, "held_ms": 1300.0, "engine": "apple_live", "finalize_ms": 100.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 10.0, "outcome": "paste", "chars": 20}"#,
+            #"{"ts": 1786399007.0, "held_ms": 1300.0, "engine": "apple_live", "finalize_ms": 100.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 10.0, "outcome": "paste", "chars": 20}"#,
+        ])
+        let s = MetricsSummary.summarize(mixed, now: now)
+        XCTAssertEqual(s.total, 5, "observation lines are not utterances")
+        XCTAssertEqual(s.editObserved, 3)
+        XCTAssertEqual(s.zeroEdit, 2)
+        XCTAssertEqual(s.zeroEditRate, 2.0 / 3.0, accuracy: 1e-12)
+    }
+
+    /// An observed edit whose size could not be measured (`.changed` with no
+    /// text) carries no `edit_dist` at all: it joins the denominator and never
+    /// the numerator — the honest direction for the metric to err.
+    func testAnUnknowableDistanceCountsObservedButNeverZeroEdit() {
+        let s = MetricsSummary.summarize(rows([
+            #"{"ts": 1786399000.0, "held_ms": 0.0, "engine": "", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "edit_observed", "chars": 0, "edit_scope": "im"}"#,
+            #"{"ts": 1786399001.0, "held_ms": 0.0, "engine": "", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "edit_observed", "chars": 0, "edit_dist": 0, "edit_scope": "im"}"#,
+        ]), now: now)
+        XCTAssertEqual(s.editObserved, 2)
+        XCTAssertEqual(s.zeroEdit, 1)
+        XCTAssertEqual(s.zeroEditRate, 0.5, accuracy: 1e-12)
+    }
+
+    func testNothingObservedIsZeroOverZeroNotAHundredPercent() {
+        let s = summary()
+        XCTAssertEqual(s.editObserved, 0)
+        XCTAssertEqual(s.zeroEdit, 0)
+        XCTAssertEqual(s.zeroEditRate, 0)
+        XCTAssertFalse(MetricsSummary.render(for: s).contains("zero-edit"),
+                       "no denominator, no rate — the row is absent, not 0%")
+    }
+
+    func testRenderShowsTheRateWithItsDenominator() {
+        let s = MetricsSummary.summarize(rows([
+            #"{"ts": 1786399000.0, "held_ms": 1200.0, "engine": "apple_live", "finalize_ms": 120.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 10.0, "outcome": "paste", "chars": 43}"#,
+            #"{"ts": 1786399001.0, "held_ms": 0.0, "engine": "", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "edit_observed", "chars": 0, "edit_dist": 0, "edit_scope": "im"}"#,
+            #"{"ts": 1786399002.0, "held_ms": 0.0, "engine": "", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "edit_observed", "chars": 0, "edit_dist": 3, "edit_scope": "ax"}"#,
+        ]), now: now)
+        let text = MetricsSummary.render(for: s)
+        XCTAssertTrue(text.contains("zero-edit"), text)
+        XCTAssertTrue(text.contains("1/2 observed (50.0%)"),
+                      "the n rides in the same cell as the rate: \(text)")
+    }
+
     /// A row window is a window over the FILE, because `windowed` is also what a
     /// caller lists; the non-utterance rows are dropped afterwards, so "last 2
     /// rows" can legitimately summarize one utterance.

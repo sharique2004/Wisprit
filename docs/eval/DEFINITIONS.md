@@ -161,6 +161,23 @@ with the unobserved ones excluded from the denominator rather than assumed
 clean, and `n` reported every time. An unobserved utterance is never counted as
 zero-edit — that is precisely how this metric gets quietly inflated.
 
+### Observation sources
+
+Each live observation is one `outcome: "edit_observed"` line in `metrics.log`
+(`docs/notes/deviations.md`), stamped with the reader that produced it. The
+scopes are not equally trustworthy, and the table is the ranking:
+
+| `edit_scope` | read | when | evidence |
+|---|---|---|---|
+| `im` | wire-v2 `readCommitted` → `committedSnapshot` | next utterance's key-down in the same IM session, and session close | **strong** — the input method locates the run this session committed by content, single-occurrence rule (`RetroEditPlanner.locate`); `.unchanged` is `edit_dist: 0`, `.changed` is a certain edit (distance omitted when the IM refuses to guess which edit) |
+| `ax` | the next utterance's context snapshot diffed against the last pasted text | next utterance's finalize; **only with `context_awareness` consent** (no snapshot exists otherwise) | **weaker** — a bounded window, not a located run; exact containment (once) is `edit_dist: 0`, a single-token substitution through `EditObservationGate` is an observed edit, anything ambiguous is NO line |
+| — | none | `blocked_secure`, IM rung without wire v2, paste/type without context consent | **unobservable** — no line, excluded from the denominator |
+
+The same conservatism at both ends: a line is only ever written for something a
+reader actually saw, so `n` (`editObserved` in `MetricsSummary`, the tile's
+subtitle in Insights, the `x/n observed` cell in `Wisprit stats`) counts real
+re-reads and nothing else.
+
 ## Provenance stamped on every row
 
 An accuracy number without these is a rumour: the on-device model is replaced in

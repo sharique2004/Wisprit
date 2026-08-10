@@ -32,6 +32,14 @@ public enum MenuAction: Equatable, Sendable {
     case enableLiveTyping
     /// Flip the `live_typing` setting once the input method is installed.
     case toggleLiveTyping
+    /// Run the context-awareness consent flow: the explanatory sheet, then —
+    /// only on an explicit accept — the Accessibility prompt if the AX path
+    /// needs it, then the `context_awareness` flip. The `enableLiveTyping`
+    /// deliberate-act pattern, applied to reading instead of writing.
+    case enableContextAwareness
+    /// Switch context awareness OFF. Turning it back on always goes through
+    /// the consent flow above — there is no consent-free route to on.
+    case toggleContextAwareness
     /// Index into `StatusMenuState.recents`; the full text rides along in
     /// `MenuItemModel.representedText`.
     case copyRecent(index: Int)
@@ -138,6 +146,19 @@ public enum LiveTypingMenuStatus: String, Equatable, Sendable, CaseIterable {
     case readyOn
 }
 
+/// Where context awareness stands, in the menu's own vocabulary (the policy
+/// types live in `WispritContext`, which this target does not depend on — the
+/// shell maps the kill switch and the consent flag onto this).
+public enum ContextAwarenessMenuStatus: String, Equatable, Sendable, CaseIterable {
+    /// `WISPRIT_NO_CONTEXT=1` — nothing in this process may read context, so
+    /// the row is inert and says why.
+    case disabledByEnvironment
+    /// Consent not granted (the default). The row runs the consent flow.
+    case off
+    /// Consent granted and the setting on. The row is a checked toggle.
+    case on
+}
+
 /// The data the menu is built from, sampled fresh on every open
 /// (`menuNeedsUpdate_` → `_rebuild_menu`).
 public struct StatusMenuState: Equatable, Sendable {
@@ -161,6 +182,8 @@ public struct StatusMenuState: Equatable, Sendable {
     public var liveTyping: LiveTypingMenuStatus
     /// Remedy / explanation for the live-typing row's inert states.
     public var liveTypingDetail: String
+    /// The consent flag + kill switch, mapped by the shell.
+    public var contextAwareness: ContextAwarenessMenuStatus
     /// Some `SetupItem.isBlocking` — dictation cannot work until the user
     /// finishes setup. Adds the "Finish setup…" row (§5.2) and takes priority
     /// over every other menu-bar icon state (§5.1).
@@ -173,6 +196,7 @@ public struct StatusMenuState: Equatable, Sendable {
                 polishModes: [PolishModeItem] = [],
                 liveTyping: LiveTypingMenuStatus = .notInstalled,
                 liveTypingDetail: String = "",
+                contextAwareness: ContextAwarenessMenuStatus = .off,
                 needsSetup: Bool = false) {
         self.dictationEnabled = dictationEnabled
         self.aiCleanupEnabled = aiCleanupEnabled
@@ -183,6 +207,7 @@ public struct StatusMenuState: Equatable, Sendable {
         self.polishModes = polishModes
         self.liveTyping = liveTyping
         self.liveTypingDetail = liveTypingDetail
+        self.contextAwareness = contextAwareness
         self.needsSetup = needsSetup
     }
 }
@@ -324,6 +349,7 @@ public enum StatusMenuModel {
 
         items.append(polishRow(state))
         items.append(liveTypingRow(state))
+        items.append(contextAwarenessRow(state))
 
         items.append(.separator)
 
@@ -372,6 +398,24 @@ public enum StatusMenuModel {
         }
         guard !children.isEmpty else { return .label("\(polishTitle) unavailable — no modes") }
         return MenuItemModel(title: polishTitle, submenu: children)
+    }
+
+    // MARK: - Context awareness
+
+    /// The `liveTypingRow` shape, applied to consent: off is an ellipsis item
+    /// that RUNS A FLOW (the sheet), never a bare toggle to on; on is a checked
+    /// toggle whose only move is off; the kill switch is an inert explanation.
+    static func contextAwarenessRow(_ state: StatusMenuState) -> MenuItemModel {
+        switch state.contextAwareness {
+        case .disabledByEnvironment:
+            return .label("Context Awareness disabled (WISPRIT_NO_CONTEXT=1)")
+        case .off:
+            return MenuItemModel(title: "Enable Context Awareness…",
+                                 action: .enableContextAwareness)
+        case .on:
+            return MenuItemModel(title: "Context Awareness",
+                                 action: .toggleContextAwareness, isChecked: true)
+        }
     }
 
     // MARK: - Live typing

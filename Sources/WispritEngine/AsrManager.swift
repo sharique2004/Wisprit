@@ -119,9 +119,12 @@ public final class AsrManager: @unchecked Sendable {
     /// The audio is a parameter, not a lookup: whoever spawns this holds the
     /// value `finalize()` handed them, so a pass still running when the next Fn
     /// press lands keeps transcribing the utterance it was spawned for.
-    public func reconcileVocabulary(_ retained: RetainedUtterance) async -> VocabularyReconciliation? {
+    /// `extraTerms` travel the same way and for the same reason — they are one
+    /// utterance's context candidates, dead the moment this pass returns.
+    public func reconcileVocabulary(_ retained: RetainedUtterance,
+                                    extraTerms: [String] = []) async -> VocabularyReconciliation? {
         guard let channel = vocabularyChannel else { return nil }
-        return await channel.reconcile(pcm: retained.pcm)
+        return await channel.reconcile(pcm: retained.pcm, extraTerms: extraTerms)
     }
 
     // MARK: - internals

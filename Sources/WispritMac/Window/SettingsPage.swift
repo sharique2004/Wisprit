@@ -33,6 +33,7 @@ struct SettingsPage: View {
                     text
                     aiCleanup
                     liveTyping
+                    contextAwarenessSection
                     pill
                     historyAndPrivacy
                     advanced
@@ -292,6 +293,56 @@ struct SettingsPage: View {
         model.items.first { $0.id == SetupChecklist.liveTypingID }
     }
 
+    // MARK: - Context awareness (consent-gated)
+
+    /// Three states, same discipline as the gated sections above. Off is one
+    /// row and one button that runs the CONSENT FLOW — never a bare toggle to
+    /// on, so the sheet is unskippable from this page too. The verbatim-apps
+    /// list rides in the section either way: skipping a model pass reads
+    /// nothing, so it does not wait for consent.
+    private var contextAwarenessSection: some View {
+        SectionGroup("Context awareness",
+                     footnote: "Read for one utterance, then discarded — never stored, "
+                         + "never transmitted. Kill switch: launch with WISPRIT_NO_CONTEXT=1.") {
+            if model.contextDisabledByEnvironment {
+                Text("Disabled for this process (WISPRIT_NO_CONTEXT=1).")
+                    .font(Theme.font(Theme.Role.body))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .frame(minHeight: Theme.Size.hitTarget)
+            } else if model.contextAwareness {
+                SectionRow("Use nearby text to improve recognition",
+                           description: "Reads the text around your cursor at the moment you "
+                               + "press the key, to recognize the words already on screen.") {
+                    Toggle("", isOn: Binding(get: { true },
+                                             set: { on in
+                                                 if !on { model.setContextAwarenessOff() }
+                                             }))
+                        .labelsHidden()
+                }
+            } else {
+                HStack(alignment: .center, spacing: Theme.Space.s12) {
+                    Text("Wisprit can read the text near your cursor — never other "
+                         + "windows or screenshots — to recognize the words already "
+                         + "on screen.")
+                        .font(Theme.font(Theme.Role.body))
+                        .foregroundStyle(Theme.inkSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: Theme.Space.s16)
+                    Button("Enable Context Awareness…") { model.fix(.enableContextAwareness) }
+                        .buttonStyle(.borderedProminent)
+                        .controlSize(.small)
+                }
+                .frame(minHeight: Theme.Size.rowHeightWithDescription)
+            }
+            BundleListRows(
+                title: "Apps that stay verbatim",
+                description: "AI cleanup is skipped when the front app is one of these — "
+                    + "terminals and IDEs get exactly what you said, faster.",
+                ids: model.contextVerbatimBundleIDs,
+                onChange: { model.setContextVerbatimBundleIDs($0) })
+        }
+    }
+
     // MARK: - The pill
 
     private var pill: some View {
@@ -464,6 +515,78 @@ struct SettingsPage: View {
 
     private func intStepper(_ value: Int, _ setter: @escaping (Int) -> Void) -> Binding<Int> {
         Binding(get: { value }, set: setter)
+    }
+}
+
+/// An editable bundle-ID list behind a count button — the `terminalBundles`
+/// pattern, packaged so a second list does not mean a second copy of the
+/// add/remove plumbing. Machine values, so the rows are `mono` (§1.4).
+private struct BundleListRows: View {
+    let title: String
+    let description: String
+    let ids: [String]
+    let onChange: ([String]) -> Void
+
+    @State private var expanded = false
+    @State private var draft = ""
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.s8) {
+            SectionRow(title, description: description) {
+                Button(expanded ? "Done" : "\(ids.count) apps") {
+                    expanded.toggle()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
+            if expanded {
+                VStack(alignment: .leading, spacing: Theme.Space.s4) {
+                    ForEach(ids, id: \.self) { bundle in
+                        HStack(spacing: Theme.Space.s8) {
+                            Text(bundle)
+                                .font(Theme.font(Theme.Role.mono))
+                                .foregroundStyle(Theme.ink)
+                            Spacer(minLength: Theme.Space.s8)
+                            Button {
+                                onChange(ids.filter { $0 != bundle })
+                            } label: {
+                                Image(systemName: "minus.circle")
+                                    .font(.system(size: 12))
+                                    .foregroundStyle(Theme.inkTertiary)
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityLabel("Remove \(bundle)")
+                        }
+                        .frame(height: Theme.Size.hitTarget)
+                    }
+                    HStack(spacing: Theme.Space.s8) {
+                        TextField("com.example.app", text: $draft)
+                            .textFieldStyle(.plain)
+                            .font(Theme.font(Theme.Role.mono))
+                            .frame(width: 240, height: Theme.Size.hitTarget)
+                            .padding(.horizontal, Theme.Space.s8)
+                            .background(
+                                RoundedRectangle(cornerRadius: Theme.Radius.control,
+                                                 style: .continuous)
+                                    .fill(Theme.fillSubtle))
+                            .onSubmit(add)
+                        Button("Add", action: add)
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+                    }
+                }
+                .padding(.leading, Theme.Space.s8)
+                .padding(.bottom, Theme.Space.s8)
+            }
+        }
+    }
+
+    private func add() {
+        let value = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !value.isEmpty else { return }
+        onChange(ids + [value])
+        draft = ""
     }
 }
 

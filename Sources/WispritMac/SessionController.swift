@@ -27,6 +27,24 @@ public enum VocabularyRetroSettings {
     }
 }
 
+/// `history_detail` — whether the per-utterance pipeline triple
+/// (`utterance_detail`) is written alongside each transcript. Same string-key
+/// precedent as above; default TRUE because a triple is the same sensitivity
+/// class as the final text `transcripts` already stores. Honored at the wiring
+/// site: `History` takes it as a constructor parameter, so flipping the key
+/// takes effect at the next launch, never mid-store.
+public enum HistoryDetailSettings {
+    public static let enabledKey = "history_detail"
+
+    public static func isEnabled(_ settings: Settings) -> Bool {
+        settings.bool(enabledKey, or: true)
+    }
+
+    public static func setEnabled(_ settings: Settings, _ value: Bool) {
+        settings.set(enabledKey, value)
+    }
+}
+
 /// The dictation state machine — a 1:1 port of `wisprit/session.py`.
 ///
 /// Consumes `HotkeyEvent`s from the shared queue and drives one utterance
@@ -105,6 +123,15 @@ public final class SessionController: @unchecked Sendable {
     /// Rungs 1–2 of the insertion ladder. nil = Phase-1 behaviour: the pill shows
     /// the live tail and the text is pasted at the end.
     private let liveTyping: (any LiveTypingPort)?
+    /// Phase-4 context awareness. nil = no capture cycle ever runs — the exact
+    /// behaviour of every build before the feature existed, and of every build
+    /// where the consent flag stays off.
+    private let context: (any ContextPort)?
+    /// Phase-5 edit observation, paste-rung half: the next utterance's context
+    /// snapshot diffed against what this one pasted. nil = the fallback never
+    /// runs; the IM rung's observation channel is wired elsewhere and is not
+    /// affected.
+    private let editObserver: (any EditObservingPort)?
     private let config: Configuration
 
     private let lock = NSLock()
@@ -113,6 +140,9 @@ public final class SessionController: @unchecked Sendable {
     /// The previous utterance's RAW final — the antecedent window for a
     /// cross-utterance spoken-spelling correction.
     private var previousUtterance: String = ""
+    /// What the previous utterance delivered and by which rung — the paste-rung
+    /// edit observation's "ours" side. Consumed (one shot) at the next finalize.
+    private var lastDelivery: (text: String, outcome: String)?
     private var deferredWork: DeferredWork?
 
     private let stopFlag = StopFlag()
@@ -132,6 +162,8 @@ public final class SessionController: @unchecked Sendable {
                 corrector: SpokenSpellingCorrector? = nil,
                 gate: RecordingGate? = nil,
                 liveTyping: (any LiveTypingPort)? = nil,
+                context: (any ContextPort)? = nil,
+                editObserver: (any EditObservingPort)? = nil,
                 configuration: Configuration = Configuration()) {
         self.events = events
         self.asr = asr
@@ -146,6 +178,8 @@ public final class SessionController: @unchecked Sendable {
         self.corrector = corrector
         self.gate = gate
         self.liveTyping = liveTyping
+        self.context = context
+        self.editObserver = editObserver
         self.config = configuration
     }
 
@@ -304,6 +338,12 @@ public final class SessionController: @unchecked Sendable {
             log.info("insertion tier \(tier.rawValue, privacy: .public) for this utterance")
         }
 
+        // Context capture rides key-down too, AFTER the rung is picked so the
+        // IM reader can name the session that just opened. One post or one
+        // enqueue, then straight back — the answer races the utterance and is
+        // consumed at finalize only if it won.
+        context?.beginCapture()
+
         // begin() carries the analyzer's prepareToAnalyze (31–54 ms measured);
         // the sub-400 ms finalize budget depends on paying it here, on key-down.
         let pill = self.pill
@@ -353,6 +393,8 @@ public final class SessionController: @unchecked Sendable {
             runBlocking { [asr] in await asr.cancel() }
             cancelRefiner()
             endLiveUtterance(discardingTail: true)
+            // Drained and dropped: a snapshot must never outlive its utterance.
+            _ = context?.finishCapture()
             setState(.idle)
             pill?.hide()
             return
@@ -370,6 +412,19 @@ public final class SessionController: @unchecked Sendable {
         let retained = asr.lastRetained
         let audioMs = retained.durationSeconds * 1000.0
         let tAsr = MonotonicClock.now()
+
+        // The context snapshot for THIS utterance, IF a reader answered in
+        // time. A slot read, never a wait — finalize spends zero time on it,
+        // and taking it here (before the Esc check) also guarantees the slot
+        // is emptied on every exit from this function.
+        let ctx = context?.finishCapture() ?? ContextOutcome()
+
+        // Phase 5's paste-rung observation: that snapshot shows the field as it
+        // read at THIS key-down — which is where the PREVIOUS utterance's pasted
+        // text has been sitting since. One attempt per delivery, and consent-
+        // gated by construction: `fieldText` only exists when context awareness
+        // read a field at all.
+        observeLastDelivery(against: ctx)
 
         // An Esc during a slow finalize aborts — check before paying for AI
         // cleanup. The hotkey keeps emitting Esc until AFTER the refine stage:
@@ -457,7 +512,8 @@ public final class SessionController: @unchecked Sendable {
                 // Nothing was inserted, so there is nothing in the field for the
                 // vocabulary pass to correct — it still runs, for `recordUse`.
                 completeCorrection(correction, retained: retained,
-                                   inserted: "", outcome: "correction")
+                                   inserted: "", outcome: "correction",
+                                   extraTerms: ctx.terms)
                 if correction.notice == nil { pill?.hide() }
                 // CONTRACT-DEVIATION: a fourth `outcome` value beyond
                 // paste|type|blocked_secure|error|empty. Logging this as
@@ -466,7 +522,7 @@ public final class SessionController: @unchecked Sendable {
                 writeMetrics(heldMs: heldMs, result: result, postMs: 0, insertMs: 0,
                              outcome: "correction", releaseToTextMs: nil,
                              aiMs: (tAi - tAsr) * 1000.0, ai: aiOutcome.rawValue,
-                             audioMs: audioMs, refineDelta: refineDelta)
+                             audioMs: audioMs, refineDelta: refineDelta, ctx: ctx)
                 return
             }
             // Split the one indistinguishable `outcome=empty` row into the
@@ -479,12 +535,13 @@ public final class SessionController: @unchecked Sendable {
             writeMetrics(heldMs: heldMs, result: result, postMs: 0, insertMs: 0,
                          outcome: "empty", releaseToTextMs: nil,
                          aiMs: (tAi - tAsr) * 1000.0, ai: aiOutcome.rawValue,
-                         audioMs: audioMs, emptyReason: reason, refineDelta: refineDelta)
+                         audioMs: audioMs, emptyReason: reason, refineDelta: refineDelta,
+                         ctx: ctx)
             return
         }
 
         // History first — a failed insert must never lose words.
-        history.add(text: text, engine: result.engine, durationMs: heldMs)
+        let transcriptId = history.add(text: text, engine: result.engine, durationMs: heldMs)
 
         setState(.inserting)
         let insertion = deliver(text)
@@ -510,17 +567,34 @@ public final class SessionController: @unchecked Sendable {
                      aiMs: (tAi - tAsr) * 1000.0,
                      ai: aiOutcome.rawValue,
                      audioMs: audioMs,
-                     refineDelta: refineDelta)
+                     refineDelta: refineDelta,
+                     ctx: ctx)
         setState(.idle)
+
+        // The utterance's pipeline triple, keyed to the transcript row written
+        // above — strictly off the paste path (the text has already landed).
+        // The `vocab` column stays NULL here on purpose: the reconciliation
+        // pass fills it seconds from now, through the update path below.
+        history.addDetail(transcriptId: transcriptId,
+                          raw: raw, corrected: correction.text, refined: refined,
+                          inserted: insertion.ok ? text : "",
+                          vocab: nil, ai: aiOutcome.rawValue, termsHit: [])
+
+        // What the paste-rung observation will need at the NEXT finalize.
+        setLastDelivery(insertion.ok ? (text, insertion.outcome) : nil)
 
         // Strictly off the paste path: dictionary writes and the vocabulary
         // reconciliation pass cost hundreds of ms and must never delay text.
         // `text` and `insertion.outcome` are passed by value because the retro
         // pass needs to know what went into the field and by which rung, and by
         // the time it finishes both may describe a different utterance.
+        // `ctx.terms` travels the same way — one utterance's candidates, dead
+        // when the pass returns.
         completeCorrection(correction, retained: retained,
                            inserted: insertion.ok ? text : "",
-                           outcome: insertion.outcome)
+                           outcome: insertion.outcome,
+                           extraTerms: ctx.terms,
+                           transcriptId: transcriptId)
     }
 
     private func abort(reason: String) {
@@ -530,6 +604,8 @@ public final class SessionController: @unchecked Sendable {
         runBlocking { [asr] in await asr.cancel() }
         cancelRefiner()
         endLiveUtterance(discardingTail: true)
+        // Aborted utterance, discarded snapshot — same rule as the tail above.
+        _ = context?.finishCapture()
         setState(.idle)
         if reason == "esc" || reason == "cancelled" {
             pill?.hide()
@@ -651,7 +727,8 @@ public final class SessionController: @unchecked Sendable {
     /// plans against the text THIS utterance put in the field, by the rung THIS
     /// utterance used, and both have moved on by the time it finishes.
     func completeCorrection(_ correction: CorrectionOutcome, retained: RetainedUtterance,
-                            inserted: String = "", outcome: String = "") {
+                            inserted: String = "", outcome: String = "",
+                            extraTerms: [String] = [], transcriptId: Int64 = -1) {
         if let learned = correction.learn {
             if correction.learnIsPending {
                 // Quarantined: recorded, excluded from corrections and biasing
@@ -669,12 +746,22 @@ public final class SessionController: @unchecked Sendable {
         guard config.reconcileVocabulary else { return }
         let asr = self.asr
         let vocabulary = self.vocabulary
+        let history = self.history
         let planRetro = config.vocabularyRetro() && !inserted.isEmpty
         let onInputMethodRung = SessionController.isInputMethodRung(outcome)
         Task.detached(priority: .utility) { [weak self] in
-            guard let reconciliation = await asr.reconcileVocabulary(retained) else { return }
+            guard let reconciliation = await asr.reconcileVocabulary(retained,
+                                                                     extraTerms: extraTerms)
+            else { return }
             for (term, hits) in reconciliation.termHits where hits > 0 {
                 vocabulary?.recordUse(term: term)
+            }
+            // The late `vocab` column: what the biased pass heard, attached to
+            // the detail row ITS utterance wrote before this task started —
+            // `transcriptId` rides by value for the same reason `retained` does.
+            if transcriptId > 0 {
+                history.updateDetail(transcriptId: transcriptId,
+                                     vocab: reconciliation.transcript)
             }
             guard let self else { return }
             let plan = planRetro
@@ -829,11 +916,37 @@ public final class SessionController: @unchecked Sendable {
         lock.lock(); previousUtterance = value; lock.unlock()
     }
 
+    private func setLastDelivery(_ value: (text: String, outcome: String)?) {
+        lock.lock(); lastDelivery = value; lock.unlock()
+    }
+
+    /// The paste-rung half of Phase-5 edit observation.
+    ///
+    /// One shot per delivery: the slot is consumed whether or not a snapshot
+    /// arrived, because the claim "this window shows what became of our paste"
+    /// only holds for the very next look at the field — every utterance after
+    /// that is a guess. The IM rungs are excluded here (their own read channel
+    /// observes them with located-run evidence), and `blocked_secure` never had
+    /// a delivery to observe.
+    private func observeLastDelivery(against ctx: ContextOutcome) {
+        lock.lock()
+        let last = lastDelivery
+        lastDelivery = nil
+        lock.unlock()
+        guard let editObserver, let last, !last.text.isEmpty,
+              last.outcome == InsertResult.Method.paste.rawValue
+                  || last.outcome == InsertResult.Method.type.rawValue,
+              ctx.status == .read, let field = ctx.fieldText, !field.isEmpty
+        else { return }
+        editObserver.observeField(inserted: last.text, current: field)
+    }
+
     private func writeMetrics(heldMs: Double, result: UtteranceResult,
                               postMs: Double, insertMs: Double, outcome: String,
                               releaseToTextMs: Double?, aiMs: Double?, ai: String?,
                               audioMs: Double, emptyReason: EmptyReason? = nil,
-                              refineDelta: Int? = nil) {
+                              refineDelta: Int? = nil,
+                              ctx: ContextOutcome = ContextOutcome()) {
         metrics.write(MetricsRecord(
             heldMs: heldMs,
             engine: result.engine,
@@ -857,7 +970,13 @@ public final class SessionController: @unchecked Sendable {
             // meaning, `raw_chars` names it for the post-Python schema so a
             // later reader never has to guess which side of refine it is on.
             rawChars: result.text.count,
-            refineDelta: refineDelta))
+            refineDelta: refineDelta,
+            // Phase-4 context awareness. All three stay omitted on the
+            // default-off install (status nil ⇒ no capture cycle ran), and
+            // `ctx_terms` is only meaningful for a consumed snapshot.
+            ctx: ctx.status?.rawValue,
+            ctxMs: ctx.captureMs,
+            ctxTerms: ctx.status == .read ? ctx.terms.count : nil))
     }
 
     // MARK: - level ticker

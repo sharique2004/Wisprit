@@ -407,6 +407,43 @@ final class HistoryTests: XCTestCase {
         history.close()
     }
 
+    /// The update path for the late `vocab` column: the reconciliation pass
+    /// finishes seconds after the detail row was written, and its outcome must
+    /// land on THAT row — never as a second row, never on any other column.
+    func testUpdateDetailFillsTheLateVocabColumnInPlace() throws {
+        let history = History(path: dbPath(), settings: nil)
+        let id = history.add(text: "Ship it to InsForge", engine: "apple_live", durationMs: 900.0)
+        history.addDetail(transcriptId: id,
+                          raw: "ship it to in forge", corrected: "ship it to in forge",
+                          refined: "Ship it to in forge", inserted: "Ship it to InsForge",
+                          vocab: nil, ai: "applied", termsHit: [])
+        XCTAssertNil(history.details(limit: 5).first?.vocab, "NULL until the pass lands")
+
+        XCTAssertTrue(history.updateDetail(transcriptId: id, vocab: "Ship it to InsForge"))
+
+        let rows = history.details(limit: 5)
+        XCTAssertEqual(rows.count, 1, "an update, not a second row")
+        let row = try XCTUnwrap(rows.first)
+        XCTAssertEqual(row.vocab, "Ship it to InsForge")
+        XCTAssertEqual(row.raw, "ship it to in forge", "every other column stays as written")
+        XCTAssertEqual(row.ai, "applied")
+        history.close()
+    }
+
+    func testUpdateDetailIsAHonestNoOpWithoutARow() throws {
+        let history = History(path: dbPath(), settings: nil)
+        XCTAssertFalse(history.updateDetail(transcriptId: 99, vocab: "anything"),
+                       "no row means no update — a trimmed detail is not resurrected")
+        XCTAssertFalse(history.updateDetail(transcriptId: -1, vocab: "anything"))
+
+        let off = History(path: dbPath("updateoff.sqlite"), settings: nil, detailEnabled: false)
+        let id = off.add(text: "kept", engine: "e", durationMs: nil)
+        XCTAssertFalse(off.updateDetail(transcriptId: id, vocab: "anything"),
+                       "detail off wrote no row, so there is nothing to update")
+        off.close()
+        history.close()
+    }
+
     func testDetailWritesAreAbsentWhenTheFlagIsOff() throws {
         let p = dbPath("nodetail.sqlite")
         let history = History(path: p, settings: nil, detailEnabled: false)

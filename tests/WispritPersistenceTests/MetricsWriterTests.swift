@@ -157,6 +157,75 @@ final class MetricsWriterTests: XCTestCase {
         }
     }
 
+    // MARK: the context-awareness tail (Phase 4)
+
+    /// The three `ctx` fields append after the whole existing tail, in on-disk
+    /// order, and only when set — the default-off install writes the exact
+    /// bytes the previous build wrote.
+    func testContextFieldsAppendAfterEverythingAndOmitWhenAbsent() throws {
+        let with = MetricsRecord(
+            ts: 1.0, heldMs: 2.0, engine: "e", finalizeMs: 3.0, timedOut: false,
+            postMs: 4.0, insertMs: 5.0, outcome: "paste", chars: 6,
+            releaseToTextMs: 7.0, aiMs: 8.0, ai: "applied",
+            peakLevel: 0.5, audioMs: 9.0, rawChars: 10, refineDelta: 11,
+            ctx: "read", ctxMs: 42.16, ctxTerms: 3)
+        guard case .object(let object) = try WispritJSON.parse(with.jsonLine()) else {
+            return XCTFail("not an object")
+        }
+        XCTAssertEqual(object.keys, [
+            "ts", "held_ms", "engine", "finalize_ms", "timed_out", "post_ms",
+            "insert_ms", "outcome", "chars", "release_to_text_ms", "ai_ms", "ai",
+            "peak_level", "audio_ms", "raw_chars", "refine_delta",
+            "ctx", "ctx_ms", "ctx_terms",
+        ])
+        XCTAssertEqual(object["ctx"], .string("read"))
+        XCTAssertEqual(object["ctx_ms"], .double(42.2), "round1, like every duration")
+        XCTAssertEqual(object["ctx_terms"], .int(3))
+
+        let without = MetricsRecord(
+            ts: 1785872035.681684, heldMs: 1468.75, engine: "apple_live",
+            finalizeMs: 1500.9, timedOut: false, postMs: 0.0, insertMs: 0.0,
+            outcome: "empty", chars: 0).jsonLine()
+        XCTAssertEqual(without, Golden.metricsLegacyEmptyRow)
+        for key in ["ctx", "ctx_ms", "ctx_terms"] {
+            XCTAssertFalse(without.contains("\"\(key)\""), "\(key) must be omitted, not null")
+        }
+    }
+
+    // MARK: the `edit_observed` deviation row (Phase 5)
+
+    func testEditObservedRowMatchesItsGoldenLine() {
+        let record = MetricsRecord(
+            ts: 1786399600.128455, heldMs: 0, engine: "", finalizeMs: 0,
+            timedOut: false, postMs: 0, insertMs: 0, outcome: "edit_observed", chars: 0,
+            editDist: 0, editScope: "im")
+        XCTAssertEqual(record.jsonLine(), Golden.metricsEditObservedRow)
+    }
+
+    /// `edit_dist` is honestly optional: a `.changed` answer with no text is an
+    /// observed edit of unknowable size, and the line says so by omission.
+    func testEditObservedRowOmitsAnUnknowableDistance() throws {
+        let line = MetricsRecord(
+            ts: 1786399601.0, heldMs: 0, engine: "", finalizeMs: 0,
+            timedOut: false, postMs: 0, insertMs: 0, outcome: "edit_observed", chars: 0,
+            editScope: "ax").jsonLine()
+        XCTAssertFalse(line.contains("\"edit_dist\""))
+        XCTAssertTrue(line.contains("\"edit_scope\": \"ax\""))
+    }
+
+    /// The additive promise, one more time: the two newest keys append after
+    /// everything and never appear on a row that did not set them.
+    func testAnUtteranceRowNeverCarriesTheEditFields() {
+        let line = MetricsRecord(
+            ts: 1785872035.681684, heldMs: 1468.75, engine: "apple_live",
+            finalizeMs: 1500.9, timedOut: false, postMs: 0.0, insertMs: 0.0,
+            outcome: "empty", chars: 0).jsonLine()
+        XCTAssertEqual(line, Golden.metricsLegacyEmptyRow)
+        for key in ["edit_dist", "edit_scope"] {
+            XCTAssertFalse(line.contains(key), "\(key) must be omitted, not null")
+        }
+    }
+
     func testVocabRetroRowsRideTheSameStreamAsUtteranceRows() throws {
         let writer = MetricsWriter(path: path)
         writer.write(MetricsRecord(

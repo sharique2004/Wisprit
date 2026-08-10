@@ -223,9 +223,12 @@ public enum WindowSettings {
         return .available
     }
 
-    /// Every key the Settings page writes. All of them already exist in
-    /// `Settings.defaults`; the page adds none, which is what keeps the on-disk
-    /// key order stable for configs written by any build.
+    /// Every `Settings.defaults` key the Settings page writes. All of them
+    /// already exist there; the page adds none, which is what keeps the on-disk
+    /// key order stable for configs written by any build. (The context keys —
+    /// `ContextSettings` — are deliberately NOT here: they follow the
+    /// `LiveTypingSettings` string-key precedent, living outside the
+    /// golden-pinned defaults, and the file preserves keys it does not know.)
     public static let writtenKeys = [
         SettingsKey.hotkey,
         SettingsKey.holdDebounceMs,

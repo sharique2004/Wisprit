@@ -69,6 +69,20 @@ public struct MetricsSummary: Sendable, Equatable {
     /// `unexplainedEmpty / total` — over ALL utterances, not just empties, so it
     /// reads as "how often does Wisprit silently fail me".
     public var unexplainedEmptyRate: Double
+    /// `edit_observed` rows in the window: utterances whose fate the pipeline
+    /// actually re-read out of a field. This is the zero-edit denominator, and
+    /// it is reported wherever the rate is — a rate without its `n` is how the
+    /// metric gets quietly inflated.
+    public var editObserved: Int
+    /// …of which `edit_dist == 0`: the user did not have to touch a character.
+    /// A `.changed` observation whose size could not be measured carries no
+    /// `edit_dist` at all — observed, never zero-edit.
+    public var zeroEdit: Int
+    /// `zeroEdit / editObserved`, over OBSERVED utterances ONLY. Unobserved
+    /// utterances are excluded from the denominator rather than assumed clean
+    /// (`docs/eval/DEFINITIONS.md` § Zero-edit rate); 0 when nothing was
+    /// observed, and the renderer refuses to print a rate with no denominator.
+    public var zeroEditRate: Double
 
     /// Mirrors `SpeechAnalyzerEngine.voicedPeakThreshold`. WispritPersistence
     /// cannot import WispritEngine (WispritKit is the only shared seam), so the
@@ -87,15 +101,30 @@ public struct MetricsSummary: Sendable, Equatable {
     /// rate on this struct by roughly the success rate — this summary is about
     /// utterances, so a row that is not one is dropped before anything is
     /// counted. (`correction` stays: a spoken-spelling directive IS an
-    /// utterance, it just had nothing to insert.)
-    public static let nonUtteranceOutcomes: Set<String> = ["vocab_retro"]
+    /// utterance, it just had nothing to insert.) `edit_observed` is the same
+    /// shape one phase later: a reference-less line about text some earlier
+    /// utterance inserted, written when a field re-read finally showed its fate.
+    public static let nonUtteranceOutcomes: Set<String> = ["vocab_retro", "edit_observed"]
+
+    /// The Phase-5 observation row's `outcome`.
+    public static let editObservedOutcome = "edit_observed"
 
     // MARK: - aggregation
 
     public static func summarize(_ rows: [JSONObject],
                                  window: MetricsWindow = .all,
                                  now: Double) -> MetricsSummary {
-        let rows = windowed(rows, in: window, now: now)
+        let inWindow = windowed(rows, in: window, now: now)
+
+        // The zero-edit pair comes from the very rows the utterance stats drop:
+        // count them before the filter, or the denominator can never be honest.
+        var editObserved = 0, zeroEdit = 0
+        for row in inWindow where string(row, "outcome") == editObservedOutcome {
+            editObserved += 1
+            if let dist = double(row, "edit_dist"), dist == 0 { zeroEdit += 1 }
+        }
+
+        let rows = inWindow
             .filter { !nonUtteranceOutcomes.contains(string($0, "outcome") ?? "") }
         let total = rows.count
 
@@ -147,7 +176,10 @@ public struct MetricsSummary: Sendable, Equatable {
             releaseToTextMsP90: percentile(releaseSamples, 90),
             aiOutcomes: aiOutcomes,
             unexplainedEmpty: unexplained,
-            unexplainedEmptyRate: rate(unexplained, of: total))
+            unexplainedEmptyRate: rate(unexplained, of: total),
+            editObserved: editObserved,
+            zeroEdit: zeroEdit,
+            zeroEditRate: rate(zeroEdit, of: editObserved))
     }
 
     /// The rows `summarize` would have looked at — exposed so a caller can list
@@ -202,6 +234,12 @@ public struct MetricsSummary: Sendable, Equatable {
         row("release_to_text", "p50 \(ms(summary.releaseToTextMsP50))  p90 \(ms(summary.releaseToTextMsP90))")
         if !summary.aiOutcomes.isEmpty {
             row("ai", histogram(summary.aiOutcomes))
+        }
+        // Only when something was observed: a rate over an empty denominator is
+        // not a rate, and the `n` rides in the same cell as the fraction.
+        if summary.editObserved > 0 {
+            row("zero-edit", "\(summary.zeroEdit)/\(summary.editObserved) observed "
+                + "(\(percent(summary.zeroEditRate)))")
         }
         return lines.joined(separator: "\n")
     }

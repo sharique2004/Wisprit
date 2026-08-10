@@ -456,8 +456,51 @@ final class RefinerCageTests: XCTestCase {
         XCTAssertEqual(ported.count, 13)
         XCTAssertEqual(RefineOutcome.hasLetterRun.rawValue, "has_letter_run")
         XCTAssertEqual(RefineOutcome.obeyed.rawValue, "obeyed")
+        XCTAssertEqual(RefineOutcome.skippedVerbatimApp.rawValue, "skipped_verbatim_app")
         XCTAssertEqual(RefineOutcome.allCases.filter { !$0.isPythonVocabulary }.map(\.rawValue),
-                       ["has_letter_run", "obeyed"])
+                       ["has_letter_run", "obeyed", "skipped_verbatim_app"])
+    }
+
+    // MARK: - the verbatim-app skip (context_verbatim_bundle_ids)
+
+    /// Terminals and IDEs skip the stage outright: verbatim text, the skip's
+    /// own outcome, and the model never consulted.
+    func testVerbatimAppSkipsTheModelEntirely() async {
+        let generator = FakeGenerator()
+        let refiner = Refiner(generator: generator,
+                              configuration: { RefineConfiguration(verbatimApp: true) },
+                              startProbe: false)
+        let result = await refiner.refine("ls minus la in the src directory")
+        XCTAssertEqual(result,
+                       RefineResult(text: "ls minus la in the src directory",
+                                    outcome: .skippedVerbatimApp))
+        let calls = await generator.generateCount
+        XCTAssertEqual(calls, 0, "the model must never see a verbatim-app utterance")
+    }
+
+    /// The "faster" half of the skip: no prewarm for an utterance that will
+    /// never refine.
+    func testVerbatimAppSkipsThePrewarmToo() async {
+        let generator = FakeGenerator()
+        let refiner = Refiner(generator: generator,
+                              configuration: { RefineConfiguration(verbatimApp: true) },
+                              startProbe: false)
+        await refiner.begin()
+        let prewarms = await generator.prewarmCount
+        XCTAssertEqual(prewarms, 0)
+    }
+
+    /// `off` keeps meaning "the setting is off" in every recorded row: the
+    /// master toggle outranks the app list.
+    func testAiCleanupOffOutranksTheVerbatimApp() async {
+        let refiner = Refiner(generator: FakeGenerator(),
+                              configuration: {
+                                  RefineConfiguration(enabled: false, verbatimApp: true)
+                              },
+                              startProbe: false)
+        let result = await refiner.refine("hello world")
+        XCTAssertEqual(result.outcome, .off)
+        XCTAssertEqual(result.text, "hello world")
     }
 }
 

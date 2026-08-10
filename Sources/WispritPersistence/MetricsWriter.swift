@@ -53,6 +53,19 @@ public struct MetricsRecord: Sendable {
     public var vocabHits: Int?       // dictionary terms it recovered, counting repeats
     public var vocabDelta: Int?      // 0/1: the planner proposed at least one edit
     public var applied: Bool?        // an edit actually landed in the user's field
+    // Phase-4 context awareness, utterance rows only, appended after the whole
+    // tail above. Omitted entirely while the consent flag is off — the
+    // default-off install never grows a byte. `ctx` names the capture cycle's
+    // outcome (read|late|busy|off); the STATUS vocabulary only, never text.
+    public var ctx: String?          // ContextReadStatus.rawValue
+    public var ctxMs: Double?        // key-down → snapshot arrival
+    public var ctxTerms: Int?        // candidates fed to the vocabulary channel
+    // The Phase-5 `edit_observed` row only — the `vocab_retro` precedent again:
+    // a reference-less line written when the pipeline finally saw what became
+    // of text it inserted, which is one-to-many utterances later. Never on an
+    // utterance row.
+    public var editDist: Int?        // 0 = zero-edit; absent on an observed edit whose size is unknowable
+    public var editScope: String?    // "im" | "ax" — which reader observed it
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
@@ -61,7 +74,9 @@ public struct MetricsRecord: Sendable {
                 emptyReason: String? = nil, peakLevel: Double? = nil,
                 audioMs: Double? = nil, rawChars: Int? = nil, refineDelta: Int? = nil,
                 vocabMs: Double? = nil, vocabHits: Int? = nil, vocabDelta: Int? = nil,
-                applied: Bool? = nil) {
+                applied: Bool? = nil,
+                ctx: String? = nil, ctxMs: Double? = nil, ctxTerms: Int? = nil,
+                editDist: Int? = nil, editScope: String? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -83,6 +98,11 @@ public struct MetricsRecord: Sendable {
         self.vocabHits = vocabHits
         self.vocabDelta = vocabDelta
         self.applied = applied
+        self.ctx = ctx
+        self.ctxMs = ctxMs
+        self.ctxTerms = ctxTerms
+        self.editDist = editDist
+        self.editScope = editScope
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -112,6 +132,17 @@ public struct MetricsRecord: Sendable {
         if let vocabHits { entry["vocab_hits"] = .int(vocabHits) }
         if let vocabDelta { entry["vocab_delta"] = .int(vocabDelta) }
         if let applied { entry["applied"] = .bool(applied) }
+        // Context awareness, after everything: an utterance row and a
+        // `vocab_retro` row never carry both families, so every row written by
+        // any earlier build remains a byte-for-byte prefix of this schema.
+        if let ctx { entry["ctx"] = .string(ctx) }
+        if let ctxMs { entry["ctx_ms"] = .double(MetricsWriter.round1(ctxMs)) }
+        if let ctxTerms { entry["ctx_terms"] = .int(ctxTerms) }
+        // The `edit_observed` row's own two, after everything: no row carries
+        // both these and the vocab/ctx families, so every earlier build's row
+        // stays a byte-for-byte prefix of this schema.
+        if let editDist { entry["edit_dist"] = .int(editDist) }
+        if let editScope { entry["edit_scope"] = .string(editScope) }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -141,6 +172,11 @@ public enum MetricsField {
     // which the session writes as a `MetricsRecord` directly.
     public static let emptyReason = "empty_reason"
     public static let applied = "applied"
+    // Context awareness (Phase 4). The session writes these as a
+    // `MetricsRecord` directly too; `ctx` is a string like `empty_reason`.
+    public static let ctx = "ctx"
+    public static let ctxMs = "ctx_ms"
+    public static let ctxTerms = "ctx_terms"
 }
 
 public final class MetricsWriter: @unchecked Sendable {

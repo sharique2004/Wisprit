@@ -47,20 +47,42 @@ public final class VocabularyChannel: @unchecked Sendable {
 
     /// Terms actually handed to the analyzer, honouring `contextualTermLimit`
     /// (nil = all of them, which is the shipping configuration).
-    public func contextualTerms() -> [String] {
+    ///
+    /// `extra` is the Phase-4 per-utterance seam: context-awareness candidates
+    /// for THIS utterance only, merged AFTER the dictionary (and after its
+    /// limit — the cap protects the dictionary path, and two dozen extras cost
+    /// ~75 ms of session setup in a pass that is already off-path by contract).
+    /// Deduped case-insensitively with the dictionary spelling winning, so a
+    /// term the user already owns is never re-cased by what was on screen.
+    /// Nothing here persists: the extras exist for one `reconcile` call.
+    public func contextualTerms(extra: [String] = []) -> [String] {
         let all = vocabulary?.vocabularyTerms() ?? []
-        guard let limit = settings.contextualTermLimit, limit > 0, all.count > limit else { return all }
-        return Array(all.prefix(limit))
+        var terms = all
+        if let limit = settings.contextualTermLimit, limit > 0, all.count > limit {
+            terms = Array(all.prefix(limit))
+        }
+        guard !extra.isEmpty else { return terms }
+        var seen = Set(terms.map { $0.lowercased() })
+        for term in extra where !term.isEmpty && seen.insert(term.lowercased()).inserted {
+            terms.append(term)
+        }
+        return terms
     }
 
     /// Re-transcribe the retained utterance with the dictionary loaded. Returns
     /// nil when there is no audio or the pass failed — callers treat that as
     /// "no reconciliation available" and keep the live text unchanged.
     ///
+    /// `extraTerms` bias this one pass and are counted in `termHits` alongside
+    /// the dictionary — deliberately, because that is what lets the Phase-3
+    /// retro-correction planner act on a context term with zero new machinery.
+    /// They still persist nothing: `recordUse` ignores terms the dictionary
+    /// does not hold, and the learn fallback is `isKnownTerm`-gated.
+    ///
     /// Never call this before inserting: it is seconds of work, by design.
-    public func reconcile(pcm: Data) async -> VocabularyReconciliation? {
+    public func reconcile(pcm: Data, extraTerms: [String] = []) async -> VocabularyReconciliation? {
         guard !pcm.isEmpty else { return nil }
-        let terms = contextualTerms()
+        let terms = contextualTerms(extra: extraTerms)
         let t0 = Date()
 
         let module = DictationTranscriber(

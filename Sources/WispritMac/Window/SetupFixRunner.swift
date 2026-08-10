@@ -24,13 +24,18 @@ public struct SetupFixRunner {
     /// same reason as the two above: this type performs fixes, it does not own
     /// the objects they act on.
     public var cleanLearnedTerms: () -> Void
+    /// The context-awareness consent flow, injected like `enableLiveTyping`:
+    /// the sheet and the flag both belong to the app controller.
+    public var enableContextAwareness: () -> Void
 
     public init(enableLiveTyping: @escaping () -> Void = {},
                 relaunch: @escaping () -> Void = {},
-                cleanLearnedTerms: @escaping () -> Void = {}) {
+                cleanLearnedTerms: @escaping () -> Void = {},
+                enableContextAwareness: @escaping () -> Void = {}) {
         self.enableLiveTyping = enableLiveTyping
         self.relaunch = relaunch
         self.cleanLearnedTerms = cleanLearnedTerms
+        self.enableContextAwareness = enableContextAwareness
     }
 
     public func run(_ kind: SetupFixKind) {
@@ -59,6 +64,8 @@ public struct SetupFixRunner {
             enableLiveTyping()
         case .cleanLearnedTerms:
             cleanLearnedTerms()
+        case .enableContextAwareness:
+            enableContextAwareness()
         case .relaunch:
             relaunch()
         }

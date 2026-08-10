@@ -78,6 +78,17 @@ final class FakeIMPeer: LiveTypingPeer, @unchecked Sendable {
         return (document, markedTail, committed)
     }
 
+    /// The user edits the field behind our back: rewrites the DOCUMENT, never
+    /// the input method's committed record — exactly what typing over a word
+    /// looks like from inside the IM.
+    func userEdits(_ replace: String, with replacement: String) {
+        lock.lock()
+        if let range = document.range(of: replace, options: .backwards) {
+            document.replaceSubrange(range, with: replacement)
+        }
+        lock.unlock()
+    }
+
     /// Simulate the field going away mid-utterance (focus change, app quit).
     func loseClient(reason: String = "focus left") {
         lock.lock()
@@ -143,6 +154,109 @@ final class FakeIMPeer: LiveTypingPeer, @unchecked Sendable {
 
     func stopEvents() {
         lock.lock(); handler = nil; lock.unlock()
+    }
+
+    // MARK: wire v2 reads (Phase 4)
+
+    /// Every read request the peer accepted, in order.
+    private(set) var reads: [IMReadMessage] = []
+    /// false = the post itself fails, the way a pre-v2 install stays silent.
+    var readsSucceed = true
+    private var snapshotHandler: (@Sendable (IMSnapshotMessage) -> Void)?
+
+    @discardableResult
+    func postRead(_ message: IMReadMessage) -> Bool {
+        lock.lock()
+        guard reachable, readsSucceed else { lock.unlock(); return false }
+        reads.append(message)
+        // Committed reads are answered here, synchronously, out of the same
+        // document + gate the write channel maintains — so the session-level
+        // tests exercise the real accept/locate semantics. Context reads stay
+        // manual (`deliverContextSnapshot`): their answers race an utterance
+        // and the tests script that race explicitly.
+        var answer: IMSnapshotMessage?
+        if case .committed = message.read {
+            answer = .committedSnapshot(generation: message.generation,
+                                        committedAnswerLocked(generation: message.generation))
+        }
+        let handler = snapshotHandler
+        lock.unlock()
+        if let answer { handler?(answer) }
+        return true
+    }
+
+    /// The shipping input method's `readCommitted`, in miniature: gate first,
+    /// then locate the committed run by content with the single-occurrence
+    /// rule. One deliberate extension — where `IMStreamSession` reports
+    /// `.changed` with no text (never guess), this fake also tries an anchored
+    /// relocation (head and tail of the run each found exactly once) and, when
+    /// that succeeds, ships the run as it reads now. That exercises the wire's
+    /// `.changed`+current shape, which the app must consume per the protocol
+    /// even though today's IM build never populates it.
+    private func committedAnswerLocked(generation: UInt64) -> IMCommittedSnapshot {
+        switch gate.admitRead(generation) {
+        case .rejectStale: return .unavailable(.staleGeneration)
+        case .rejectNoSession: return .unavailable(.noSession)
+        case .accept: break
+        }
+        guard let capabilities else { return .unavailable(.noClient) }
+        guard capabilities.supportsDocumentAccess else { return .unavailable(.noDocumentAccess) }
+        guard !committed.isEmpty else { return .unavailable(.unknown) }
+        switch Self.occurrences(of: committed, in: document) {
+        case 1: return .unchanged(committed)
+        case 0:
+            if let current = relocatedRunLocked() {
+                return IMCommittedSnapshot(current: current, detail: .changed)
+            }
+            return .changed
+        default: return .unavailable(.unknown)
+        }
+    }
+
+    /// Head/tail anchors, each required exactly once — the single-occurrence
+    /// discipline applied to the pieces when the whole is gone.
+    private func relocatedRunLocked() -> String? {
+        let anchor = min(12, committed.count)
+        guard anchor > 0 else { return nil }
+        let head = String(committed.prefix(anchor))
+        let tail = String(committed.suffix(anchor))
+        guard Self.occurrences(of: head, in: document) == 1,
+              Self.occurrences(of: tail, in: document) == 1,
+              let headRange = document.range(of: head),
+              let tailRange = document.range(of: tail, options: .backwards),
+              headRange.lowerBound <= tailRange.lowerBound
+        else { return nil }
+        return String(document[headRange.lowerBound..<tailRange.upperBound])
+    }
+
+    private static func occurrences(of needle: String, in haystack: String) -> Int {
+        guard !needle.isEmpty else { return 0 }
+        var count = 0
+        var from = haystack.startIndex
+        while let hit = haystack.range(of: needle, range: from..<haystack.endIndex) {
+            count += 1
+            if count > 1 { return count }
+            from = hit.upperBound
+        }
+        return count
+    }
+
+    func setSnapshotHandler(_ handler: (@Sendable (IMSnapshotMessage) -> Void)?) {
+        lock.lock(); snapshotHandler = handler; lock.unlock()
+    }
+
+    var readNames: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return reads.map(\.read.name)
+    }
+
+    /// Answer a context read the way the shipping input method would —
+    /// unsolicited, stamped with the generation the read named.
+    func deliverContextSnapshot(generation: UInt64, before: String,
+                                selected: String = "", after: String = "") {
+        lock.lock(); let handler = snapshotHandler; lock.unlock()
+        handler?(.contextSnapshot(generation: generation, before: before,
+                                  selected: selected, after: after))
     }
 
     // MARK: the fake input method itself (caller holds `lock`)

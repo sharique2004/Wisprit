@@ -1,6 +1,7 @@
 #if os(macOS)
 import Combine
 import Foundation
+import WispritContext
 import WispritDictionary
 import WispritKit
 import WispritMacUI
@@ -59,6 +60,14 @@ public final class WispritWindowModel: ObservableObject {
         /// Perform a checklist fix. Runs on the main actor: some of these raise
         /// system prompts.
         public var performFix: (SetupFixKind) -> Void
+        /// Phase-5 learn proposals awaiting review — `PendingLearnStore.pending()`
+        /// in the Dictionary page's vocabulary. Defaults inert, like every seam.
+        public var learnProposals: @Sendable () -> [LearnProposalRow]
+        /// Accept: the SAME write auto-accept makes — `DictionaryStore.add` +
+        /// `promoteConsumed` — owned by the app, not reimplemented here.
+        public var acceptLearnProposal: @Sendable (LearnProposalRow) -> Void
+        /// Dismiss: `PendingLearnStore.dismiss` — a permanent negative.
+        public var dismissLearnProposal: @Sendable (String) -> Void
 
         public init(fullProbe: @escaping @Sendable () async -> DoctorFacts = { DoctorFacts() },
                     fastProbe: @escaping @Sendable (DoctorFacts) -> DoctorFacts = { $0 },
@@ -68,7 +77,10 @@ public final class WispritWindowModel: ObservableObject {
                     copy: @escaping @Sendable (String) -> Void = { _ in },
                     pasteAtCursor: ((String) -> Void)? = nil,
                     liveTypingFallbacks: @escaping @Sendable () -> [BundleVerdict] = { [] },
-                    performFix: @escaping (SetupFixKind) -> Void = { _ in }) {
+                    performFix: @escaping (SetupFixKind) -> Void = { _ in },
+                    learnProposals: @escaping @Sendable () -> [LearnProposalRow] = { [] },
+                    acceptLearnProposal: @escaping @Sendable (LearnProposalRow) -> Void = { _ in },
+                    dismissLearnProposal: @escaping @Sendable (String) -> Void = { _ in }) {
             self.fullProbe = fullProbe
             self.fastProbe = fastProbe
             self.globeKey = globeKey
@@ -78,6 +90,9 @@ public final class WispritWindowModel: ObservableObject {
             self.pasteAtCursor = pasteAtCursor
             self.liveTypingFallbacks = liveTypingFallbacks
             self.performFix = performFix
+            self.learnProposals = learnProposals
+            self.acceptLearnProposal = acceptLearnProposal
+            self.dismissLearnProposal = dismissLearnProposal
         }
     }
 
@@ -131,6 +146,26 @@ public final class WispritWindowModel: ObservableObject {
         case attention
     }
 
+    /// One edit-derived learn candidate awaiting the user's decision — the
+    /// Dictionary page's read of `PendingLearnStore.pending()`, in the window's
+    /// own vocabulary so the page never names the store.
+    public struct LearnProposalRow: Identifiable, Sendable, Equatable {
+        public var term: String
+        /// The misrecognitions it was corrected from, distinct utterances each.
+        public var heard: [String]
+        /// Distinct-utterance sightings — always ≥ the store's threshold, or
+        /// the row would not be a proposal yet.
+        public var count: Int
+
+        public var id: String { term.lowercased() }
+
+        public init(term: String, heard: [String] = [], count: Int = 0) {
+            self.term = term
+            self.heard = heard
+            self.count = count
+        }
+    }
+
     /// The sidebar footer's dot + label (§3.2). Ordered by what the user most
     /// needs to know: a live microphone first, then a broken chain, then a
     /// switched-off app, then the quiet good news.
@@ -162,6 +197,9 @@ public final class WispritWindowModel: ObservableObject {
     /// Apps the insertion ladder has learned cannot take live text.
     @Published public private(set) var liveTypingFallbacks: [BundleVerdict] = []
     @Published public private(set) var dictionaryRows: [DictionaryRow] = []
+    /// Phase-5 learn proposals awaiting review — §3.4's Pending badge grows a
+    /// second population beyond the quarantined dictionary entries.
+    @Published public private(set) var learnProposals: [LearnProposalRow] = []
     @Published public var dictionarySearch = ""
     @Published public var selectedTab: Tab = .setup
     /// The try-it scratch field. Held here so switching tabs does not lose it.
@@ -228,6 +266,13 @@ public final class WispritWindowModel: ObservableObject {
     /// The pill has been dragged somewhere. "Reset its position" is disabled
     /// when it has not.
     @Published public private(set) var hasPillPosition = false
+    // Context awareness (Phase 4). The enable path deliberately has NO direct
+    // setter: the page routes it through `fix(.enableContextAwareness)`, so
+    // every road to on runs the consent sheet. Off writes straight through.
+    @Published public private(set) var contextAwareness = false
+    /// True under `WISPRIT_NO_CONTEXT=1` — the section renders inert.
+    @Published public private(set) var contextDisabledByEnvironment = false
+    @Published public private(set) var contextVerbatimBundleIDs: [String] = []
 
     // MARK: - Collaborators
 
@@ -608,6 +653,33 @@ public final class WispritWindowModel: ObservableObject {
 
     public func reloadDictionary() {
         dictionaryRows = dictionary.rows()
+        learnProposals = ports.learnProposals()
+    }
+
+    /// The Dictionary nav row's badge, from the same 6 pt-dot family as
+    /// `setupBadge`. Pure, so "a proposal is a visible badge, an empty ledger is
+    /// no badge at all" is pinnable without a window.
+    public nonisolated static func dictionaryBadge(proposals: Int) -> SetupBadge? {
+        proposals > 0 ? .attention : nil
+    }
+
+    public var dictionaryBadge: SetupBadge? {
+        Self.dictionaryBadge(proposals: learnProposals.count)
+    }
+
+    /// Accept an edit-derived proposal: the port writes it into the dictionary
+    /// (the same `add` + `promoteConsumed` the auto-accept path uses), then both
+    /// lists refresh — the proposal disappears and the term appears as a row.
+    public func acceptLearnProposal(_ row: LearnProposalRow) {
+        ports.acceptLearnProposal(row)
+        reloadDictionary()
+    }
+
+    /// Dismiss forever. The store keeps the negative, so this term is never
+    /// proposed again however much later evidence arrives.
+    public func dismissLearnProposal(_ row: LearnProposalRow) {
+        ports.dismissLearnProposal(row.term)
+        reloadDictionary()
     }
 
     public var filteredDictionaryRows: [DictionaryRow] {
@@ -662,6 +734,9 @@ public final class WispritWindowModel: ObservableObject {
         finalizeTimeoutMs = WindowSettings.clampFinalizeTimeout(settings.finalizeTimeoutMs)
         engine = WindowSettings.EngineOption.parse(settings.engine)
         hasPillPosition = settings.pillPosition != nil
+        contextAwareness = ContextSettings.isEnabled(settings)
+        contextDisabledByEnvironment = ContextEnvironment.isDisabled
+        contextVerbatimBundleIDs = ContextSettings.verbatimBundleIDs(settings)
     }
 
     public func setHotkey(_ value: WindowSettings.HotkeyOption) {
@@ -745,6 +820,28 @@ public final class WispritWindowModel: ObservableObject {
             .filter { !$0.isEmpty && seen.insert($0).inserted }
         terminalBundleIDs = cleaned
         settings.set(SettingsKey.terminalBundleIDs, cleaned)
+        // The verbatim list defaults to terminals ∪ IDEs until the user writes
+        // their own; refresh the mirror so the Context section tracks the edit.
+        contextVerbatimBundleIDs = ContextSettings.verbatimBundleIDs(settings)
+    }
+
+    /// OFF only. There is deliberately no `setContextAwareness(true)`: the
+    /// page's enable button goes through `fix(.enableContextAwareness)` so the
+    /// consent sheet is unskippable from every surface.
+    public func setContextAwarenessOff() {
+        contextAwareness = false
+        ContextSettings.setEnabled(settings, false)
+    }
+
+    /// The apps whose dictation skips the refine stage. Same hygiene as the
+    /// terminal list above.
+    public func setContextVerbatimBundleIDs(_ value: [String]) {
+        var seen = Set<String>()
+        let cleaned = value
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty && seen.insert($0).inserted }
+        contextVerbatimBundleIDs = cleaned
+        ContextSettings.setVerbatimBundleIDs(settings, cleaned)
     }
 
     public func setAiCleanupMaxWords(_ value: Int) {

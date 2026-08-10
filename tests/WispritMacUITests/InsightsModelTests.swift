@@ -114,6 +114,35 @@ final class InsightsModelTests: XCTestCase {
         XCTAssertNil(tile(InsightsModel.emptiesLabel, clean))
     }
 
+    // MARK: - zero-edit (Phase 5)
+
+    /// The observable-denominator rule on the page: no observation, no tile —
+    /// a rate over an empty denominator is not 0%, it is nothing.
+    func testZeroEditTileIsAbsentUntilSomethingWasObserved() {
+        let unobserved = InsightsInput(total: 40)
+        XCTAssertNil(tile(InsightsModel.zeroEditLabel, unobserved))
+    }
+
+    func testZeroEditTileDegradesBelowTheMinimumAndNamesTheGap() {
+        let three = InsightsInput(total: 40, zeroEditObserved: 3, zeroEditRate: 1.0)
+        guard case .sparse(_, let need)? = tile(InsightsModel.zeroEditLabel, three) else {
+            return XCTFail("expected a sparse tile")
+        }
+        XCTAssertEqual(need, "Needs 5 observed dictations. You have 3.")
+    }
+
+    /// The `n` is part of the tile, not an option: a zero-edit percentage
+    /// without its denominator is how the metric gets quietly inflated.
+    func testZeroEditTileCarriesTheRateAndItsDenominator() {
+        let input = InsightsInput(total: 40, zeroEditObserved: 8, zeroEditRate: 0.625)
+        guard case .value(_, let value, let sub, let spark)? = tile(InsightsModel.zeroEditLabel, input) else {
+            return XCTFail("expected a value tile")
+        }
+        XCTAssertEqual(value, "62.5%")
+        XCTAssertEqual(sub, "of 8 observed dictations")
+        XCTAssertEqual(spark, [], "no trend data yet — no fake trend line")
+    }
+
     // MARK: - empties
 
     /// `unclassifiedEmpty` is reported separately and **never merged** —

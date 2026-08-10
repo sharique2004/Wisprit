@@ -301,6 +301,36 @@ public final class History: @unchecked Sendable {
         }
     }
 
+    /// The late column: the off-path vocabulary pass finishes seconds after
+    /// `addDetail` ran, so its outcome arrives through an UPDATE rather than
+    /// riding the insert. Only ever fills `vocab` — every other column was true
+    /// at insert time and stays exactly as written.
+    ///
+    /// Keyed by `transcript_id`, which `addDetail` writes at most once per
+    /// transcript. Returns whether a row was actually updated — false covers a
+    /// trimmed row, a detail-off install, and the unavailable database alike,
+    /// and every one of those is a safe no-op.
+    @discardableResult
+    public func updateDetail(transcriptId: Int64, vocab: String) -> Bool {
+        guard transcriptId > 0, isEnabled, detailEnabled else { return false }
+        lock.lock(); defer { lock.unlock() }
+        guard let db, detailReady else { return false }
+        do {
+            let update = try prepare(
+                "UPDATE utterance_detail SET vocab = ? WHERE transcript_id = ?")
+            defer { sqlite3_finalize(update) }
+            sqlite3_bind_text(update, 1, vocab, -1, History.transient)
+            sqlite3_bind_int64(update, 2, transcriptId)
+            guard sqlite3_step(update) == SQLITE_DONE else {
+                throw HistoryError.step("update detail")
+            }
+            return sqlite3_changes(db) > 0
+        } catch {
+            log.error("failed to update utterance detail")
+            return false
+        }
+    }
+
     /// Delete every stored transcript and reclaim file space. Row ids keep
     /// counting up (DELETE leaves `sqlite_sequence` alone) — same as Python.
     public func purge() {

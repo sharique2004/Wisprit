@@ -115,12 +115,22 @@ private struct HubSidebar: View {
             ForEach(tabs) { tab in
                 NavRow(tab: tab,
                        isSelected: model.selectedTab == tab,
-                       badge: tab == .setup ? model.setupBadge : nil) {
+                       badge: badge(for: tab)) {
                     model.selectedTab = tab
                 }
             }
         }
         .padding(.horizontal, Theme.Space.s8)
+    }
+
+    /// Which nav rows wear the 6 pt dot: Setup for a broken checklist, and —
+    /// Phase 5 — Dictionary while learn proposals await a decision.
+    private func badge(for tab: WispritWindowModel.Tab) -> WispritWindowModel.SetupBadge? {
+        switch tab {
+        case .setup: return model.setupBadge
+        case .dictionary: return model.dictionaryBadge
+        default: return nil
+        }
     }
 
     /// The third sanctioned orange (§1.6): the dot is `hot` only while audio is

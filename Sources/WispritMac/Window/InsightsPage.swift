@@ -108,7 +108,9 @@ public enum InsightsMapper {
             aiOutcomes: summary.aiOutcomes,
             dailyCounts: dailyCounts(rows, window: window, now: now, calendar: calendar),
             vocabulary: vocabulary(dictionary),
-            learnedTermCount: dictionary.filter(\.isLearned).count)
+            learnedTermCount: dictionary.filter(\.isLearned).count,
+            zeroEditObserved: summary.editObserved,
+            zeroEditRate: summary.zeroEditRate)
     }
 
     /// The outcome histogram, with the nameless bucket named.
@@ -458,6 +460,7 @@ enum InsightsMetrics {
         case InsightsModel.utterancesLabel: return spark
         case InsightsModel.latencyLabel: return latency
         case InsightsModel.outcomesLabel: return stacked
+        case InsightsModel.zeroEditLabel: return spark
         default: return ranked
         }
     }
@@ -555,8 +558,12 @@ private struct ValueChart: View {
                 .font(Theme.font(Theme.Role.numeralL))
                 .tracking(Theme.Role.numeralL.tracking)
                 .foregroundStyle(Theme.ink)
-            SparkBars(values: spark)
-                .frame(height: InsightsMetrics.spark)
+            // The zero-edit tile has a number and an `n`, not a trend yet — no
+            // sparkline means no chart, not an empty plate.
+            if !spark.isEmpty {
+                SparkBars(values: spark)
+                    .frame(height: InsightsMetrics.spark)
+            }
             if let sub {
                 Text(sub)
                     .font(Theme.font(Theme.Role.caption))

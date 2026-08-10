@@ -33,11 +33,18 @@ public enum RefineOutcome: String, Sendable, CaseIterable {
     /// word-count band and the assistant-opener check: an obedient reply is
     /// often exactly utterance-sized, so the band never sees it.
     case obeyed
+    /// NEW (not in the Python vocabulary): the frontmost app is on
+    /// `context_verbatim_bundle_ids` — a terminal or an IDE, where "cleanup" of
+    /// identifiers is only ever damage — so the stage was skipped outright.
+    /// Its own value rather than a reuse of `off` for the same reason
+    /// `hasLetterRun` got one: every previously recorded `off` row meant "the
+    /// setting is off", and it has to keep meaning exactly that.
+    case skippedVerbatimApp = "skipped_verbatim_app"
 
     /// True for the thirteen outcomes `wisprit/refine.py` can emit.
     public var isPythonVocabulary: Bool {
         switch self {
-        case .hasLetterRun, .obeyed: return false
+        case .hasLetterRun, .obeyed, .skippedVerbatimApp: return false
         default: return true
         }
     }
@@ -64,7 +71,7 @@ public struct RefineResult: Sendable, Equatable {
     }
 }
 
-/// The three settings the cage reads, snapshotted per call so a live settings
+/// The settings the cage reads, snapshotted per call so a live settings
 /// change takes effect without restarting (Python re-reads `self._settings`
 /// inside `refine()`). Non-positive numbers fall back to the defaults, which is
 /// what `Refiner._num` does.
@@ -72,11 +79,19 @@ public struct RefineConfiguration: Sendable, Equatable {
     public var enabled: Bool
     public var maxWords: Int
     public var timeoutMs: Int
+    /// Phase 4's tone-lite: the frontmost app is on
+    /// `context_verbatim_bundle_ids`, so this utterance skips the model
+    /// entirely (`skipped_verbatim_app`) — only ever more verbatim + faster.
+    /// A snapshot like the rest: the wiring resolves the frontmost bundle per
+    /// call, this struct just carries the verdict.
+    public var verbatimApp: Bool
 
-    public init(enabled: Bool = true, maxWords: Int = 350, timeoutMs: Int = 12000) {
+    public init(enabled: Bool = true, maxWords: Int = 350, timeoutMs: Int = 12000,
+                verbatimApp: Bool = false) {
         self.enabled = enabled
         self.maxWords = maxWords > 0 ? maxWords : 350
         self.timeoutMs = timeoutMs > 0 ? timeoutMs : 12000
+        self.verbatimApp = verbatimApp
     }
 }
 

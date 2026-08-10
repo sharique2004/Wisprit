@@ -24,7 +24,10 @@ public protocol AsrPort: Sendable {
     func cancel() async
     /// Off-path reconciliation over one utterance's audio. Contractually only
     /// ever called AFTER insertion — it takes hundreds of ms to seconds.
-    func reconcileVocabulary(_ retained: RetainedUtterance) async -> VocabularyReconciliation?
+    /// `extraTerms` are THIS utterance's context-awareness candidates (empty in
+    /// every wiring that has none); they bias this one pass and die with it.
+    func reconcileVocabulary(_ retained: RetainedUtterance,
+                             extraTerms: [String]) async -> VocabularyReconciliation?
 }
 
 public protocol AudioPort: Sendable {
@@ -93,6 +96,15 @@ public protocol HistoryPort: Sendable {
     @discardableResult
     func add(text: String, engine: String, durationMs: Double?) -> Int64
     func lastText() -> String?
+    /// The utterance's pipeline triple, keyed to the transcript row `add`
+    /// returned. Off the paste path — written after the text has landed.
+    @discardableResult
+    func addDetail(transcriptId: Int64, raw: String, corrected: String, refined: String,
+                   inserted: String, vocab: String?, ai: String?, termsHit: [String]) -> Int64
+    /// The late `vocab` column: the off-path reconciliation finishes seconds
+    /// after the detail row was written, so its outcome arrives as an update.
+    @discardableResult
+    func updateDetail(transcriptId: Int64, vocab: String) -> Bool
 }
 
 public protocol MetricsPort: Sendable {
@@ -145,8 +157,9 @@ public struct AsrManagerPort: AsrPort {
     public func finalize() async -> UtteranceResult { await manager.finalize() }
     public var lastRetained: RetainedUtterance { manager.lastRetained }
     public func cancel() async { await manager.cancel() }
-    public func reconcileVocabulary(_ retained: RetainedUtterance) async -> VocabularyReconciliation? {
-        await manager.reconcileVocabulary(retained)
+    public func reconcileVocabulary(_ retained: RetainedUtterance,
+                                    extraTerms: [String]) async -> VocabularyReconciliation? {
+        await manager.reconcileVocabulary(retained, extraTerms: extraTerms)
     }
 }
 

@@ -508,6 +508,61 @@ final class WindowModelTests: XCTestCase {
         model.deleteTerm("InsForge")
         XCTAssertEqual(model.dictionaryRows.map(\.term), ["Sharique"])
     }
+
+    // MARK: - learn proposals (Phase 5)
+
+    /// The proposal surface end to end at the model level: the port's list is
+    /// republished, the badge tracks it, Accept routes through the accept port
+    /// and refreshes, Dismiss routes through the dismiss port. The store-side
+    /// truths (threshold, dismissal-forever) are pinned in
+    /// `PendingLearnStoreTests` and `SessionEditCaptureTests`.
+    func testLearnProposalsPublishBadgeAndRouteTheDecisions() {
+        let ledger = ProposalLedger()
+        ledger.pending = [WispritWindowModel.LearnProposalRow(
+            term: "Sharique", heard: ["Shariq"], count: 2)]
+        let store = DictionaryStore(path: root.appendingPathComponent("dictionary.json"))
+        let model = WispritWindowModel(
+            settings: settings,
+            dictionary: DictionaryEditor(store: store),
+            ports: WispritWindowModel.Ports(
+                learnProposals: { ledger.pending },
+                acceptLearnProposal: { ledger.note("accept:\($0.term)"); ledger.pending = [] },
+                dismissLearnProposal: { ledger.note("dismiss:\($0)"); ledger.pending = [] }))
+
+        model.reloadDictionary()
+        XCTAssertEqual(model.learnProposals.map(\.term), ["Sharique"])
+        XCTAssertEqual(model.dictionaryBadge, .attention, "a waiting decision is a visible dot")
+
+        model.acceptLearnProposal(model.learnProposals[0])
+        XCTAssertEqual(ledger.actions, ["accept:Sharique"])
+        XCTAssertEqual(model.learnProposals, [], "accept refreshes the list")
+        XCTAssertNil(model.dictionaryBadge, "…and the badge goes with it")
+
+        ledger.pending = [WispritWindowModel.LearnProposalRow(term: "InsForge", count: 2)]
+        model.reloadDictionary()
+        model.dismissLearnProposal(model.learnProposals[0])
+        XCTAssertEqual(ledger.actions, ["accept:Sharique", "dismiss:InsForge"])
+        XCTAssertNil(model.dictionaryBadge)
+    }
+
+    func testTheDictionaryBadgeModelIsPure() {
+        XCTAssertNil(WispritWindowModel.dictionaryBadge(proposals: 0))
+        XCTAssertEqual(WispritWindowModel.dictionaryBadge(proposals: 1), .attention)
+        XCTAssertEqual(WispritWindowModel.dictionaryBadge(proposals: 7), .attention)
+    }
+}
+
+/// `Ports`' learn-proposal closures are `@Sendable`; the recorder has to be too.
+private final class ProposalLedger: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: [WispritWindowModel.LearnProposalRow] = []
+    private var recorded: [String] = []
+    var pending: [WispritWindowModel.LearnProposalRow] {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
+    }
+    var actions: [String] { lock.lock(); defer { lock.unlock() }; return recorded }
+    func note(_ action: String) { lock.lock(); recorded.append(action); lock.unlock() }
 }
 
 /// Main-actor-isolated recorder; `Ports.performFix` is not `Sendable`, so a

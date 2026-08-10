@@ -1,5 +1,6 @@
 import XCTest
 import WispritIMProtocol
+import WispritKit
 import WispritPersistence
 @testable import WispritMac
 
@@ -58,10 +59,73 @@ final class DoctorTests: XCTestCase {
             "Live Typing bundle",
             "config.json",
             "dictionary.json",
+            "Parakeet models",
             "Dictation health",
             "Learned terms",
             "Accuracy eval baseline",
         ])
+    }
+
+    // MARK: - Parakeet models (path-based, warn-only)
+
+    func testParakeetModelsNotDownloadedIsAGreenOptionalRow() {
+        let report = Doctor.report(from: green())
+        let check = report.check(Doctor.parakeetModelsLabel)
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertEqual(check?.detail, "not downloaded (optional)")
+        XCTAssertEqual(check?.isRequired, false)
+    }
+
+    func testParakeetModelsVerifiedNamesThePath() {
+        var facts = green()
+        facts.parakeetModels = "verified"
+        facts.parakeetModelsPath = "/Users/x/.wisprit/models/parakeet"
+        let check = Doctor.report(from: facts).check(Doctor.parakeetModelsLabel)
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertTrue(check?.detail.contains("/Users/x/.wisprit/models/parakeet") == true)
+    }
+
+    func testParakeetModelsPartialWarnsButNeverFailsDoctor() {
+        var facts = green()
+        facts.parakeetModels = "partial"
+        facts.parakeetModelsPath = "/Users/x/.wisprit/models/parakeet"
+        let report = Doctor.report(from: facts)
+        let check = report.check(Doctor.parakeetModelsLabel)
+        XCTAssertEqual(check?.mark, .warn)
+        XCTAssertTrue(check?.detail.contains("re-run the model download") == true)
+        XCTAssertTrue(report.isReady, "an optional download can never fail doctor")
+    }
+
+    /// The probe reads the models dir BY PATH — the convention WispritParakeet's
+    /// `ParakeetManifest` documents — because WispritMac does not link that
+    /// target. Pin all three answers against real directories.
+    func testParakeetModelsStateFromThePathConvention() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("parakeet-doctor-\(UUID().uuidString)")
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+
+        // Absent or empty dir: not downloaded.
+        XCTAssertEqual(Doctor.parakeetModelsState(at: dir), "not_downloaded")
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        XCTAssertEqual(Doctor.parakeetModelsState(at: dir), "not_downloaded")
+
+        // Content without a valid marker: a torn download.
+        try Data("bytes".utf8).write(to: dir.appendingPathComponent("weight.bin"))
+        XCTAssertEqual(Doctor.parakeetModelsState(at: dir), "partial")
+        try Data("not json".utf8).write(to: dir.appendingPathComponent("verified.json"))
+        XCTAssertEqual(Doctor.parakeetModelsState(at: dir), "partial")
+
+        // The store's marker: verified.
+        try Data(#"{"manifest_version": 1}"#.utf8)
+            .write(to: dir.appendingPathComponent("verified.json"))
+        XCTAssertEqual(Doctor.parakeetModelsState(at: dir), "verified")
+        // Anchored to the state dir, not a literal home path: tests may
+        // override WispritPaths.overrideRoot, and the convention is
+        // "<state dir>/models/parakeet" wherever the state dir is.
+        XCTAssertEqual(Doctor.parakeetModelsDir.path,
+                       WispritPaths.stateDir
+                           .appendingPathComponent("models", isDirectory: true)
+                           .appendingPathComponent("parakeet", isDirectory: true).path)
     }
 
     func testTheAccuracyRowsCanNeverFailADoctorRun() {
@@ -315,6 +379,58 @@ final class DoctorTests: XCTestCase {
     }
 
     // MARK: - accuracy eval baseline
+
+    // MARK: - context awareness (Phase 4)
+
+    /// The row exists only when the user has opted in — a default-off feature
+    /// has nothing to diagnose — and it can never fail a doctor run.
+    func testContextAwarenessRowOnlyExistsWhenEnabled() {
+        let off = Doctor.report(from: green())
+        XCTAssertNil(off.check(Doctor.contextAwarenessLabel))
+
+        var facts = green()
+        facts.contextAwarenessEnabled = true
+        let on = Doctor.report(from: facts)
+        let row = on.check(Doctor.contextAwarenessLabel)
+        XCTAssertNotNil(row)
+        XCTAssertFalse(row?.isRequired ?? true, "warn-only by design")
+    }
+
+    /// Green facts serve both readers; the detail names which paths carry the
+    /// reading, IM first (no permission needed).
+    func testContextAwarenessNamesTheServingReaders() {
+        var facts = green()
+        facts.contextAwarenessEnabled = true
+        facts.liveTypingEnabled = true
+        let row = Doctor.report(from: facts).check(Doctor.contextAwarenessLabel)
+        XCTAssertEqual(row?.mark, .ok)
+        XCTAssertTrue(row?.detail.contains("input method") ?? false)
+        XCTAssertTrue(row?.detail.contains("Accessibility") ?? false)
+    }
+
+    /// Enabled with no reader able to serve it is the one warn: no AX grant
+    /// and no usable input method.
+    func testContextAwarenessWarnsWhenNoReaderCanServe() {
+        var facts = green()
+        facts.contextAwarenessEnabled = true
+        facts.accessibility = false
+        facts.imStaged = false
+        let row = Doctor.report(from: facts).check(Doctor.contextAwarenessLabel)
+        XCTAssertEqual(row?.mark, .warn)
+        XCTAssertTrue(row?.detail.contains("no reader") ?? false)
+        XCTAssertTrue(row?.detail.contains("dictation itself is unaffected") ?? false)
+    }
+
+    /// AX granted alone is enough — the fallback path serves rungs 3–4.
+    func testContextAwarenessIsGreenOnAccessibilityAlone() {
+        var facts = green()
+        facts.contextAwarenessEnabled = true
+        facts.imStaged = false
+        let row = Doctor.report(from: facts).check(Doctor.contextAwarenessLabel)
+        XCTAssertEqual(row?.mark, .ok)
+        XCTAssertTrue(row?.detail.contains("Accessibility") ?? false)
+        XCTAssertFalse(row?.detail.contains("input method") ?? true)
+    }
 
     func testNoEvalBaselineIsAnInfoRowNamingTheCommandThatWritesOne() {
         let check = Doctor.report(from: green()).check(Doctor.evalBaselineLabel)

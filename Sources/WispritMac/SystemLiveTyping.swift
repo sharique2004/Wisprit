@@ -156,6 +156,16 @@ public final class SystemLiveTypingPeer: LiveTypingPeer, @unchecked Sendable {
     }
 
     @discardableResult
+    public func postRead(_ message: IMReadMessage) -> Bool {
+        guard !LiveTypingEnvironment.isDisabled else { return false }
+        return client.post(message)
+    }
+
+    public func setSnapshotHandler(_ handler: (@Sendable (IMSnapshotMessage) -> Void)?) {
+        client.onSnapshot = handler
+    }
+
+    @discardableResult
     public func selectInputSource() -> Bool {
         let ok = TIS.select(sourceID)
         if !ok { log.info("could not select \(self.sourceID, privacy: .public)") }

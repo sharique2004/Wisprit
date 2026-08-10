@@ -44,6 +44,10 @@ public enum SetupFixKind: String, Sendable, Equatable {
     /// spellings of. The user's dictionary is never edited without this button:
     /// see `LearnedTermCleanup`, which writes `dictionary.json.bak` first.
     case cleanLearnedTerms
+    /// The context-awareness consent flow (sheet → optional AX prompt → flip).
+    /// Consent is never granted by a bare toggle: the Settings page routes its
+    /// enable through this fix, so every road to on runs the sheet.
+    case enableContextAwareness
 
     /// System Settings deep link, when the fix is "open a pane".
     public var settingsURL: String? {
@@ -58,7 +62,8 @@ public enum SetupFixKind: String, Sendable, Equatable {
             return "x-apple.systempreferences:com.apple.Keyboard-Settings.extension"
         case .openAppleIntelligenceSettings:
             return "x-apple.systempreferences:com.apple.Siri-Settings.extension"
-        case .none, .requestMicrophone, .relaunch, .enableLiveTyping, .cleanLearnedTerms:
+        case .none, .requestMicrophone, .relaunch, .enableLiveTyping, .cleanLearnedTerms,
+             .enableContextAwareness:
             return nil
         }
     }

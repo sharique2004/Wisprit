@@ -45,6 +45,7 @@ final class SessionControllerTests: XCTestCase {
              debounceMs: Double = 150,
              reconcile: Bool = false,
              vocabularyRetro: Bool = true,
+             context: FakeContext? = nil,
              // Swap in a different pill for the tests whose subject is what the
              // bubble renders rather than which calls it received.
              pillPort: (any PillPort)? = nil) {
@@ -63,6 +64,7 @@ final class SessionControllerTests: XCTestCase {
                 corrections: dictionary,
                 corrector: corrector,
                 gate: gate,
+                context: context,
                 configuration: SessionController.Configuration(
                     holdDebounceMs: { debounceMs },
                     isEnabled: { enabled },

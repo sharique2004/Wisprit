@@ -74,6 +74,14 @@ public struct InsightsInput: Equatable, Sendable {
     /// From `DictionaryEditor.rows()`, **not** metrics.
     public var vocabulary: [TermUse]
     public var learnedTermCount: Int
+    /// Utterances whose fate was actually re-read out of a field — the
+    /// zero-edit denominator, shown as the tile's `n`. 0 means the tile is
+    /// absent, not zero.
+    public var zeroEditObserved: Int
+    /// Zero-edit / observed, a fraction 0…1 — over OBSERVED utterances ONLY,
+    /// exactly as `MetricsSummary` computes it. Unobserved utterances never
+    /// enter the denominator.
+    public var zeroEditRate: Double
 
     public init(windowLabel: String = "",
                 total: Int = 0,
@@ -93,7 +101,9 @@ public struct InsightsInput: Equatable, Sendable {
                 aiOutcomes: [String: Int] = [:],
                 dailyCounts: [DayCount] = [],
                 vocabulary: [TermUse] = [],
-                learnedTermCount: Int = 0) {
+                learnedTermCount: Int = 0,
+                zeroEditObserved: Int = 0,
+                zeroEditRate: Double = 0) {
         self.windowLabel = windowLabel
         self.total = total
         self.outcomes = outcomes
@@ -113,6 +123,8 @@ public struct InsightsInput: Equatable, Sendable {
         self.dailyCounts = dailyCounts
         self.vocabulary = vocabulary
         self.learnedTermCount = learnedTermCount
+        self.zeroEditObserved = zeroEditObserved
+        self.zeroEditRate = zeroEditRate
     }
 }
 
@@ -157,6 +169,7 @@ public enum InsightsModel {
     public static let emptiesLabel = "Empties, explained"
     public static let cleanupLabel = "AI cleanup"
     public static let vocabularyLabel = "Vocabulary at work"
+    public static let zeroEditLabel = "Zero-edit rate"
 
     /// The tiles, in page order.
     public static func tiles(from input: InsightsInput,
@@ -166,6 +179,7 @@ public enum InsightsModel {
         tiles.append(latency(input))
         tiles.append(outcomes(input))
         if let empties = empties(input, locale: locale) { tiles.append(empties) }
+        if let zeroEdit = zeroEdit(input) { tiles.append(zeroEdit) }
         if let cleanup = cleanup(input) { tiles.append(cleanup) }
         if let vocabulary = vocabulary(input) { tiles.append(vocabulary) }
         return tiles
@@ -227,6 +241,23 @@ public enum InsightsModel {
                        rows: ranked(input.emptyReasons),
                        footnote: footnote,
                        alarm: alarm)
+    }
+
+    /// Wispr Flow's headline metric, over real observations only. Absent until
+    /// something has been observed (rule 2: a denominator of zero is not a
+    /// rate), sparse below `minimumRows`, and the `n` always rides in the
+    /// subtitle — a zero-edit percentage without its denominator is exactly how
+    /// the number gets inflated.
+    static func zeroEdit(_ input: InsightsInput) -> InsightTile? {
+        guard input.zeroEditObserved > 0 else { return nil }
+        guard input.zeroEditObserved >= minimumRows else {
+            return .sparse(label: zeroEditLabel,
+                           need: need(input.zeroEditObserved, noun: "observed dictations"))
+        }
+        return .value(label: zeroEditLabel,
+                      value: percent(input.zeroEditRate),
+                      sub: "of \(input.zeroEditObserved) observed dictations",
+                      spark: [])
     }
 
     /// The gated-section rule: no refine pass ever ran on this Mac, so the tile

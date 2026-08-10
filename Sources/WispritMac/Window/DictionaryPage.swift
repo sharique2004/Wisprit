@@ -57,6 +57,7 @@ struct DictionaryPage: View {
         } content: {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
+                    proposalsBanner
                     cleanupBanner
                     if items.isEmpty {
                         emptyState
@@ -101,6 +102,67 @@ struct DictionaryPage: View {
         .controlSize(.small)
         .fixedSize()
         .accessibilityLabel("Sort")
+    }
+
+    // MARK: - edit-derived learn proposals (Phase 5)
+
+    /// Words the flywheel saw the user type over Wisprit's output in two or
+    /// more distinct utterances. They are NOT vocabulary yet — nothing here is
+    /// in `dictionary.json` — so they render as a decision banner, not as rows:
+    /// Accept writes the term (the same `add` + `promoteConsumed` transition
+    /// auto-accept makes), Dismiss records a permanent no.
+    @ViewBuilder
+    private var proposalsBanner: some View {
+        if !model.learnProposals.isEmpty {
+            VStack(alignment: .leading, spacing: Theme.Space.s8) {
+                HStack(alignment: .top, spacing: Theme.Space.s12) {
+                    Image(systemName: "sparkles")
+                        .font(.system(size: 15, weight: .semibold))
+                        .foregroundStyle(Theme.attention)
+                    VStack(alignment: .leading, spacing: Theme.Space.s4) {
+                        Text(DictionaryList.proposalsHeadline(model.learnProposals.count))
+                            .font(Theme.font(Theme.Role.rowTitle))
+                            .foregroundStyle(Theme.ink)
+                        Text(DictionaryList.proposalsExplanation)
+                            .font(Theme.font(Theme.Role.body))
+                            .foregroundStyle(Theme.inkSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    Spacer(minLength: Theme.Space.s16)
+                }
+                ForEach(model.learnProposals) { proposal in
+                    HStack(spacing: Theme.Space.s8) {
+                        Text(proposal.term)
+                            .font(Theme.font(Theme.Role.rowTitle))
+                            .foregroundStyle(Theme.ink)
+                            .lineLimit(1)
+                        // What the recognizer wrote instead — machine output,
+                        // so mono (§1.4).
+                        Text(DictionaryList.proposalEvidence(proposal))
+                            .font(Theme.font(Theme.Role.mono))
+                            .foregroundStyle(Theme.inkSecondary)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
+                        Spacer(minLength: Theme.Space.s8)
+                        Button("Accept") { model.acceptLearnProposal(proposal) }
+                            .buttonStyle(.bordered)
+                            .controlSize(.small)
+                            .accessibilityLabel("Accept “\(proposal.term)”")
+                        Button("Dismiss") { model.dismissLearnProposal(proposal) }
+                            .buttonStyle(.borderless)
+                            .controlSize(.small)
+                            .accessibilityLabel("Dismiss “\(proposal.term)”")
+                    }
+                }
+            }
+            .padding(Theme.Space.s12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.Radius.row, style: .continuous)
+                    .fill(Theme.groundRecessed)
+            )
+            .padding(.bottom, Theme.Space.s16)
+        }
     }
 
     // MARK: - the cleanup affordance
@@ -582,6 +644,27 @@ enum DictionaryList {
     }
 
     // MARK: banners and empty states
+
+    /// The proposals banner's copy. Pure, so "one word" vs "N words" and the
+    /// evidence line are pinned facts rather than eyeballed strings.
+    static func proposalsHeadline(_ count: Int) -> String {
+        "\(count) new word\(count == 1 ? "" : "s") heard in your edits"
+    }
+
+    static let proposalsExplanation =
+        "You typed these over what Wisprit wrote, more than once. Accept adds "
+        + "one to your dictionary; Dismiss never asks about it again."
+
+    /// "heard “Shariq” · 2×" — what the recognizer produced, and how often the
+    /// correction was seen.
+    static func proposalEvidence(_ row: WispritWindowModel.LearnProposalRow) -> String {
+        var parts: [String] = []
+        if let heard = row.heard.first, !heard.isEmpty {
+            parts.append("heard “\(heard)”")
+        }
+        parts.append("\(row.count)×")
+        return parts.joined(separator: " · ")
+    }
 
     static func suspectHeadline(_ audit: LearnedTermCleanup.Audit) -> String {
         let count = audit.suspects.count

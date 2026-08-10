@@ -119,6 +119,30 @@ final class InsightsMapperTests: XCTestCase {
         XCTAssertEqual(input.aiOutcomes, ["cleaned": 6, "verbatim": 4])
     }
 
+    /// Phase 5: the zero-edit pair rides from `MetricsSummary` unchanged — the
+    /// observation lines feed the tile and never the utterance counts.
+    func testZeroEditComesFromTheObservationLinesAndNotTheUtteranceCounts() {
+        var rows = stream()
+        rows.append(written(MetricsRecord(
+            ts: daysAgo(1), heldMs: 0, engine: "", finalizeMs: 0, timedOut: false,
+            postMs: 0, insertMs: 0, outcome: "edit_observed", chars: 0,
+            editDist: 0, editScope: "im")))
+        rows.append(written(MetricsRecord(
+            ts: daysAgo(2), heldMs: 0, engine: "", finalizeMs: 0, timedOut: false,
+            postMs: 0, insertMs: 0, outcome: "edit_observed", chars: 0,
+            editDist: 4, editScope: "ax")))
+
+        let mapped = input(rows)
+        XCTAssertEqual(mapped.zeroEditObserved, 2)
+        XCTAssertEqual(mapped.zeroEditRate, 0.5, accuracy: 1e-9)
+        XCTAssertEqual(mapped.total, 20, "observation lines are not utterances")
+
+        let clean = input(stream())
+        XCTAssertEqual(clean.zeroEditObserved, 0)
+        XCTAssertNil(tile(InsightsModel.zeroEditLabel, clean),
+                     "nothing observed, no tile — never a fake 0%")
+    }
+
     /// The rule `MetricsSummary` is explicit about and the page inherits: an
     /// empty logged before reasons existed is its own number, never folded into
     /// a real bucket.

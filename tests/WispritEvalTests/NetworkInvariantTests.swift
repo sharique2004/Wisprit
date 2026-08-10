@@ -35,6 +35,17 @@ final class NetworkInvariantTests: XCTestCase {
         Allowance(path: "Sources/WispritIMProtocol/IMBundleTemplate.swift",
                   tokens: ["http://"],
                   reason: "PLIST DOCTYPE public identifier in a generated Info.plist"),
+        // The ONE planned runtime network call (Phase 6, spikes-parakeet.md):
+        // the explicit, user-invoked Parakeet model download. Pinned HF assets
+        // verified byte-for-byte against a SHA-256 manifest before any
+        // FluidAudio load may run; WISPRIT_NO_NETWORK=1 hard-refuses before
+        // the fetcher is asked; nothing else in the target — or the package —
+        // may touch the network. WispritParakeet is not linked into WispritMac,
+        // so today this code cannot even ride in the shipped binary.
+        Allowance(path: "Sources/WispritParakeet/ParakeetModelStore.swift",
+                  tokens: ["URLSession", "https://"],
+                  reason: "explicit user-invoked Parakeet model download, "
+                      + "SHA-256-manifest-verified, WISPRIT_NO_NETWORK-guarded"),
     ]
 
     // MARK: - the invariant

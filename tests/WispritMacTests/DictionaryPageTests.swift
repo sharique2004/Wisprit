@@ -320,6 +320,23 @@ final class DictionaryPageTests: XCTestCase {
         XCTAssertEqual(model.dictionaryRows.map(\.term), ["Krzysztof"])
     }
 
+    // MARK: - the learn-proposals banner (Phase 5)
+
+    /// The banner's copy, as functions of values: singular vs plural, and the
+    /// evidence line that shows what the recognizer actually wrote.
+    func testTheProposalsBannerCopy() {
+        XCTAssertEqual(DictionaryList.proposalsHeadline(1), "1 new word heard in your edits")
+        XCTAssertEqual(DictionaryList.proposalsHeadline(3), "3 new words heard in your edits")
+
+        let full = WispritWindowModel.LearnProposalRow(term: "Sharique",
+                                                       heard: ["Shariq"], count: 2)
+        XCTAssertEqual(DictionaryList.proposalEvidence(full), "heard “Shariq” · 2×")
+
+        let bare = WispritWindowModel.LearnProposalRow(term: "InsForge", count: 3)
+        XCTAssertEqual(DictionaryList.proposalEvidence(bare), "3×",
+                       "no recorded misrecognition still renders the count")
+    }
+
     /// The banner's button runs the checklist's fix, and nothing else: the page
     /// never edits `dictionary.json` itself.
     @MainActor

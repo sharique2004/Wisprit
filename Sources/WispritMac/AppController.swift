@@ -1,6 +1,7 @@
 #if os(macOS)
 import AppKit
 import Foundation
+import WispritContext
 import WispritCorrections
 import WispritDictionary
 import WispritEngine
@@ -39,6 +40,13 @@ public final class AppController: NSObject, NSApplicationDelegate {
     let pill: Pill
     let liveTyping: LiveTypingSession
     let tierCache: BundleCapabilityCache
+    /// Phase-4 context awareness — inert until the consent flow flips
+    /// `context_awareness`, and hard-off under `WISPRIT_NO_CONTEXT=1`.
+    let contextCapture: ContextCapture
+    /// Phase-5 edit capture: the evidence ledger and the coordinator that
+    /// classifies field re-reads into zero-edit lines and learn proposals.
+    let pendingLearns: PendingLearnStore
+    let editCapture: EditCapture
     private var statusMenu: StatusMenu!
     private let instanceLock: SingleInstanceLock
 
@@ -80,7 +88,10 @@ public final class AppController: NSObject, NSApplicationDelegate {
         self.settings = settings
         let dictionary = DictionaryStore()
         self.dictionary = dictionary
-        self.history = History(settings: settings)
+        // `history_detail` is honored HERE, the wiring site: the store takes it
+        // as a constructor value on purpose (see `History.detailEnabled`).
+        self.history = History(settings: settings,
+                               detailEnabled: HistoryDetailSettings.isEnabled(settings))
         self.metrics = MetricsWriter()
 
         self.refiner = Refiner(
@@ -88,7 +99,14 @@ public final class AppController: NSObject, NSApplicationDelegate {
             configuration: {
                 RefineConfiguration(enabled: settings.aiCleanup,
                                     maxWords: settings.aiCleanupMaxWords,
-                                    timeoutMs: settings.aiCleanupTimeoutMs)
+                                    timeoutMs: settings.aiCleanupTimeoutMs,
+                                    // The verbatim-app skip, resolved per call
+                                    // against the app being dictated INTO —
+                                    // the same live frontmost read the ladder
+                                    // uses from the session thread.
+                                    verbatimApp: ContextSettings.isVerbatimApp(
+                                        settings,
+                                        bundleID: AppController.frontmostBundleID()))
             },
             vocabulary: dictionary)
 
@@ -135,6 +153,56 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 selectionPolicy: LiveTypingSettings.selectionPolicy(settings)))
         self.liveTyping = liveTyping
 
+        // Context capture: the IM wire when the rung is live (zero
+        // permissions), the 4-call AX reader on rungs 3–4. Everything it
+        // reads is gated by `ContextSettings.policy` per key-down, so the
+        // default-off install never posts a read or touches AX at all.
+        // The lexicon is shared with edit capture below — one dictionary load,
+        // one answer to "is this an ordinary word?".
+        let lexicon = SystemLexicon()
+        let contextCapture = ContextCapture(
+            configuration: ContextCapture.Configuration(
+                policy: { ContextSettings.policy(settings) },
+                maxTerms: { ContextSettings.maxTerms(settings) },
+                frontmostBundleID: { AppController.frontmostBundleID() },
+                secureInputActive: { Permissions.secureInput().active }),
+            requestIMRead: { [weak liveTyping] in liveTyping?.requestContextRead() },
+            axReader: AXContextReader(),
+            lexicon: lexicon)
+        self.contextCapture = contextCapture
+        // Installed before `liveTyping.start()` (in `launch`), per the client's
+        // own rule: the handler is in place before the event port opens.
+        liveTyping.onContextSnapshot { [weak contextCapture] generation, snapshot in
+            contextCapture?.deliverIMSnapshot(wireGeneration: generation, snapshot)
+        }
+        if ContextSettings.isEnabled(settings) {
+            contextCapture.prewarm()
+        }
+
+        // One pill port for every off-main producer — the session thread and
+        // the edit-capture answers both speak through it.
+        let pillPort = MainThreadPill(pill, isSuppressed: { settings.pillHidden })
+
+        // Phase-5 edit capture: committed snapshots (the IM rung's own read
+        // channel) and next-utterance field diffs (the paste rung, consent-
+        // gated through context awareness) both land here.
+        let pendingLearns = PendingLearnStore()
+        self.pendingLearns = pendingLearns
+        let editCapture = EditCapture(
+            store: pendingLearns,
+            metrics: metrics,
+            vocabulary: dictionary,
+            pill: pillPort,
+            lexicon: lexicon,
+            committedText: { [weak liveTyping] in liveTyping?.committedText(for: $0) },
+            configuration: EditCapture.Configuration(
+                knownTerm: { dictionary.isKnownTerm($0) },
+                autoAccept: { EditLearnSettings.autoAccept(settings) }))
+        self.editCapture = editCapture
+        liveTyping.onCommittedSnapshot { [weak editCapture] generation, snapshot in
+            editCapture?.consumeCommitted(wireGeneration: generation, snapshot)
+        }
+
         self.session = SessionController(
             events: events,
             asr: AsrManagerPort(asr),
@@ -143,12 +211,14 @@ public final class AppController: NSObject, NSApplicationDelegate {
             history: history,
             metrics: metrics,
             refiner: RefinerPort(refiner),
-            pill: MainThreadPill(pill, isSuppressed: { settings.pillHidden }),
+            pill: pillPort,
             vocabulary: dictionary,
             corrections: dictionary,
             corrector: SpokenSpellingCorrector(vocabulary: dictionary),
             gate: monitor,
             liveTyping: liveTyping,
+            context: contextCapture,
+            editObserver: editCapture,
             configuration: SessionController.Configuration(
                 holdDebounceMs: { Double(settings.holdDebounceMs) },
                 isEnabled: { settings.enabled },
@@ -186,6 +256,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
             ports: AppController.makeWindowPorts(history: history,
                                                  settings: settings,
                                                  tierCache: tierCache,
+                                                 dictionary: dictionary,
+                                                 pendingLearns: pendingLearns,
                                                  paste: { [weak self] text in
                                                      self?.pasteFromWindow(text)
                                                  },
@@ -217,6 +289,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
     private static func makeWindowPorts(history: History,
                                         settings: Settings,
                                         tierCache: BundleCapabilityCache,
+                                        dictionary: DictionaryStore,
+                                        pendingLearns: PendingLearnStore,
                                         paste: @escaping (String) -> Void,
                                         fix: @escaping (SetupFixKind) -> Void)
         -> WispritWindowModel.Ports {
@@ -237,7 +311,24 @@ public final class AppController: NSObject, NSApplicationDelegate {
             copy: { StatusMenu.copyToPasteboard($0) },
             pasteAtCursor: paste,
             liveTypingFallbacks: { tierCache.downgraded() },
-            performFix: fix)
+            performFix: fix,
+            learnProposals: {
+                pendingLearns.pending().map { entry in
+                    WispritWindowModel.LearnProposalRow(
+                        term: entry.term,
+                        heard: entry.observations.map(\.heard).filter { !$0.isEmpty },
+                        count: entry.count)
+                }
+            },
+            acceptLearnProposal: { row in
+                // The same transition the auto-accept path makes, from the
+                // user's own click instead of the threshold flag.
+                dictionary.add(LearnedTerm(term: row.term,
+                                           heard: row.heard,
+                                           source: EditCapture.learnSource))
+                pendingLearns.promoteConsumed(term: row.term)
+            },
+            dismissLearnProposal: { term in pendingLearns.dismiss(term: term) })
     }
 
     /// Home's per-row "paste at cursor" (§3.3).
@@ -270,7 +361,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
         SetupFixRunner(
             enableLiveTyping: { [weak self] in self?.enableLiveTyping() },
             relaunch: { [weak self] in self?.relaunch() },
-            cleanLearnedTerms: { [weak self] in self?.cleanLearnedTerms() }).run(kind)
+            cleanLearnedTerms: { [weak self] in self?.cleanLearnedTerms() },
+            enableContextAwareness: { [weak self] in self?.enableContextAwareness() }).run(kind)
     }
 
     /// Fold the learn loop's junk entries back into the terms they are garbled
@@ -504,6 +596,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
                     polishModes: PolishMenu.modeItems,
                     liveTyping: self.liveTypingStatus,
                     liveTypingDetail: self.liveTypingDetail,
+                    contextAwareness: self.contextMenuStatus,
                     needsSetup: self.needsSetup)
             },
             openWindow: { [weak self] in self?.openWindow() },
@@ -528,6 +621,16 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 LiveTypingSettings.setEnabled(self.settings,
                                               !LiveTypingSettings.isEnabled(self.settings))
                 self.refreshLiveTypingStatus()
+            },
+            enableContextAwareness: { [weak self] in self?.enableContextAwareness() },
+            toggleContextAwareness: { [weak self] in
+                guard let self else { return }
+                // Off is consent-free; on ALWAYS re-runs the consent flow.
+                if ContextSettings.isEnabled(self.settings) {
+                    ContextSettings.setEnabled(self.settings, false)
+                } else {
+                    self.enableContextAwareness()
+                }
             },
             pasteLast: { [weak self] in self?.session.requestPasteLast() },
             openDictionary: { NSWorkspace.shared.open(WispritPaths.dictionaryPath) },
@@ -596,6 +699,46 @@ public final class AppController: NSObject, NSApplicationDelegate {
             pill.transientNotice("Could not enable Live Typing — run Doctor")
         }
         refreshLiveTypingStatus()
+        statusMenu?.rebuild()
+    }
+
+    // MARK: - Context awareness onboarding
+
+    /// The kill switch + consent flag, in the menu's vocabulary.
+    private var contextMenuStatus: ContextAwarenessMenuStatus {
+        if ContextEnvironment.isDisabled { return .disabledByEnvironment }
+        return ContextSettings.isEnabled(settings) ? .on : .off
+    }
+
+    /// The one place `context_awareness` is ever flipped ON, copying the
+    /// `enableLiveTyping` deliberate-act pattern: a menu click, then the
+    /// explanatory sheet, and only an explicit "Enable" changes anything.
+    /// `Permissions.requestAccessibilityPrompt()` is raised only when the AX
+    /// path would actually need it — the IM rung reads with no permission at
+    /// all, and the sheet says so.
+    func enableContextAwareness() {
+        guard !ContextEnvironment.isDisabled else {
+            pill.transientNotice("Context Awareness is disabled (WISPRIT_NO_CONTEXT=1)")
+            return
+        }
+        guard !ContextSettings.isEnabled(settings) else { return }
+
+        let alert = NSAlert()
+        alert.messageText = ContextConsent.title
+        alert.informativeText = ContextConsent.informativeText
+        alert.addButton(withTitle: ContextConsent.enableTitle)
+        alert.addButton(withTitle: ContextConsent.cancelTitle)
+        let response = alert.runModal()
+
+        let plan = ContextConsent.plan(accepted: response == .alertFirstButtonReturn,
+                                       axTrusted: Permissions.accessibility())
+        guard plan.enable else { return }
+        if plan.requestAccessibility {
+            Permissions.requestAccessibilityPrompt()
+        }
+        ContextSettings.setEnabled(settings, true)
+        contextCapture.prewarm()
+        pill.transientNotice("Context Awareness enabled")
         statusMenu?.rebuild()
     }
 

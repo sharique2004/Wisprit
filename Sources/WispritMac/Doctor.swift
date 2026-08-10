@@ -138,11 +138,25 @@ public struct DoctorFacts: Sendable {
     /// receiving a client.
     public var imPlistViolations: [String] = []
 
+    // Context awareness (Phase 4)
+    /// The `context_awareness` consent flag. The row exists ONLY when this is
+    /// true: a default-off feature has nothing to diagnose.
+    public var contextAwarenessEnabled: Bool = false
+
     // State files
     public var configValid: Bool = false
     public var configPath: String = ""
     public var dictionaryValid: Bool = false
     public var dictionaryPath: String = ""
+
+    // Parakeet vocabulary channel (Phase 6)
+    /// "not_downloaded" | "partial" | "verified", derived from the models dir
+    /// PATH ONLY (`~/.wisprit/models/parakeet` + its `verified.json` marker).
+    /// WispritMac deliberately does not link WispritParakeet — the convention
+    /// is documented on `ParakeetManifest` in that target and mirrored in
+    /// `Doctor.parakeetModelsState` (DoctorProbes.swift).
+    public var parakeetModels: String = "not_downloaded"
+    public var parakeetModelsPath: String = ""
 
     // Accuracy and hygiene — how well dictation has been GOING, which is a
     // different question from whether it can run at all. Nothing here is ever
@@ -267,6 +281,15 @@ public enum Doctor {
         // install broken.
         checks.append(contentsOf: liveTypingChecks(facts))
 
+        // --- context awareness ------------------------------------------------
+        //
+        // Warn-only, and only when the user has opted in: a consented feature
+        // with no reader able to serve it is worth a line; the default-off
+        // install gets no row at all.
+        if facts.contextAwarenessEnabled {
+            checks.append(contextAwareness(facts))
+        }
+
         // --- state files -----------------------------------------------------
         checks.append(DoctorCheck(
             facts.configValid ? .ok : .warn, "config.json",
@@ -276,6 +299,7 @@ public enum Doctor {
             facts.dictionaryValid ? .ok : .warn, "dictionary.json",
             facts.dictionaryValid ? facts.dictionaryPath
                 : "missing/invalid at \(facts.dictionaryPath) (run once to create)"))
+        checks.append(parakeetModels(facts))
 
         // --- accuracy & hygiene ----------------------------------------------
         //
@@ -290,6 +314,31 @@ public enum Doctor {
         return DoctorReport(executablePath: facts.executablePath,
                             checks: checks,
                             reminders: reminders)
+    }
+
+    // MARK: - Parakeet models
+
+    public static let parakeetModelsLabel = "Parakeet models"
+
+    /// Warn-only, like every optional-feature row: a machine without the
+    /// Parakeet download dictates perfectly well, so "not downloaded" is a
+    /// green fact, not a defect. Only a HALF-download warns — that is a real
+    /// state the user probably wants to finish or clean up. The state arrives
+    /// as a string because it was read from the models dir by path
+    /// (`Doctor.parakeetModelsState` (DoctorProbes.swift)); this executable deliberately does
+    /// not link WispritParakeet.
+    static func parakeetModels(_ facts: DoctorFacts) -> DoctorCheck {
+        switch facts.parakeetModels {
+        case "verified":
+            return DoctorCheck(.ok, parakeetModelsLabel,
+                               "verified at \(facts.parakeetModelsPath)")
+        case "partial":
+            return DoctorCheck(.warn, parakeetModelsLabel,
+                               "partially downloaded at \(facts.parakeetModelsPath) — "
+                               + "re-run the model download; dictation is unaffected")
+        default:
+            return DoctorCheck(.ok, parakeetModelsLabel, "not downloaded (optional)")
+        }
     }
 
     // MARK: - dictation health
@@ -394,6 +443,32 @@ public enum Doctor {
     }
 
     static func percent(_ rate: Double) -> String { String(format: "%.1f%%", rate * 100) }
+
+    // MARK: - context awareness
+
+    public static let contextAwarenessLabel = "Context awareness"
+
+    /// Which reader can actually serve a consented capture: the IM wire needs
+    /// a usable input method, the AX fallback needs the Accessibility grant.
+    /// Both gone is the warn; either present names itself, so the user knows
+    /// which path their context is riding.
+    static func contextAwareness(_ facts: DoctorFacts) -> DoctorCheck {
+        let imUsable = facts.imStaged && IMPreflight.evaluate(facts.imStatus).isUsable
+            && facts.liveTypingEnabled
+        let axGranted = facts.accessibility
+        guard imUsable || axGranted else {
+            return DoctorCheck(
+                .warn, contextAwarenessLabel,
+                "enabled, but no reader can serve it — grant Accessibility "
+                + "(System Settings ▸ Privacy & Security) or enable Live Typing, "
+                + "and dictation itself is unaffected either way")
+        }
+        var paths: [String] = []
+        if imUsable { paths.append("the input method (no permission needed)") }
+        if axGranted { paths.append("Accessibility (4-call bounded read)") }
+        return DoctorCheck(.ok, contextAwarenessLabel,
+                           "enabled; reading via " + paths.joined(separator: " and "))
+    }
 
     // MARK: - live typing
 

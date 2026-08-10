@@ -32,6 +32,11 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         /// system activation dialog — that is why it lives behind a menu click.
         public var enableLiveTyping: () -> Void
         public var toggleLiveTyping: () -> Void
+        /// Run the context-awareness consent flow (sheet → optional AX prompt
+        /// → flip). Behind a menu click for the same reason as the row above.
+        public var enableContextAwareness: () -> Void
+        /// Switch context awareness off (on always re-runs the consent flow).
+        public var toggleContextAwareness: () -> Void
         /// Defaults to the general pasteboard; injectable so tests and the
         /// integration layer can route it.
         public var copyToClipboard: (String) -> Void
@@ -53,6 +58,8 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
                     polishLast: @escaping (String) -> Void = { _ in },
                     enableLiveTyping: @escaping () -> Void = {},
                     toggleLiveTyping: @escaping () -> Void = {},
+                    enableContextAwareness: @escaping () -> Void = {},
+                    toggleContextAwareness: @escaping () -> Void = {},
                     copyToClipboard: @escaping (String) -> Void = StatusMenu.copyToPasteboard,
                     pasteLast: @escaping () -> Void,
                     openDictionary: @escaping () -> Void,
@@ -69,6 +76,8 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
             self.polishLast = polishLast
             self.enableLiveTyping = enableLiveTyping
             self.toggleLiveTyping = toggleLiveTyping
+            self.enableContextAwareness = enableContextAwareness
+            self.toggleContextAwareness = toggleContextAwareness
             self.copyToClipboard = copyToClipboard
             self.pasteLast = pasteLast
             self.openDictionary = openDictionary
@@ -235,6 +244,12 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
             rebuild()
         case .toggleLiveTyping:
             actions.toggleLiveTyping()
+            rebuild()
+        case .enableContextAwareness:
+            actions.enableContextAwareness()
+            rebuild()
+        case .toggleContextAwareness:
+            actions.toggleContextAwareness()
             rebuild()
         case .copyRecent:
             if let text = sender.representedObject as? String, !text.isEmpty {
