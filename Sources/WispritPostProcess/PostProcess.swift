@@ -1,6 +1,8 @@
 // Verbatim-first Tier-1 cleanup: deterministic, fast (<20 ms), no LLM.
 //
-// 1:1 port of wisprit/postprocess.py. The guiding principle — answering Wispr
+// 1:1 port of wisprit/postprocess.py, plus one native-only stage the Python
+// never had (#6, spoken emoji — docs/notes/deviations.md). The guiding
+// principle — answering Wispr
 // Flow's most common complaint that it *rewrites what you said* — is
 // **conservatism**: only touch text when the intent is unambiguous. Anything
 // uncertain passes through verbatim.
@@ -13,8 +15,13 @@
 // 4. Voice commands — "new line" / "new paragraph" and trailing punctuation
 //    words ("period", "question mark" …).
 // 5. Explicit self-correction — "X no wait Y" / "… scratch that Y" -> keep Y.
-// 6. Whitespace / punctuation spacing cleanup.
-// 7. Optional trailing period + configured leading-space policy.
+// 6. Spoken emoji — "fire emoji" -> 🔥 (config-gated). Same family as #4, one
+//    step later: it runs AFTER self-correction on purpose, because the
+//    noun-phrase guard treats "that" as a determiner, and "that" is also the
+//    self-correction marker, so "nope scratch that fire emoji" only reads as a
+//    directive once #5 has resolved it. See `applyEmoji`.
+// 7. Whitespace / punctuation spacing cleanup.
+// 8. Optional trailing period + configured leading-space policy.
 //
 // Deliberately **not** done: converting spelled-out numbers to digits. That is
 // exactly the kind of surprising edit ("one more" -> "1 more") that erodes
@@ -27,7 +34,8 @@ import WispritKit
 
 /// Config flags consumed by the pipeline; mirrors the three `settings` keys the
 /// Python `process()` reads (`filler_removal`, `ensure_sentence_period`,
-/// `leading_space`).
+/// `leading_space`) plus one native-only key appended post-Python
+/// (`emoji_commands`, docs/notes/deviations.md §"Spoken emoji directives").
 public struct PostProcessOptions: Sendable, Equatable {
     /// Space before inserted text. Any unrecognized value behaves as `.auto`,
     /// matching the Python `_apply_leading_space` fall-through.
@@ -38,13 +46,18 @@ public struct PostProcessOptions: Sendable, Equatable {
     public var fillerRemoval: Bool
     public var ensureSentencePeriod: Bool
     public var leadingSpace: LeadingSpace
+    /// Spoken emoji directives ("fire emoji" -> 🔥). Post-Python addition, so it
+    /// is the LAST init parameter: every existing call site keeps compiling.
+    public var emojiCommands: Bool
 
     public init(fillerRemoval: Bool = true,
                 ensureSentencePeriod: Bool = false,
-                leadingSpace: LeadingSpace = .auto) {
+                leadingSpace: LeadingSpace = .auto,
+                emojiCommands: Bool = true) {
         self.fillerRemoval = fillerRemoval
         self.ensureSentencePeriod = ensureSentencePeriod
         self.leadingSpace = leadingSpace
+        self.emojiCommands = emojiCommands
     }
 
     /// Mirrors the Python `settings.get(key)` signature the app context passes
@@ -62,6 +75,7 @@ public struct PostProcessOptions: Sendable, Equatable {
         self.fillerRemoval = bool("filler_removal", true)
         self.ensureSentencePeriod = bool("ensure_sentence_period", false)
         self.leadingSpace = (get("leading_space") as? String).flatMap(LeadingSpace.init(rawValue:)) ?? .auto
+        self.emojiCommands = bool("emoji_commands", true)
     }
 }
 
@@ -85,6 +99,7 @@ public enum PostProcess {
         text = joinURL(text)
         text = voiceCommands(text)
         text = selfCorrect(text)
+        if options.emojiCommands { text = applyEmoji(text) }
         text = cleanupWhitespace(text)
         if options.ensureSentencePeriod, let last = text.unicodeScalars.last,
            !Self.sentenceEnders.contains(last) {
@@ -151,6 +166,56 @@ private let trailingPunct: [(Rx, String)] = [
     (Rx(#"\s+(?:full\s+stop)[.\s]*$"#), "."),
 ]
 
+// Spoken emoji directives — "<name> emoji" -> the glyph. See
+// `PostProcess.emojiTable` for the curated names and `applyEmoji` for the
+// guards and the stage-ordering argument; the pieces live here, with the other
+// voice-command constants, because the directive is one of them — it just runs
+// one step later than the rest of the family.
+//
+// Two deliberate narrowings versus the other command regexes:
+//   * the gaps are `[ \t]+`, not `\s+`, so a directive can never reach across a
+//     line break stage 4 just inserted ("fire new line emoji" stays a break);
+//   * `(?<!-)` keeps a hyphen-glued fragment ("re-fire emoji") out — the name
+//     has to be a whole spoken word, which is also the first line of defense
+//     against a spelled run.
+// The leading word is captured ONLY to run the noun-phrase guard; unlike the
+// line-break rewrite (where the break legitimately replaces the whitespace) it
+// is re-emitted byte-for-byte with its gap, so the directive is a pure in-place
+// substitution and surrounding spacing/punctuation survives untouched.
+private let emojiNamePattern = PostProcess.emojiTable
+    .map(\.name)
+    // Longest first so "check mark emoji" beats "check", "one hundred emoji"
+    // beats "hundred", "red heart emoji" beats "heart". Ties broken
+    // alphabetically: `sorted` is not stable, and the pattern must be.
+    .sorted { ($0.count, $1) > ($1.count, $0) }
+    .map { $0.replacingOccurrences(of: " ", with: #"[ \t]+"#) }
+    .joined(separator: "|")
+private let emojiRx = Rx(#"(?:\b(\w+)([ \t]+))??(?<!-)\b("# + emojiNamePattern + #")[ \t]+emoji\b"#)
+private let emojiByName: [String: String] = Dictionary(
+    PostProcess.emojiTable.map { ($0.name, $0.glyph) }, uniquingKeysWith: { first, _ in first })
+private let emojiSpaceRx = Rx(#"\s+"#)
+
+// Words that turn the directive into a noun phrase: "the fire emoji", "a heart
+// emoji", "that rocket emoji", "which fire emoji" — the user is TALKING ABOUT
+// the emoji, so it stays verbatim. Reuses the line-break determiner set (the
+// ambiguity is identical) plus interrogatives/demonstratives and the
+// prepositions that make "emoji" the object of the sentence rather than an
+// instruction to type one.
+private let emojiSubjectMarkers: Set<String> = determiners.union([
+    "which", "what", "whose", "these", "those", "such",
+    "of", "about", "with", "without", "like", "for", "from", "by",
+    "in", "on", "at", "to", "between", "using",
+])
+
+// A spelled run is an uppercase token of letters and separators — the same
+// invariant `WispritRefine.RefineGuards.hasLetterRun` keys on (kept as a local
+// copy: this module depends on WispritKit only). Post-corrections a run should
+// never reach here, so this is an assertion rather than a workhorse: if the
+// text around the match still looks spelled out, we do not touch it.
+private let letterRunRx = Rx(#"^[A-Z][A-Z\-.]{2,}[A-Z]$"#, [])
+private let letterRunEdgePunctuation =
+    CharacterSet(charactersIn: ",.!?;:\"'\u{201C}\u{201D}\u{2018}\u{2019}()[]{}")
+
 // Self-correction: drop the single word before "no wait" (+ the marker).
 private let noWaitRx = Rx(#"\b[\w']+[,]?\s+no\s+wait[,]?\s+"#)
 // "scratch that" — keep only what follows the LAST occurrence (greedy).
@@ -167,6 +232,59 @@ private let spaceBeforePunctRx = Rx(#"\s+([,.;:!?])"#, [])
 private let multiSpaceRx = Rx(#"[ \t]{2,}"#, [])
 private let spaceAroundNewlineRx = Rx(#"[ \t]*\n[ \t]*"#, [])
 private let manyNewlinesRx = Rx(#"\n{3,}"#, [])
+
+// MARK: - Spoken emoji table
+
+extension PostProcess {
+    /// The curated spoken-emoji vocabulary, `(spoken name, glyph)`.
+    ///
+    /// **Closed by design.** An open "any emoji name" mapping would fire on
+    /// ordinary speech; the point of the stage is that saying "fire emoji" is
+    /// as explicit an instruction as saying "new line". Names are stored
+    /// lowercase with single spaces — the compiled pattern relaxes the spaces
+    /// and matches case-insensitively.
+    ///
+    /// Several names deliberately share a glyph (the recognizer's transcript
+    /// depends on what the user actually said: "heart"/"red heart",
+    /// "laughing"/"joy", "party"/"tada", "hundred"/"one hundred",
+    /// "folded hands"/"pray"). Internal (not private) so the tests can assert
+    /// the shipped table itself, which is the contract users learn.
+    static let emojiTable: [(name: String, glyph: String)] = [
+        ("fire", "🔥"),
+        ("thumbs up", "👍"),
+        ("thumbs down", "👎"),
+        ("heart", "❤️"),
+        ("red heart", "❤️"),
+        ("rocket", "🚀"),
+        ("check mark", "✅"),
+        ("check", "✅"),
+        ("cross mark", "❌"),
+        ("laughing", "😂"),
+        ("joy", "😂"),
+        ("party", "🎉"),
+        ("tada", "🎉"),
+        ("eyes", "👀"),
+        ("hundred", "💯"),
+        ("one hundred", "💯"),
+        ("clap", "👏"),
+        ("folded hands", "🙏"),
+        ("pray", "🙏"),
+        ("thinking", "🤔"),
+        ("smile", "😊"),
+        ("wink", "😉"),
+        ("sob", "😭"),
+        ("skull", "💀"),
+        ("warning", "⚠️"),
+        ("star", "⭐"),
+        ("sparkles", "✨"),
+        ("muscle", "💪"),
+        ("wave", "👋"),
+        ("salute", "🫡"),
+        ("handshake", "🤝"),
+        ("light bulb", "💡"),
+        ("bullseye", "🎯"),
+    ]
+}
 
 // MARK: - Stages
 
@@ -219,6 +337,74 @@ extension PostProcess {
             if let next, continuations.contains(next.lowercased()) { return nil }
             let brk = kind == "paragraph" ? "\n\n" : "\n"
             return (prev.map { $0 + " " } ?? "") + brk + (next.map { " " + $0 } ?? "")
+        }
+    }
+
+    /// Spoken emoji: "<name> emoji" -> the glyph, for the curated
+    /// `emojiTable` only. The word "emoji" is REQUIRED — a bare "fire" is
+    /// speech, "fire emoji" is a directive — which is what keeps this in the
+    /// same family as "new line" rather than the guessing the pipeline refuses
+    /// to do.
+    ///
+    /// Two guards, both erring toward verbatim:
+    ///  * a determiner / interrogative / preposition in front means the user is
+    ///    *talking about* the emoji ("the fire emoji", "a heart emoji",
+    ///    "an eyes emoji", "that fire emoji", "which fire emoji") — untouched;
+    ///  * a spelled letter run overlapping the match ("F-I-R-E emoji", a glued
+    ///    all-caps "FIRE EMOJI") is left alone, so the stage can never eat a
+    ///    spelling the user dictated letter by letter.
+    ///
+    /// Position in the pipeline (stage 6), and why it is exactly there:
+    ///  * it is an explicit spoken directive, so it belongs with "new line" and
+    ///    the trailing punctuation words rather than off in a stage of its own —
+    ///    it runs immediately after that family, gated by `emoji_commands`;
+    ///  * after the dictionary (stage 2), so the user's own vocabulary has been
+    ///    enforced on the words being read;
+    ///  * after the word-shaped commands (stage 4), so every `\w`/`\b` pattern
+    ///    there only ever sees the original words — a glyph substituted earlier
+    ///    could silently perturb them;
+    ///  * after self-correction (stage 5), because the guard word "that" is also
+    ///    the "scratch that" marker: run earlier, "nope scratch that fire emoji"
+    ///    reads as the noun phrase "that fire emoji", is (correctly, at that
+    ///    point) left verbatim, and the user gets the literal words "fire emoji"
+    ///    after the marker is stripped. Running here, self-correction resolves
+    ///    first and the directive fires;
+    ///  * before whitespace cleanup (stage 7), so that stage tidies the seam,
+    ///    exactly as the line-break rewrite relies on.
+    static func applyEmoji(_ text: String) -> String {
+        emojiRx.replacing(in: text) { m, ns in
+            let prev = m.group(1, ns)
+            let gap = m.group(2, ns) ?? ""
+            let name = m.group(3, ns) ?? ""
+            if let prev, emojiSubjectMarkers.contains(prev.lowercased()) { return nil }
+            if touchesLetterRun(m.range, ns) { return nil }
+            // Unknown name is unreachable (the pattern is built from the table)
+            // but stays a verbatim pass-through rather than a crash.
+            guard let glyph = emojiByName[normalizedEmojiName(name)] else { return nil }
+            return (prev ?? "") + gap + glyph
+        }
+    }
+
+    /// Lowercase + single-space, so "Thumbs   Up" finds "thumbs up".
+    static func normalizedEmojiName(_ raw: String) -> String {
+        emojiSpaceRx.replacingAll(in: raw.lowercased(), with: " ")
+    }
+
+    /// True when any whitespace-delimited token overlapping `range` is a
+    /// spelled run. The match is expanded to token boundaries first, so a
+    /// separator-glued fragment is judged by the run it belongs to.
+    static func touchesLetterRun(_ range: NSRange, _ ns: NSString) -> Bool {
+        func isSpace(_ index: Int) -> Bool {
+            guard let scalar = Unicode.Scalar(ns.character(at: index)) else { return false }
+            return CharacterSet.whitespacesAndNewlines.contains(scalar)
+        }
+        var start = range.location
+        var end = range.location + range.length
+        while start > 0, !isSpace(start - 1) { start -= 1 }
+        while end < ns.length, !isSpace(end) { end += 1 }
+        let region = ns.substring(with: NSRange(location: start, length: end - start))
+        return region.split(whereSeparator: { $0.isWhitespace }).contains {
+            letterRunRx.matches(String($0).trimmingCharacters(in: letterRunEdgePunctuation))
         }
     }
 

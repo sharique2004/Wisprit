@@ -10,6 +10,10 @@ import Foundation
 /// (the generator drives `wisprit.settings.Settings`, `wisprit.history.History`
 /// and a verbatim copy of `session.py::_log_metrics` against a temp state dir,
 /// then prints the resulting bytes / sqlite_master rows / JSONL lines.)
+///
+/// The one exception is the native settings appendix — `live_typing`,
+/// `im_selection_policy`, `emoji_commands` — which post-dates the Python and is
+/// appended here by hand, in `Settings.defaults` order, whenever a key is added.
 enum Golden {
 
     // MARK: settings
@@ -45,7 +49,8 @@ enum Golden {
       "paste_restore_delay_ms": 500,
       "enabled": false,
       "live_typing": false,
-      "im_selection_policy": "warm"
+      "im_selection_policy": "warm",
+      "emoji_commands": true
     }
 
     """
@@ -85,6 +90,7 @@ enum Golden {
       "enabled": true,
       "live_typing": false,
       "im_selection_policy": "warm",
+      "emoji_commands": true,
       "future_key": {
         "a": [
           1,

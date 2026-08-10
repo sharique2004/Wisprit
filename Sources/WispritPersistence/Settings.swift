@@ -34,6 +34,7 @@ public enum SettingsKey {
     public static let enabled = "enabled"
     public static let liveTyping = "live_typing"
     public static let imSelectionPolicy = "im_selection_policy"
+    public static let emojiCommands = "emoji_commands"
 }
 
 public final class Settings: @unchecked Sendable {
@@ -73,6 +74,7 @@ public final class Settings: @unchecked Sendable {
             // Appended post-Python (append-only: mid-list inserts reorder every user's file).
             (SettingsKey.liveTyping, .bool(false)),                 // IM rungs stay off until onboarding
             (SettingsKey.imSelectionPolicy, .string("warm")),       // "warm" | "per_utterance"
+            (SettingsKey.emojiCommands, .bool(true)),               // spoken "<name> emoji" -> glyph
         ])
     }
 
@@ -204,6 +206,7 @@ public final class Settings: @unchecked Sendable {
     public var mlxModel: String { string(SettingsKey.mlxModel) ?? defaultString(SettingsKey.mlxModel) }
     public var pasteRestoreDelayMs: Int { int(SettingsKey.pasteRestoreDelayMs) ?? defaultInt(SettingsKey.pasteRestoreDelayMs) }
     public var enabled: Bool { bool(SettingsKey.enabled) ?? defaultBool(SettingsKey.enabled) }
+    public var emojiCommands: Bool { bool(SettingsKey.emojiCommands) ?? defaultBool(SettingsKey.emojiCommands) }
 
     // MARK: - Writing
 

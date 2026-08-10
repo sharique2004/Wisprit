@@ -36,7 +36,7 @@ final class SettingsTests: XCTestCase {
             "ai_cleanup_max_words", "ai_cleanup_timeout_ms", "mlx_model",
             "paste_restore_delay_ms", "enabled",
             // native appendices (post-Python; keep appending, never insert)
-            "live_typing", "im_selection_policy",
+            "live_typing", "im_selection_policy", "emoji_commands",
         ])
     }
 
@@ -64,6 +64,7 @@ final class SettingsTests: XCTestCase {
         XCTAssertEqual(s.mlxModel, "mlx-community/whisper-large-v3-turbo")
         XCTAssertEqual(s.pasteRestoreDelayMs, 500)
         XCTAssertTrue(s.enabled)
+        XCTAssertTrue(s.emojiCommands)
     }
 
     // MARK: golden parity with the Python writer

@@ -41,7 +41,7 @@ Stage names are `SessionController.finalizeUtterance` order:
 | `raw` | the engine's final text |
 | `corrected` | + spoken-spelling corrections (`SpokenSpellingCorrector` → `CorrectionApplier`) |
 | `refined` | + the Apple Intelligence cage (`Refiner`); identical to `corrected` when `refine=off` |
-| `final` | + the seven deterministic post-process stages, with the dictionary when `dict=on` |
+| `final` | + the eight deterministic post-process stages, with the dictionary when `dict=on` |
 
 ## Normalization profiles
 

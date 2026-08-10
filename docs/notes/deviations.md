@@ -71,3 +71,39 @@ result, which is the resilience case the SPEC intended.
 - **"Polish Last with Claude" removed by product decision (permanent).**
   User directive 2026-08-05: Apple Intelligence only, zero network calls.
   Replacement is `WispritPolish` (FoundationModels, 4 modes, eval battery).
+
+## Spoken emoji directives — a stage SPEC never described (2026-08-09)
+
+SPEC §postprocessing Tier-1 #4 lists the spoken-form directives as email/URL
+joining, number formatting and "new line"/"period". **`WispritPostProcess` now
+also ships a spoken-emoji stage** — "fantastic work fire emoji" → "fantastic
+work 🔥" — over a closed 33-name table, regex only, no model. It is post-Python:
+`postprocess.py` has no equivalent, so this is an addition rather than a
+divergence, and the Python-generated `Goldens.swift` / `FuzzGoldens.swift` are
+untouched (they remain literal Python output; the new behavior is pinned by the
+hand-written `EmojiCommandTests.swift`, the same precedent the `has_letter_run`
+era set for native-only behavior).
+
+Three decisions worth recording:
+
+- **The word "emoji" is required.** A bare "fire" never converts. This is what
+  keeps the stage inside the verbatim-first philosophy: like "new line", it is
+  an explicit spoken directive, not an inference about what the user meant.
+- **It runs after self-correction, not inside the voice-command stage** (stage 6
+  of 8, immediately after the family it belongs to). The noun-phrase guard treats
+  "that" as a determiner and "that" is also the "scratch that" marker, so run any
+  earlier, "nope scratch that fire emoji" reads as the noun phrase "that fire
+  emoji", is left verbatim, and the user gets the literal words "fire emoji" once
+  the marker is stripped. Sequenced after stage 5, self-correction resolves first
+  and the directive fires.
+- **Guards err toward verbatim, twice.** A determiner / interrogative /
+  preposition in front means the user is *talking about* the emoji ("the fire
+  emoji", "a heart emoji", "an eyes emoji", "that fire emoji") — untouched. And a
+  spelled letter run overlapping the match is skipped, which as a side effect
+  means a glued all-caps "THUMBS UP EMOJI" stays verbatim: an all-caps token is
+  formally identical to what ITN emits for a dictated spelling, and the stage
+  must never eat one. Mixed-case "Thumbs Up Emoji" converts.
+
+Gated by `emoji_commands` (default `true`), the fourth key `PostProcessOptions`
+reads and the third native appendix in `Settings.defaults` (append-only, after
+`im_selection_policy`).
