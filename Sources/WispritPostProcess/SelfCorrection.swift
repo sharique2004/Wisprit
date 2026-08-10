@@ -32,6 +32,17 @@
 //      function word the deletion tends to leave behind ("… to Bob no wait to
 //      Alice" -> "… to to Alice") collapsed afterwards, exactly as before.
 //
+//      CLAUSE RESTART, the general form of tier (b): when the text after the
+//      marker RE-BEGINS the clause in front of it, the user restarted the
+//      clause and the restart replaces it wholesale — "I want to meet Vivek,
+//      no actually I want it Sharique" -> "I want it Sharique". The evidence
+//      requirement — B shares A's first two tokens (case-insensitive, fillers
+//      skipped), or its single first token when that token is a non-lexicon
+//      content word — is what makes wholesale deletion safe on ARBITRARY
+//      content: a name works exactly like a weekday, with no class list to
+//      maintain. No shared re-beginning, no clause repair; the single-word
+//      span above still applies under its own rules.
+//
 // The two tiers are one regex and one sweep, not two passes, because tier (a)
 // has to be able to *veto* tier (b): when both sides of a marker are
 // closed-class items of DIFFERENT classes the correction does not type-check
@@ -39,7 +50,10 @@
 // time), which is the definition of ambiguous, so the joint passes verbatim
 // and no other rule gets a second look at it. The one marker exempt from that
 // veto is "no wait": its behavior is a Python-parity contract pinned by
-// `Goldens.swift`, so it keeps deleting whatever it is handed.
+// `Goldens.swift`, so it keeps deleting whatever it is handed — inside the
+// parity domain. Python's comma-only gap never crossed a sentence terminator,
+// so across one (which this engine now permits for the "no"-anchored markers)
+// "no wait" obeys the same vetoes as "no actually".
 
 import Foundation
 
@@ -129,15 +143,30 @@ public enum SelfCorrection {
                                                   length: match.range.location - cursor))
                 next = y.location
             } else if let marker = generalMarker(match),
-                      isCorrection(marker, match, x, ns, xClass, yClass) {
-                // Tier (b). The Python span: the single word before the marker,
-                // the marker, and the joint whitespace. Y — which this pattern
-                // consumed and the Python one never did — is re-emitted
-                // verbatim, so the result is identical either way.
-                let drop = lastTokenStart(x, ns)
-                out += ns.substring(with: NSRange(location: cursor, length: drop - cursor))
-                if y.location != NSNotFound { out += ns.substring(with: y) }
-                next = match.range.location + match.range.length
+                      let plan = repairPlan(marker, x, y, ns, xClass, yClass,
+                                            matchEnd: match.range.location + match.range.length,
+                                            cursor: cursor) {
+                switch plan {
+                case .restart(let aStart, let bStart):
+                    // Clause restart. B re-begins the clause that ends at X,
+                    // so B replaces it wholesale: everything from the clause
+                    // start through the marker goes, and B — casing,
+                    // punctuation and all — stays verbatim.
+                    out += ns.substring(with: NSRange(location: cursor,
+                                                      length: aStart - cursor))
+                    next = bStart
+                case .span:
+                    // Tier (b). The Python span: the single word before the
+                    // marker, the marker, and the joint whitespace. Y — which
+                    // this pattern consumed and the Python one never did — is
+                    // re-emitted verbatim, so the result is identical either
+                    // way.
+                    let drop = lastTokenStart(x, ns)
+                    out += ns.substring(with: NSRange(location: cursor,
+                                                      length: drop - cursor))
+                    if y.location != NSNotFound { out += ns.substring(with: y) }
+                    next = match.range.location + match.range.length
+                }
             } else {
                 // Ambiguous. Verbatim, and resume just past X so a later joint
                 // in the same sentence still gets its own look — but not so far
@@ -153,27 +182,58 @@ public enum SelfCorrection {
         return out
     }
 
-    /// Whether a general marker may delete the word in front of it.
-    private static func isCorrection(_ marker: GeneralMarker, _ m: NSTextCheckingResult,
-                                     _ x: NSRange, _ ns: NSString,
-                                     _ xClass: Int?, _ yClass: Int?) -> Bool {
-        // Sentence-boundary veto, all general markers including "no wait": the
-        // widened gap exists so a CLOSED-CLASS pair can survive the ASR's
-        // hesitation period ("…Thursday, umm. No, actually Friday"). A general
-        // marker reaching back across a real sentence ("…is fine. I mean it")
-        // is not a correction — and Python's comma-only gap could never match
-        // one, so refusing here is what parity actually means.
-        let markerRange = m.range(at: markerGroup(for: marker))
-        if markerRange.location != NSNotFound {
-            let xEnd = x.location + x.length
-            if markerRange.location > xEnd {
-                let between = ns.substring(with: NSRange(location: xEnd,
-                                                         length: markerRange.location - xEnd))
-                if between.contains(where: { ".!?…".contains($0) }) { return false }
-            }
+    /// What a general marker may do to a joint its vetoes allow — repair the
+    /// whole clause, delete the single-word span — or nil when they refuse.
+    private static func repairPlan(_ marker: GeneralMarker, _ x: NSRange, _ y: NSRange,
+                                   _ ns: NSString, _ xClass: Int?, _ yClass: Int?,
+                                   matchEnd: Int, cursor: Int) -> Repair? {
+        let xEnd = x.location + x.length
+        // B — the replacement text — starts at Y when the pattern consumed a
+        // closed-class Y, otherwise right after the marker's trailing gap.
+        let bStart = y.location == NSNotFound ? matchEnd : y.location
+        let crossed = terminatorCount(ns, from: xEnd, to: bStart)
+        guard isCorrection(marker, x, ns, xClass, yClass, crossed: crossed) else { return nil }
+        if let aStart = restartStart(x, bStart: bStart, ns, floor: cursor) {
+            return .restart(aStart: aStart, bStart: bStart)
         }
-        // "no wait" is the Python marker; its span is a parity contract.
-        guard marker != .noWait else { return true }
+        // Across a terminator the span may only replace with a content word:
+        // a clause opener after "No," is a denial of the previous sentence,
+        // not a replacement ("I finished the report. No, actually I think we
+        // should celebrate." stays verbatim).
+        if crossed > 0 {
+            guard let head = restartTokens(ns, from: bStart, to: ns.length,
+                                           stopAtSentenceEnd: true, limit: 1).first,
+                  !hedgeLeaders.contains(head.text) else { return nil }
+        }
+        return .span
+    }
+
+    private enum Repair {
+        case restart(aStart: Int, bStart: Int)
+        case span
+    }
+
+    /// Whether a general marker may correct at this joint at all. `crossed` is
+    /// the number of sentence terminators between X and B.
+    private static func isCorrection(_ marker: GeneralMarker, _ x: NSRange, _ ns: NSString,
+                                     _ xClass: Int?, _ yClass: Int?, crossed: Int) -> Bool {
+        // Sentence-boundary veto, narrowed by anchor. The "no"-anchored
+        // markers may cross ONE terminator: the recognizer routinely
+        // punctuates the pause before a correction ("Vivek. No, actually …"),
+        // and a "No," opening the next sentence is a denial/correction
+        // discourse cue, not prose. "I mean" is the hedge that caused the
+        // original regression ("…is fine. I mean it.") and still refuses every
+        // terminator — Python's comma-only gap could never match one, so
+        // refusing there is what parity actually means.
+        switch marker {
+        case .iMean: guard crossed == 0 else { return false }
+        case .noWait, .noActually: guard crossed <= 1 else { return false }
+        }
+        // "no wait" is the Python marker and its span is a parity contract —
+        // but the parity domain is what Python could match, and that never
+        // crossed a terminator. Inside it, "no wait" keeps deleting whatever
+        // it is handed; across one, it obeys the same vetoes as "no actually".
+        if marker == .noWait, crossed == 0 { return true }
         // Cross-class veto — tier (a) looked at this joint and refused it.
         if xClass != nil, yClass != nil { return false }
         // Discourse-hedge veto: "no actually" and "I mean" are also ordinary
@@ -188,6 +248,102 @@ public enum SelfCorrection {
             if hedgeLeaders.contains(leader.lowercased()) { return false }
         }
         return true
+    }
+
+    /// The clause-restart evidence check: start of the deleted span when the
+    /// text after the marker re-begins the clause that ends at X, nil when the
+    /// evidence is missing. A = the clause ending at X — from the last
+    /// sentence start (or `floor`, the sweep cursor, so a restart can never
+    /// reach back into text an earlier joint already resolved), capped at
+    /// `restartWindow` words. B = what follows the marker, up to its own
+    /// sentence end. The deleted span is [aStart, bStart), which by
+    /// construction crosses at most the one terminator the narrowed veto
+    /// already allowed.
+    private static func restartStart(_ x: NSRange, bStart: Int, _ ns: NSString,
+                                     floor: Int) -> Int? {
+        var clauseStart = floor
+        var i = x.location
+        while i > floor {
+            let c = ns.character(at: i - 1)
+            if isSentenceTerminator(c) || c == 0x0A || c == 0x0D {
+                clauseStart = i
+                break
+            }
+            i -= 1
+        }
+        let a = Array(restartTokens(ns, from: clauseStart, to: x.location + x.length,
+                                    stopAtSentenceEnd: false, limit: Int.max)
+            .suffix(restartWindow))
+        guard let first = a.first else { return nil }
+        let b = restartTokens(ns, from: bStart, to: ns.length,
+                              stopAtSentenceEnd: true, limit: a.count)
+        var shared = 0
+        for (ta, tb) in zip(a, b) {
+            guard ta.text == tb.text else { break }
+            shared += 1
+        }
+        if shared >= 2 { return first.start }
+        // One shared token is enough only when it is a non-lexicon content
+        // word — a name re-begins a clause the way "I" or "the" never can.
+        if shared == 1, !restartFunctionWords.contains(a[0].text),
+           !closedClassWordRx.matches(a[0].text) { return first.start }
+        return nil
+    }
+
+    /// Upper bound, in words, on the clause a restart may delete.
+    static let restartWindow = 12
+
+    /// Whitespace-delimited tokens of `ns` in `from..<to`, fillers skipped,
+    /// each carrying its start offset and comparison form (lowercased, edge
+    /// punctuation stripped, curly apostrophe normalized). `stopAtSentenceEnd`
+    /// cuts the list at the first token that closes a sentence — B never reads
+    /// past its own sentence. `limit` bounds the work, not the meaning.
+    private static func restartTokens(_ ns: NSString, from: Int, to: Int,
+                                      stopAtSentenceEnd: Bool,
+                                      limit: Int) -> [(start: Int, text: String)] {
+        var tokens: [(start: Int, text: String)] = []
+        var i = from
+        while i < to, tokens.count < limit {
+            while i < to, isWhitespace(ns.character(at: i)) { i += 1 }
+            guard i < to else { break }
+            let start = i
+            var closesSentence = false
+            while i < to, !isWhitespace(ns.character(at: i)) {
+                if isSentenceTerminator(ns.character(at: i)) { closesSentence = true }
+                i += 1
+            }
+            let text = comparisonForm(ns.substring(with: NSRange(location: start,
+                                                                 length: i - start)))
+            if !text.isEmpty, !fillerSet.contains(text) {
+                tokens.append((start: start, text: text))
+            }
+            if stopAtSentenceEnd, closesSentence { break }
+        }
+        return tokens
+    }
+
+    private static func comparisonForm(_ raw: String) -> String {
+        raw.lowercased()
+            .replacingOccurrences(of: "\u{2019}", with: "'")
+            .trimmingCharacters(in: comparisonTrim)
+    }
+
+    private static func terminatorCount(_ ns: NSString, from: Int, to: Int) -> Int {
+        var count = 0
+        for i in from..<to where isSentenceTerminator(ns.character(at: i)) { count += 1 }
+        return count
+    }
+
+    private static func isSentenceTerminator(_ c: unichar) -> Bool {
+        switch c {
+        case 0x2E, 0x21, 0x3F, 0x2026: return true  // . ! ? …
+        default: return false
+        }
+    }
+
+    private static func isWhitespace(_ c: unichar) -> Bool {
+        guard let scalar = Unicode.Scalar(c) else { return false }
+        return CharacterSet.whitespacesAndNewlines.contains(scalar)
     }
 
     /// Start of the last whitespace-delimited token inside `range` — the word
@@ -208,16 +364,6 @@ public enum SelfCorrection {
     private static func classIndex(_ m: NSTextCheckingResult, _ base: Int) -> Int? {
         for i in 0..<classCount where m.range(at: base + i).location != NSNotFound { return i }
         return nil
-    }
-
-    /// The capture-group index of a general marker — the inverse of
-    /// `generalMarker(_:)`, for reading the matched marker's range back out.
-    private static func markerGroup(for marker: GeneralMarker) -> Int {
-        switch marker {
-        case .noWait: return markerNoWait
-        case .noActually: return markerNoActually
-        case .iMean: return markerIMean
-        }
     }
 
     private static func generalMarker(_ m: NSTextCheckingResult) -> GeneralMarker? {
@@ -383,10 +529,48 @@ private let dupRx = Rx(#"\b(to|the|a|an|of|in|on|at|and|or|for|with|is|was|it|i)
 
 /// Words that make "no actually" / "I mean" a discourse hedge rather than a
 /// correction. Deliberately small and function-word-only: anything a user would
-/// actually be replacing ("Bob", "Thursday", "three") is a content word.
+/// actually be replacing ("Bob", "Thursday", "three") is a content word. The
+/// one exception to function-word-only is the say-family: a marker DIRECTLY
+/// after a verb of saying means the "no" was the thing said — "I said no,
+/// actually, and I stand by it" is the speaker's answer, not a correction —
+/// while a real correction after reported speech keeps its content leader
+/// ("I said Bob no actually Alice" corrects on "Bob", never on "said").
 private let hedgeLeaders: Set<String> = [
     "so", "well", "yeah", "yea", "yes", "no", "nope", "but", "and", "or",
     "ok", "okay", "like", "what", "that", "which", "who", "whom",
     "know", "see", "if", "then", "hey", "look", "right", "sure",
     "i", "you", "he", "she", "it", "we", "they",
+    "say", "says", "said", "saying",
 ]
+
+// MARK: - Clause-restart vocabulary
+
+/// The pipeline's filler list as a set, for the restart tokenizer — a filler is
+/// never restart evidence and never a compared token.
+private let fillerSet = Set(fillerWords)
+
+/// Edge punctuation stripped from a token before comparison. Inverted
+/// alphanumerics so quotes, commas and terminators go while an interior
+/// apostrophe ("let's") stays.
+private let comparisonTrim = CharacterSet.alphanumerics.inverted
+
+/// The function-word lexicon for the ONE-token restart rule: a single shared
+/// token only counts as restart evidence when it is a content word — a name,
+/// not a pronoun or determiner, because "I …" re-begins half the clauses in
+/// English by accident. Two shared tokens are evidence regardless, so this
+/// list only has to catch the words that open clauses on their own.
+private let restartFunctionWords: Set<String> = hedgeLeaders.union([
+    "the", "a", "an", "this", "these", "those", "there", "here",
+    "to", "of", "in", "on", "at", "for", "with", "from", "by", "as",
+    "is", "are", "was", "were", "be", "been", "am",
+    "do", "does", "did", "have", "has", "had",
+    "will", "would", "can", "could", "should", "shall", "may", "might", "must",
+    "not", "my", "your", "our", "their", "his", "her", "its",
+    "me", "him", "us", "them", "when", "where", "why", "how",
+])
+
+/// The closed-class vocabulary as an anchored probe — the rest of the engine's
+/// "lexicon". A weekday or number shared by accident is not the restart
+/// evidence a name is; those corrections belong to tier (a) and its classes.
+private let closedClassWordRx = Rx("^(?:" + clockPattern + "|" + numberPattern + "|"
+    + weekdayPattern + "|" + monthPattern + "|" + relativeDayPattern + ")$")

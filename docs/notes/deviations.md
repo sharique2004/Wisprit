@@ -175,6 +175,70 @@ are untouched and still literal Python output; the new behavior is pinned by
   longer than 2 000 characters are shown verbatim rather than scanned on the
   session thread; finalize corrects them a moment later either way.
 
+## Refine prompt revision: spoken self-correction rule (2026-08-10)
+
+The eval-locked refine prompt gained ONE rule (new rule 4; old rules 4–6
+renumbered 5–7, none reworded) for the open-ended remainder of spoken
+self-correction — arbitrary words under weak cues, the class the deterministic
+`SelfCorrection` engine must not guess at. Sanctioned path followed:
+`RefineInstructions.text` and `packaging/wisprit_refine.swift` changed
+together (PromptLockTests green, all six load-bearing anchors intact), battery
+re-run before and after via `Wisprit eval refine --repeat 3` (greedy sampling
+makes repeats deterministic).
+
+**Prompt sha changed — scoreboard rows stamp it.** Every scoreboard row
+carries `promptSha256` (sha256 of `RefineInstructions.text`); rows recorded
+before this revision carry `9f337b6c…`, rows from now on carry `b2a089b5…`.
+A battery/WER comparison across that boundary is a comparison across prompts.
+
+**Battery grew 36 → 40 cases** (`self-correction` category): arbitrary-word
+correction under a weak cue ("…marketing sorry to finance"), a mid-sentence
+restart with no shared prefix, the 2026-08-09 Vivek/Sharique live failure as a
+model-level defense-in-depth case (weight 0.5 — the engine resolves it
+deterministically downstream), and a MUST-NOT case where "no" is content
+("I said no, actually, and I stand by it").
+
+**Measured, 3 repeats per side, all deterministic:**
+
+- 40-case aggregate: 0.9090 (old prompt) → **0.9485** (revised), floor
+  0.9722 − 0.06 = 0.9122 passed on both `Wisprit eval refine` and the
+  `WISPRIT_REHEARSAL=1` gate.
+- Wins: self-correction-restart 0.00 → 1.00, self-correction-restart-name
+  0.00 → 1.00. No regression in the original 36 (every core case back at
+  1.00 after two counter-example iterations — see the header comments in
+  RefineInstructions.swift for the two new measured failure modes found on
+  the way: rule 4 without its hesitation counter-example dropped question
+  heads, and a cleaned-question example pair made the model answer the
+  translate trap).
+- Unmoved: self-correction-weak-cue 0.00 → 0.00 (model punctuates the cue
+  and keeps both sides; kept at weight 1 as the visible target),
+  self-correction-i-mean 0.50 → 0.50, length-five-clauses 0.67 → 0.67 —
+  the two previously-flaky cases did not improve; they also did not regress.
+- `BASELINE.json` battery band unchanged at accepted 0.972222 ± 0.06: the
+  instruction is to raise it only when the measured aggregate rises above it,
+  and 0.9485 on the harder 40-case battery does not. The accepted number
+  predates the 4 new cases; the next recorded corpus run re-baselines it.
+
+**Engine guard, same day:** `SelfCorrection`'s hedge-leader veto gained the
+say-family ("say", "says", "said", "saying") — a general marker directly
+after a verb of saying means the "no" was the thing said, so "I said no,
+actually, and I stand by it" now passes verbatim (it was being mangled to
+"I and I stand by it"). Leader-exact: "I said Bob no actually Alice" still
+corrects on "Bob". Pinned in SelfCorrectionTests.
+
+**Re-baselined, same day:** tts-v1 grew sc-07..10 (the live-failure sentence,
+the adjacent name swap, a 3-word-prefix clause restart, and the said-no
+MUST-NOT control; 50 → 54 clips), and the recorded corpus run re-centered
+every moved `BASELINE.json` band on the new measurements — including the raw
+WER band (0.174292 → 0.208678, the one out-of-band move: the new clips' false
+starts are insertions against their collapsed references, so the raw stage
+worsens by construction while final improves) and the battery band promised
+above (0.972222 → 0.948465, the 40-case number). Tolerances unchanged. The
+TTS voice cannot say the names cleanly ("Vivek" → "vivague", "Sharique" →
+"Shariq"), so the spoken shapes carry the natural pause commas that keep the
+marker audible; the collapse itself is name-agnostic and fires anyway, and
+dict=on recovers "Sharique" from "Shariq".
+
 ## Context awareness (Phase 4, 2026-08-10)
 
 SPEC risk #10 ruled any context awareness "out of bounds without explicit

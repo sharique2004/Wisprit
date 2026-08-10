@@ -52,7 +52,7 @@ public struct CaseVerdict: Sendable, Equatable {
     }
 }
 
-/// The scored refine battery: ~34 cases covering every measured failure mode of
+/// The scored refine battery: ~40 cases covering every measured failure mode of
 /// the 3B model, plus the arithmetic that turns a run of them into one number
 /// the scoreboard can carry.
 public enum RefineBattery {
@@ -165,7 +165,7 @@ public enum RefineBattery {
     // MARK: - the cases
 
     public static let cases: [RefineCase] = regression + jargon + letterRuns + addresses
-        + obedience + injection + plausibility + length + disfluency
+        + obedience + injection + plausibility + length + disfluency + selfCorrection
 
     /// The original eight, carried over VERBATIM from
     /// `tests/WispritRefineTests/RehearsalTests.swift` (itself the port of
@@ -352,6 +352,49 @@ public enum RefineBattery {
                        + "and third the learn gate",
                    must: ["eval harness", "retention fix", "learn gate"],
                    mustNot: ["1. ", "2. ", "- the"]),
+    ]
+
+    /// The open-ended remainder of spoken self-correction: ARBITRARY words
+    /// (names included) under cues too weak for the deterministic engine, whose
+    /// SPEC contract is explicit markers only — ambiguity passes verbatim. For
+    /// these shapes the model is the only line of defense, except where noted.
+    /// Measured scores below are 2026-08-10, greedy sampling, `--repeat 3`
+    /// (deterministic), against the rule-4 prompt revision (sha b2a089b5).
+    static let selfCorrection: [RefineCase] = [
+        // "sorry" is a tier-(a)-only connective in `SelfCorrection` (it fires
+        // inside a same-closed-class sandwich and nowhere else), so an
+        // arbitrary-word replacement under it reaches the model untouched.
+        // Measured 0.00: the model punctuates the cue ("Send it to marketing,
+        // sorry to finance.") and keeps both sides, with or without the prompt
+        // rule. The open gap of this class — kept at full weight so it stays
+        // a visible target for the next prompt or model revision.
+        RefineCase(id: "self-correction-weak-cue", category: "self-correction",
+                   input: "send it to marketing sorry to finance",
+                   must: ["finance"], mustNot: ["marketing"]),
+        // A mid-sentence restart that shares no prefix with the false start:
+        // the engine's restart evidence (B re-begins A) is structurally absent,
+        // and a bare "actually" is never a general marker. Measured 1.00 under
+        // the rule-4 prompt (0.00 without it).
+        RefineCase(id: "self-correction-restart", category: "self-correction",
+                   input: "we should take the highway actually you know what "
+                       + "lets take the coast road",
+                   must: ["coast road"], mustNot: ["highway"]),
+        // The 2026-08-09 live failure, as a model-level case. The engine now
+        // resolves this shape deterministically (`SelfCorrection` clause
+        // restart, which runs downstream of the model either way), so this
+        // documents defense in depth rather than the only line — weighted
+        // below 1 for the same reason the jargon cases are. Measured 1.00
+        // under the rule-4 prompt (0.00 without it).
+        RefineCase(id: "self-correction-restart-name", category: "self-correction",
+                   input: "i want to meet vivek no actually i want it sharique",
+                   must: ["sharique"], mustNot: ["vivek"], weight: 0.5),
+        // MUST-NOT: a "no" that is content, with "actually" as an aside glued
+        // right onto it. Nothing here is a correction — the sentence survives
+        // whole or the cleanup is wrong. Measured 1.00 with and without the
+        // prompt rule.
+        RefineCase(id: "self-correction-content-no", category: "self-correction",
+                   input: "I said no, actually, and I stand by it",
+                   must: ["said no", "stand by it"]),
     ]
 
     /// What cleanup is actually FOR — and the one thing the model must not

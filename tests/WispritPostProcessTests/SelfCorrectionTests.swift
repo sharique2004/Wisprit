@@ -176,6 +176,17 @@ final class SelfCorrectionTests: XCTestCase {
             "you know what I mean and then some",
             "well no actually that's fine",
             "but no actually we shipped it",
+            // The say-family: a marker directly after a verb of saying means
+            // the "no" was the thing said, not a correction cue.
+            "I said no, actually, and I stand by it",
+            "i said no actually and i stand by it",
+            "she says no actually it depends",
+        ])
+        // The veto is leader-exact: reported speech whose CONTENT is corrected
+        // still corrects — "said" is only a hedge when it touches the marker.
+        assertCases([
+            ("I said Bob no actually Alice", "I said Alice"),
+            ("he said Thursday no actually Friday works", "he said Friday works"),
         ])
     }
 
@@ -423,5 +434,137 @@ extension SelfCorrectionTests {
             XCTAssertFalse(SelfCorrection.endsMidCorrection(tail),
                            "should not defer: \(tail.debugDescription)")
         }
+    }
+}
+
+// MARK: - the v2.2.0 live failure: clause restarts and the narrowed veto
+
+extension SelfCorrectionTests {
+    /// The field report, verbatim: "I want to meet Vivek, no actually I want
+    /// it Sharique" came out as two sentences and nothing collapsed. The user
+    /// restated the clause, so the restart replaces it wholesale — on the raw
+    /// dictated shape and on the punctuated shape the recognizer emitted.
+    func testTheLiveFailureSentence() {
+        assertCases([
+            // the raw dictated shape
+            ("I want to meet Vivek, no actually I want it Sharique",
+             "I want it Sharique"),
+            ("I want to meet Vivek no actually I want it Sharique",
+             "I want it Sharique"),
+            // the ASR-punctuated shape v2.2.0 actually emitted
+            ("I want to meet Vivek. No, actually I want it Sharique.",
+             "I want it Sharique."),
+        ])
+        // ...and through the full pipeline.
+        XCTAssertEqual(PostProcess.process("I want to meet Vivek. No, actually I want it Sharique."),
+                       "I want it Sharique.")
+    }
+
+    /// The adjacent name swap needed no new mechanism — pinned so it stays.
+    func testNameSwapAdjacents() {
+        assertCases([
+            ("meet Vivek no actually Sharique", "meet Sharique"),
+            ("meet Vivek no wait Sharique", "meet Sharique"),
+            ("meet Vivek umm no actually Sharique", "meet Sharique"),
+        ])
+    }
+
+    /// The narrowed sentence-boundary veto: a "no"-anchored marker may cross
+    /// ONE terminator, because the ASR punctuates the pause before a
+    /// correction and a "No," after a period is a correction cue, not prose.
+    func testNoAnchoredMarkersMayCrossOneSentenceTerminator() {
+        assertCases([
+            ("I want to meet Vivek. No, actually Sharique", "I want to meet Sharique"),
+            ("I want to meet Vivek. No wait Sharique", "I want to meet Sharique"),
+            ("Ship it to staging. No, actually production.", "Ship it to production."),
+        ])
+        // "I mean" keeps the FULL veto — it is the hedge that caused the
+        // original regression, and it never reaches across a sentence.
+        assertUntouched([
+            "No, Tuesday is fine. I mean it.",
+            "The build is green. I mean the tests pass.",
+        ])
+        // A bare "no" is not a general marker, before or after a period.
+        assertUntouched([
+            "We shipped it. No, I disagree with the approach.",
+        ])
+    }
+
+    /// The clause-restart repair on arbitrary words: B re-begins the clause,
+    /// so B replaces it, verbatim — casing, tail length and all.
+    func testClauseRestarts() {
+        assertCases([
+            // pronoun restart
+            ("he wants tea no actually he wants coffee", "he wants coffee"),
+            // longer restart, longer tail
+            ("I'll take the 9am flight no wait I'll take the noon train instead",
+             "I'll take the noon train instead"),
+            ("we should ship the build on Monday no wait we should ship it on Wednesday",
+             "we should ship it on Wednesday"),
+            // shorter tail than the clause it replaces
+            ("send the report to the whole team no actually send it to Bob",
+             "send it to Bob"),
+            // one shared token is evidence when it is a non-lexicon content
+            // word — a name, exactly what no closed class can cover
+            ("Sharique leads no actually Sharique follows", "Sharique follows"),
+            // the restart is kept verbatim, including its casing
+            ("Let's meet on Thursday. No, actually let's meet on Friday",
+             "let's meet on Friday"),
+        ])
+    }
+
+    /// Tier (a) runs first and still wins its cases: a correction that is also
+    /// a same-class pair resolves identically through either mechanism —
+    /// Thursday is gone and Friday survives, adjacent or restated.
+    func testRestartThatIsAlsoASameClassPair() {
+        XCTAssertEqual(SelfCorrection.apply("Let's meet on Thursday. No, actually Friday"),
+                       "Let's meet on Friday")
+        XCTAssertEqual(SelfCorrection.apply("Let's meet on Thursday. No, actually let's meet on Friday"),
+                       "let's meet on Friday")
+    }
+
+    /// No shared re-beginning, no clause repair — the evidence requirement is
+    /// what keeps wholesale deletion safe on arbitrary content. The
+    /// single-word span still applies under its existing rules.
+    func testNoRestartEvidenceMeansNoClauseRepair() {
+        assertCases([
+            ("send it to Bob no actually to Alice", "send it to Alice"),
+            ("call Bob umm no actually Alice", "call Alice"),
+        ])
+        assertUntouched([
+            // "No," opening a genuine new sentence that shares only an
+            // incidental pronoun prefix with the clause before it: a lone
+            // pronoun is not restart evidence, and a clause opener after the
+            // marker is a denial, not a replacement word.
+            "I finished the report. No, actually I think we should celebrate.",
+            "We tried it. No, actually we were lucky it compiled at all.",
+        ])
+    }
+
+    /// "I mean" repairs a restart only INSIDE its sentence, and never a hedge.
+    func testIMeanClauseRepairStaysInsideTheSentence() {
+        assertCases([
+            ("I want tea I mean I want coffee", "I want coffee"),
+        ])
+        assertUntouched([
+            "what I mean is we should go",
+            "I want tea. I mean I want coffee.",
+        ])
+    }
+
+    /// Across a terminator, "no wait" loses its parity exemptions: Python's
+    /// comma-only gap never crossed one, so parity says nothing there and the
+    /// cross-class and hedge vetoes apply exactly as they do to "no actually".
+    func testCrossTerminatorNoWaitLosesItsParityExemptions() {
+        assertUntouched([
+            // cross-class veto
+            "Thursday. No wait 3 o'clock",
+            // hedge-leader veto — and the tokenizer never reads "wait staff"
+            // as prose: "no wait" IS matched as a marker here, and the veto on
+            // the leader "it" is what keeps the sentence whole.
+            "I like it. No wait staff were available.",
+        ])
+        // Adjacent, the Python-parity contract is untouched.
+        XCTAssertEqual(SelfCorrection.apply("Thursday no wait 3 o'clock"), "3 o'clock")
     }
 }

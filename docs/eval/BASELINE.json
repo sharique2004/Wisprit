@@ -4,19 +4,19 @@
   {
    "bands": [
     {
-     "accepted": 0.174292,
+     "accepted": 0.208678,
      "metric": "wer",
      "stage": "raw",
      "tolerance": 0.015
     },
     {
-     "accepted": 0.117647,
+     "accepted": 0.115702,
      "metric": "wer",
      "stage": "final",
      "tolerance": 0.015
     },
     {
-     "accepted": 0.072942,
+     "accepted": 0.071595,
      "metric": "cer",
      "stage": "final",
      "tolerance": 0.015
@@ -28,7 +28,7 @@
      "tolerance": 0.03
     },
     {
-     "accepted": 0.32,
+     "accepted": 0.333333,
      "metric": "zeroEdit",
      "stage": "final",
      "tolerance": 0.05
@@ -40,13 +40,13 @@
   {
    "bands": [
     {
-     "accepted": 0.084967,
+     "accepted": 0.080579,
      "metric": "wer",
      "stage": "final",
      "tolerance": 0.015
     },
     {
-     "accepted": 0.06357,
+     "accepted": 0.061089,
      "metric": "cer",
      "stage": "final",
      "tolerance": 0.015
@@ -58,7 +58,7 @@
      "tolerance": 0.06
     },
     {
-     "accepted": 0.36,
+     "accepted": 0.388889,
      "metric": "zeroEdit",
      "stage": "final",
      "tolerance": 0.05
@@ -70,13 +70,13 @@
   {
    "bands": [
     {
-     "accepted": 0.091503,
+     "accepted": 0.090909,
      "metric": "wer",
      "stage": "final",
      "tolerance": 0.035
     },
     {
-     "accepted": 0.05542,
+     "accepted": 0.056031,
      "metric": "cer",
      "stage": "final",
      "tolerance": 0.035
@@ -88,7 +88,7 @@
      "tolerance": 0.09
     },
     {
-     "accepted": 0.38,
+     "accepted": 0.388889,
      "metric": "zeroEdit",
      "stage": "final",
      "tolerance": 0.06
@@ -100,13 +100,13 @@
   {
    "bands": [
     {
-     "accepted": 0.065359,
+     "accepted": 0.061983,
      "metric": "wer",
      "stage": "final",
      "tolerance": 0.035
     },
     {
-     "accepted": 0.05053,
+     "accepted": 0.049805,
      "metric": "cer",
      "stage": "final",
      "tolerance": 0.035
@@ -118,7 +118,7 @@
      "tolerance": 0.09
     },
     {
-     "accepted": 0.4,
+     "accepted": 0.425926,
      "metric": "zeroEdit",
      "stage": "final",
      "tolerance": 0.06
@@ -130,7 +130,7 @@
   {
    "bands": [
     {
-     "accepted": 0.972222,
+     "accepted": 0.948465,
      "metric": "battery",
      "stage": "battery",
      "tolerance": 0.06

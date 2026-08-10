@@ -93,21 +93,35 @@ df-05 | disfluency |  |  | I was going, I was gonna say the retry policy needs w
 
 # --- explicit self-correction -------------------------------------------------
 # "I said the wrong day, then the right one, and only the right one lands."
-# Every joint here is a CLOSED-CLASS PAIR: both sides are the same kind of thing
-# (weekday, clock time, month, number), which is the only condition under which
-# a weak connective — a bare "sorry", a bare "no actually" — is allowed to
-# delete anything. sc-01 is the sentence the feature was asked for.
+# Every joint in sc-01..06 is a CLOSED-CLASS PAIR: both sides are the same kind
+# of thing (weekday, clock time, month, number), which is the only condition
+# under which a weak connective — a bare "sorry", a bare "no actually" — is
+# allowed to delete anything. sc-01 is the sentence the feature was asked for.
 #
 # sc-06 is the control and it is the important row: a weekday cannot be
 # corrected into a clock time, so the joint does not type-check, so NOTHING is
 # deleted and BOTH tokens survive into the reference. If sc-06's WER ever drops
 # to zero by way of a deletion, the engine has started guessing.
+#
+# sc-07..09 are ARBITRARY-WORD corrections — names and plain verbs, no closed
+# class in sight. sc-07 is the 2026-08-09 live failure verbatim: the recognizer
+# punctuates the pause before the correction, so the collapse must survive the
+# sentence terminator, and the restated clause replaces the first one wholesale
+# (the clause-restart repair). sc-08 is the adjacent name swap; sc-09 is a
+# clause restart whose evidence is a 3-word shared prefix. sc-10 is the second
+# control: "no, actually" directly after a verb of saying is the thing said,
+# not a correction, so the sentence passes verbatim — if sc-10 ever loses its
+# "no", the engine has started deleting content.
 sc-01 | self-correction |  |  | I want to have a meeting with person x on Thursday, umm, no actually Friday. | I want to have a meeting with person x on Friday.
 sc-02 | self-correction |  |  | Let us move the standup to half past nine, no actually quarter past ten. | Let us move the standup to quarter past ten.
 sc-03 | self-correction |  |  | The board meeting is in September, no actually October. | The board meeting is in October.
 sc-04 | self-correction |  |  | Set the retry limit to three, no actually five. | Set the retry limit to 5.
 sc-05 | self-correction |  |  | Move the demo to Monday, no actually Tuesday, then push the release to March, sorry, April. | Move the demo to Tuesday, then push the release to April.
 sc-06 | self-correction |  |  | We meet Thursday, I mean half past three on Thursday. | We meet Thursday, I mean half past three on Thursday.
+sc-07 | self-correction |  |  | I want to meet Vivek. No, actually I want it, Sharique. | I want it Sharique.
+sc-08 | self-correction |  |  | Send the invite to Vivek, no, actually, Sharique. | Send the invite to Sharique.
+sc-09 | self-correction |  |  | I need to email the vendor today, no actually I need to call them right now. | I need to call them right now.
+sc-10 | self-correction |  |  | I said no, actually, and I stand by it. |
 
 # --- long form ----------------------------------------------------------------
 lf-01 | long-form | Wisprit;InsForge |  | So the plan for this week is to land the eval harness in Wisprit, then fix the retention race, and after that I want to look at the empty rate before we touch InsForge at all. |
