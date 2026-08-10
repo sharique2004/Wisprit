@@ -22,7 +22,8 @@ release ────────┴──▶ finalize ──▶ spoken-spelling 
 
 - **Streaming during the hold.** A fresh `SpeechTranscriber` + `SpeechAnalyzer` per utterance, `.fastResults` on, `prepareToAnalyze` paid on key-down (31–54 ms). At release only the tail needs finalizing: **69–108 ms release→final** measured over 12 back-to-back utterances ([spike S1](docs/research/spikes-s1.md)). Partials arrive from ~1.0 s into the hold at a ~0.95 s cadence.
 - **AI cleanup, still fully local.** The on-device Apple Intelligence foundation model fixes what the recognizer misheard — homophones ("right heavy" → "write-heavy"), split words ("data base"), broken casing ("i phone" → "iPhone") — strips fillers contextually, and punctuates, using the surrounding sentence as evidence. It runs *inside a cage*: an eval-locked instruction prompt, greedy sampling, a word-count plausibility guard, an answered-instead-of-cleaned detector, wrapper/preamble stripping, a hard timeout, and skip rules for utterances containing emails/URLs or spelled letter runs. Every failure path returns the verbatim transcript — cleanup can only ever win, never lose words. Toggle it from the menu (**AI Cleanup**) or `ai_cleanup` in config.
-- **Deterministic rules still run after the model** (dictionary corrections, "new line" / "new paragraph" / "scratch that", spoken email/URL joining, whitespace and casing tidy) — so your personal vocabulary is guaranteed by regex, not entrusted to a small model.
+- **Deterministic rules still run after the model** (dictionary corrections, "new line" / "new paragraph" / "scratch that", spoken email/URL joining, spoken emoji, whitespace and casing tidy) — so your personal vocabulary is guaranteed by regex, not entrusted to a small model.
+- **Say the emoji.** "fantastic work fire emoji" types *fantastic work 🔥*, over a curated table of 33 names (fire, thumbs up, rocket, check mark, folded hands, one hundred…). The word "emoji" is required — a bare "fire" is just a word — and saying "the fire emoji" or "a heart emoji" leaves your sentence alone, because there you were talking about it rather than asking for it. Regex, no model; `emoji_commands` in config turns it off.
 - **Privacy is structural.** There is no networking code on any path. Audio is transcribed on the Neural Engine, the language model runs on-device, and nothing is retained: history is transcript text only, in a local SQLite file you can purge from the menu. The state directory is `~/.wisprit`, mode 0700.
 - **Every stage is interruptible.** Esc aborts up to and including the model pass; a queued Fn press makes cleanup finish *now* with verbatim text so the next utterance isn't stuck behind the model.
 
@@ -155,6 +156,7 @@ Created with defaults on first run (or `Wisprit bootstrap`); edit and it's picke
 | `mlx_model` | `"mlx-community/whisper-large-v3-turbo"` | Vestigial: read by nothing in the native build, kept so an existing config round-trips. |
 | `paste_restore_delay_ms` | `500` | Delay before restoring your original clipboard after the paste. Generous on purpose: restoring too early makes the target app paste your *old* clipboard — the #1 bug across competing tools. |
 | `enabled` | `true` | Master toggle (also in the menu). |
+| `emoji_commands` | `true` | Spoken emoji: "fire emoji" → 🔥, over a closed 33-name table. Requires the word "emoji"; skipped after a determiner ("the fire emoji") or inside a spelled run. |
 
 Live Typing keys (seeded with the rest; toggled from the menu):
 

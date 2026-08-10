@@ -33,7 +33,8 @@ public final class SessionController: @unchecked Sendable {
         public var holdDebounceMs: @Sendable () -> Double
         /// The master `enabled` toggle from the menu.
         public var isEnabled: @Sendable () -> Bool
-        /// `filler_removal` / `ensure_sentence_period` / `leading_space`.
+        /// `filler_removal` / `ensure_sentence_period` / `leading_space` /
+        /// `emoji_commands`.
         public var postProcessOptions: @Sendable () -> PostProcessOptions
         /// Pill level-meter cadence; nil disables the ticker entirely (tests,
         /// and `pill_hidden`). Python ran a 20 Hz `pill-level` thread.

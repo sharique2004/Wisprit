@@ -157,7 +157,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
                         fillerRemoval: settings.fillerRemoval,
                         ensureSentencePeriod: settings.ensureSentencePeriod,
                         leadingSpace: PostProcessOptions.LeadingSpace(
-                            rawValue: settings.leadingSpace) ?? .auto)
+                            rawValue: settings.leadingSpace) ?? .auto,
+                        emojiCommands: settings.emojiCommands)
                 },
                 // Armed unconditionally, and suppressed live inside
                 // `MainThreadPill` instead.

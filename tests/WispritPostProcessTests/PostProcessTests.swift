@@ -194,6 +194,8 @@ final class PostProcessContractTests: XCTestCase {
         XCTAssertEqual(PostProcess.joinDotted("a dot b dot c"), "a.b.c")
         XCTAssertEqual(PostProcess.joinURL("go to example dot COM"), "go to example.com")
         XCTAssertEqual(PostProcess.selfCorrect("we need to to fix"), "we need to fix")
+        // Post-Python stage; the behavior table is EmojiCommandTests.swift.
+        XCTAssertEqual(PostProcess.applyEmoji("nice work fire emoji"), "nice work 🔥")
         XCTAssertEqual(PostProcess.cleanupWhitespace("  a  ,  b  "), "a, b")
         XCTAssertEqual(PostProcess.applyLeadingSpace("x", .always), " x")
         XCTAssertEqual(PostProcess.applyLeadingSpace("  x", .never), "x")
