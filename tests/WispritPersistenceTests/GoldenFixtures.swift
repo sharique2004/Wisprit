@@ -170,6 +170,13 @@ enum Golden {
     static let metricsLegacyEmptyRow =
         #"{"ts": 1785872035.681684, "held_ms": 1468.8, "engine": "apple_live", "finalize_ms": 1500.9, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "empty", "chars": 0}"# + "\n"
 
+    /// The `vocab_retro` deviation row: the off-path vocabulary pass reporting
+    /// itself on its own line, because its utterance's row was written 1–2.5 s
+    /// earlier and metrics.log is append-only. Reference-less by construction —
+    /// the only thing tying it to an utterance is that it comes after it.
+    static let metricsVocabRetroRow =
+        #"{"ts": 1786399512.204418, "held_ms": 0.0, "engine": "apple_dictation", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "vocab_retro", "chars": 0, "vocab_ms": 1243.6, "vocab_hits": 2, "vocab_delta": 1, "applied": true}"# + "\n"
+
     /// A real line from `~/.wisprit/metrics.log` (Python era) — the stream this
     /// writer must keep appending to.
     static let metricsRealPythonLine =

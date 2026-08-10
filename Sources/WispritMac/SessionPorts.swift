@@ -109,6 +109,10 @@ public protocol VocabularyPort: Sendable {
     /// become live vocabulary until a second observation confirms it.
     func addPending(term: String, observation: String)
     func recordUse(term: String)
+    /// Is this already a canonical term? The retro-correction fallback's whole
+    /// safety argument: it may only ever attach a misrecognition to a term the
+    /// user already has, never mint one.
+    func isKnownTerm(_ word: String) -> Bool
 }
 
 /// `hotkey.set_recording(...)` — gates Esc emission. Kept true through the

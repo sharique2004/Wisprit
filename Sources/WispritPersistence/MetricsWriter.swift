@@ -8,6 +8,23 @@ import WispritKit
 /// stream that spans the Python era and this one, and the analysis scripts read
 /// it as one file. Optional fields are omitted (not null) when absent, exactly
 /// as the Python does.
+///
+/// Two `outcome` values are NOT insertion methods and do not describe an
+/// utterance's delivery — both are deliberate deviations, recorded in
+/// `docs/notes/deviations.md`:
+///
+///  * `correction` — a spoken-spelling directive that legitimately left nothing
+///    to insert. Logging it as `empty` would inflate the empty-rate metric with
+///    successes.
+///  * `vocab_retro` — the off-path vocabulary reconciliation, which finishes
+///    1–2.5 s AFTER its utterance's row is already on disk and so cannot ride
+///    it. A reference-less second line carrying `vocab_ms` / `vocab_hits` /
+///    `vocab_delta` / `applied` is the honest shape; attributing the numbers to
+///    the next utterance's row would not be. One such row is written per
+///    completed reconciliation, at the moment `applied` is finally known —
+///    which means a plan whose deferred application is dropped by a new
+///    utterance writes no row at all, rather than a row claiming `applied:
+///    false` for an edit that was never attempted.
 
 public struct MetricsRecord: Sendable {
     public var ts: Double            // wall-clock seconds, Python's time.time()
@@ -30,13 +47,21 @@ public struct MetricsRecord: Sendable {
     public var audioMs: Double?      // audio actually handed to the engine
     public var rawChars: Int?        // chars before refine, so `chars` can be read as a delta
     public var refineDelta: Int?     // edit distance raw → refined: the over-rewrite alarm
+    // The `vocab_retro` row only (see the note above). Four fields, never on an
+    // utterance row, and still appended after everything that precedes them.
+    public var vocabMs: Double?      // how long the biased re-transcription took
+    public var vocabHits: Int?       // dictionary terms it recovered, counting repeats
+    public var vocabDelta: Int?      // 0/1: the planner proposed at least one edit
+    public var applied: Bool?        // an edit actually landed in the user's field
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
                 postMs: Double, insertMs: Double, outcome: String, chars: Int,
                 releaseToTextMs: Double? = nil, aiMs: Double? = nil, ai: String? = nil,
                 emptyReason: String? = nil, peakLevel: Double? = nil,
-                audioMs: Double? = nil, rawChars: Int? = nil, refineDelta: Int? = nil) {
+                audioMs: Double? = nil, rawChars: Int? = nil, refineDelta: Int? = nil,
+                vocabMs: Double? = nil, vocabHits: Int? = nil, vocabDelta: Int? = nil,
+                applied: Bool? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -54,6 +79,10 @@ public struct MetricsRecord: Sendable {
         self.audioMs = audioMs
         self.rawChars = rawChars
         self.refineDelta = refineDelta
+        self.vocabMs = vocabMs
+        self.vocabHits = vocabHits
+        self.vocabDelta = vocabDelta
+        self.applied = applied
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -78,6 +107,11 @@ public struct MetricsRecord: Sendable {
         if let audioMs { entry["audio_ms"] = .double(MetricsWriter.round1(audioMs)) }
         if let rawChars { entry["raw_chars"] = .int(rawChars) }
         if let refineDelta { entry["refine_delta"] = .int(refineDelta) }
+        // The `vocab_retro` row's own four, last of all.
+        if let vocabMs { entry["vocab_ms"] = .double(MetricsWriter.round1(vocabMs)) }
+        if let vocabHits { entry["vocab_hits"] = .int(vocabHits) }
+        if let vocabDelta { entry["vocab_delta"] = .int(vocabDelta) }
+        if let applied { entry["applied"] = .bool(applied) }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -98,9 +132,15 @@ public enum MetricsField {
     public static let audioMs = "audio_ms"
     public static let rawChars = "raw_chars"
     public static let refineDelta = "refine_delta"
-    // `empty_reason` is a string, so it has no slot in `UtteranceMetrics.fields`
-    // ([String: Double]) and rides beside `ai` on the bridge instead.
+    public static let vocabMs = "vocab_ms"
+    public static let vocabHits = "vocab_hits"
+    public static let vocabDelta = "vocab_delta"
+    // `empty_reason` is a string and `applied` a bool, so neither has a slot in
+    // `UtteranceMetrics.fields` ([String: Double]). `empty_reason` rides beside
+    // `ai` on the bridge; `applied` only ever appears on the `vocab_retro` row,
+    // which the session writes as a `MetricsRecord` directly.
     public static let emptyReason = "empty_reason"
+    public static let applied = "applied"
 }
 
 public final class MetricsWriter: @unchecked Sendable {

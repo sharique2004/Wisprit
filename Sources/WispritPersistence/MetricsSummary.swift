@@ -79,12 +79,24 @@ public struct MetricsSummary: Sendable, Equatable {
     /// The `empty_reason` value that means "no benign explanation applies".
     public static let producedNothing = "produced_nothing"
 
+    /// `outcome` values that are NOT an utterance.
+    ///
+    /// `vocab_retro` is a second line about the off-path vocabulary pass, written
+    /// after some utterance's own row was already on disk. Counting it here would
+    /// put a `finalize_ms` of 0 into the latency percentiles and dilute every
+    /// rate on this struct by roughly the success rate — this summary is about
+    /// utterances, so a row that is not one is dropped before anything is
+    /// counted. (`correction` stays: a spoken-spelling directive IS an
+    /// utterance, it just had nothing to insert.)
+    public static let nonUtteranceOutcomes: Set<String> = ["vocab_retro"]
+
     // MARK: - aggregation
 
     public static func summarize(_ rows: [JSONObject],
                                  window: MetricsWindow = .all,
                                  now: Double) -> MetricsSummary {
         let rows = windowed(rows, in: window, now: now)
+            .filter { !nonUtteranceOutcomes.contains(string($0, "outcome") ?? "") }
         let total = rows.count
 
         var outcomes: [String: Int] = [:]

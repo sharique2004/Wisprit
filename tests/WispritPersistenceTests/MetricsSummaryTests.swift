@@ -183,6 +183,48 @@ final class MetricsSummaryTests: XCTestCase {
                                                 now: now).total, 0)
     }
 
+    // MARK: rows that are not utterances
+
+    /// The `vocab_retro` line reports an off-path pass, not a dictation. Left in
+    /// the counts it would add a `finalize_ms` of 0 to the latency percentiles
+    /// and dilute every rate here by roughly the success rate — this summary
+    /// answers "how often does Wisprit fail me", and that has to be per
+    /// utterance.
+    func testVocabRetroRowsAreNotCountedAsUtterances() {
+        let mixed = rows([
+            #"{"ts": 1786399000.0, "held_ms": 1200.0, "engine": "apple_live", "finalize_ms": 120.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 10.0, "outcome": "im_streaming", "chars": 43, "release_to_text_ms": 300.0}"#,
+            #"{"ts": 1786399001.0, "held_ms": 0.0, "engine": "apple_dictation", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "vocab_retro", "chars": 0, "vocab_ms": 1243.6, "vocab_hits": 2, "vocab_delta": 1, "applied": true}"#,
+            #"{"ts": 1786399002.0, "held_ms": 2000.0, "engine": "apple_live", "finalize_ms": 130.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "empty", "chars": 0, "empty_reason": "produced_nothing", "peak_level": 0.2, "audio_ms": 1950.0}"#,
+        ])
+        let s = MetricsSummary.summarize(mixed, now: now)
+        XCTAssertEqual(s.total, 2)
+        XCTAssertEqual(s.outcomes, ["im_streaming": 1, "empty": 1])
+        XCTAssertEqual(s.emptyRate, 0.5, accuracy: 1e-12)
+        XCTAssertEqual(s.unexplainedEmptyRate, 0.5, accuracy: 1e-12)
+
+        // …and the latency percentiles, which the vocab row's `finalize_ms: 0.0`
+        // would otherwise anchor to zero.
+        let one = MetricsSummary.summarize(rows([
+            #"{"ts": 1786399000.0, "held_ms": 1200.0, "engine": "apple_live", "finalize_ms": 120.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 10.0, "outcome": "paste", "chars": 43}"#,
+            #"{"ts": 1786399001.0, "held_ms": 0.0, "engine": "apple_dictation", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "vocab_retro", "chars": 0, "vocab_ms": 1243.6, "vocab_hits": 2, "vocab_delta": 1, "applied": true}"#,
+        ]), now: now)
+        XCTAssertEqual(one.finalizeMsP50, 120.0)
+    }
+
+    /// A row window is a window over the FILE, because `windowed` is also what a
+    /// caller lists; the non-utterance rows are dropped afterwards, so "last 2
+    /// rows" can legitimately summarize one utterance.
+    func testARowWindowCountsLinesAndThenDropsTheNonUtterances() {
+        let mixed = rows([
+            #"{"ts": 1786399000.0, "held_ms": 1200.0, "engine": "apple_live", "finalize_ms": 120.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 10.0, "outcome": "paste", "chars": 43}"#,
+            #"{"ts": 1786399001.0, "held_ms": 1200.0, "engine": "apple_live", "finalize_ms": 120.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 10.0, "outcome": "paste", "chars": 43}"#,
+            #"{"ts": 1786399002.0, "held_ms": 0.0, "engine": "apple_dictation", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "vocab_retro", "chars": 0, "vocab_ms": 900.0, "vocab_hits": 1, "vocab_delta": 0, "applied": false}"#,
+        ])
+        XCTAssertEqual(MetricsSummary.windowed(mixed, in: MetricsWindow(rows: 2), now: now).count, 2)
+        XCTAssertEqual(MetricsSummary.summarize(mixed, window: MetricsWindow(rows: 2),
+                                                now: now).total, 1)
+    }
+
     // MARK: defensive reads
 
     func testIntegerShapedNumbersAndFlagsStillCount() {

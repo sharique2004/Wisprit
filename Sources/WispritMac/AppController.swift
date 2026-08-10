@@ -171,7 +171,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 // The port now drops the tick when the pill is hidden, which
                 // costs one bool read on the `pill-level` thread and no main
                 // thread work at all, and the toggle is live in both directions.
-                levelTickInterval: 0.05))
+                levelTickInterval: 0.05,
+                // Re-read per utterance like every other setting closure here:
+                // switching retro-correction off has to take effect on the next
+                // dictation, not the next launch.
+                vocabularyRetro: { VocabularyRetroSettings.isEnabled(settings) }))
 
         super.init()
 
