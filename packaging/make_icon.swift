@@ -1,7 +1,12 @@
-// make_icon.swift — render Wisprit's app icon (a white mic on a teal gradient)
-// to a .iconset directory of PNGs. The build script then runs `iconutil` on it.
+// make_icon.swift — render Wisprit's app icon (the ice-white wave-mic mark on a
+// black tile, from packaging/Wisprit.icon) to a .iconset directory of PNGs.
+// The build script then runs `iconutil` on it.
 //
 //   swift make_icon.swift <output.iconset dir>
+//
+// Geometry mirrors packaging/Wisprit.icon/icon.json (the Icon Composer source of
+// truth, kept alongside for a future Xcode/actool pipeline): flat black fill,
+// glyph at 0.6 of the tile, nudged 57/1024pt down to sit on the optical center.
 
 import AppKit
 import Foundation
@@ -13,6 +18,24 @@ guard args.count >= 2 else {
 }
 let outDir = args[1]
 try? FileManager.default.createDirectory(atPath: outDir, withIntermediateDirectories: true)
+
+let glyphURL = URL(fileURLWithPath: #filePath)
+    .deletingLastPathComponent()
+    .appendingPathComponent("Wisprit.icon/Assets/wisprit-compact-wave-mic-black-2048.png")
+guard let glyphSource = NSImage(contentsOf: glyphURL) else {
+    FileHandle.standardError.write(Data("make_icon.swift: missing \(glyphURL.path)\n".utf8))
+    exit(1)
+}
+
+// The mark ships as black-on-alpha; tint it once to icon.json's fill
+// (display-P3 0.917 / 0.939 / 1.0 — ice white).
+let glyph = NSImage(size: glyphSource.size)
+glyph.lockFocus()
+let glyphRect = NSRect(origin: .zero, size: glyphSource.size)
+glyphSource.draw(in: glyphRect)
+NSColor(displayP3Red: 0.91669, green: 0.93871, blue: 1.0, alpha: 1.0).set()
+glyphRect.fill(using: .sourceAtop)
+glyph.unlockFocus()
 
 // (filename, pixel size) per Apple's iconset convention.
 let variants: [(String, Int)] = [
@@ -30,34 +53,26 @@ func render(_ px: Int) -> NSBitmapImageRep {
         colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)!
     NSGraphicsContext.saveGraphicsState()
     NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+    NSGraphicsContext.current?.imageInterpolation = .high
     let size = CGFloat(px)
 
-    // Rounded-rect "squircle-ish" background with a teal→blue gradient.
+    // Rounded-rect "squircle-ish" tile with the standard margins, flat black.
     let inset = size * 0.08
     let rect = NSRect(x: inset, y: inset, width: size - 2 * inset, height: size - 2 * inset)
     let radius = (size - 2 * inset) * 0.225
-    let bg = NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius)
-    let gradient = NSGradient(colors: [
-        NSColor(calibratedRed: 0.20, green: 0.74, blue: 0.84, alpha: 1.0),   // #33bbd6-ish
-        NSColor(calibratedRed: 0.11, green: 0.42, blue: 0.72, alpha: 1.0),
-    ])!
-    gradient.draw(in: bg, angle: -90)
+    NSColor.black.set()
+    NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
 
-    // White microphone glyph, centered, ~52% of the icon.
-    let config = NSImage.SymbolConfiguration(pointSize: size * 0.52, weight: .semibold)
-    if let mic = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: nil)?
-        .withSymbolConfiguration(config) {
-        let tinted = NSImage(size: mic.size)
-        tinted.lockFocus()
-        NSColor.white.set()
-        let r = NSRect(origin: .zero, size: mic.size)
-        mic.draw(in: r)
-        r.fill(using: .sourceAtop)
-        tinted.unlockFocus()
-        let mw = mic.size.width, mh = mic.size.height
-        let drawRect = NSRect(x: (size - mw) / 2, y: (size - mh) / 2, width: mw, height: mh)
-        tinted.draw(in: drawRect, from: .zero, operation: .sourceOver, fraction: 1.0)
-    }
+    // Glyph at 0.6 of the tile; icon.json's +57pt is downward on a 1024pt
+    // canvas and AppKit's y axis points up, so subtract. At 16–32px the mark's
+    // bars dissolve, so those sizes run the glyph larger than the manifest.
+    let tile = size - 2 * inset
+    let side = tile * (px <= 32 ? 0.78 : 0.6)
+    let drawRect = NSRect(
+        x: (size - side) / 2,
+        y: (size - side) / 2 - tile * (57.0 / 1024.0),
+        width: side, height: side)
+    glyph.draw(in: drawRect, from: .zero, operation: .sourceOver, fraction: 1.0)
 
     NSGraphicsContext.restoreGraphicsState()
     return rep

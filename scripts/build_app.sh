@@ -65,14 +65,30 @@ cp "$BINARY" "$CONTENTS/MacOS/Wisprit"
 chmod +x "$CONTENTS/MacOS/Wisprit"
 
 # --- icon (optional) --------------------------------------------------------
+# Preferred path: compile packaging/Wisprit.icon (the Icon Composer source)
+# with actool. Assets.car is the live Liquid Glass icon macOS 26 renders with
+# the manifest's materials; Wisprit.icns is Apple's flattened fallback
+# rendition. CFBundleIconName is what makes the system read Assets.car — the
+# icns alone would draw flat. make_icon.swift stays as the no-Xcode fallback.
+ICON_TMP="$(mktemp -d)"
 ICONSET="$(mktemp -d)/Wisprit.iconset"
-if swift "$REPO_DIR/packaging/make_icon.swift" "$ICONSET" >/dev/null 2>&1 && \
+if xcrun actool "$REPO_DIR/packaging/Wisprit.icon" --compile "$ICON_TMP" \
+       --app-icon Wisprit --include-all-app-icons \
+       --output-partial-info-plist "$ICON_TMP/partial.plist" \
+       --platform macosx --minimum-deployment-target 26.0 \
+       --output-format human-readable-text >/dev/null 2>&1 && \
+   [[ -f "$ICON_TMP/Assets.car" && -f "$ICON_TMP/Wisprit.icns" ]]; then
+    cp "$ICON_TMP/Assets.car" "$CONTENTS/Resources/Assets.car"
+    cp "$ICON_TMP/Wisprit.icns" "$CONTENTS/Resources/Wisprit.icns"
+    ICON_KEY='<key>CFBundleIconFile</key><string>Wisprit</string><key>CFBundleIconName</key><string>Wisprit</string>'
+    echo "  icon: compiled Wisprit.icon (Liquid Glass + icns fallback)"
+elif swift "$REPO_DIR/packaging/make_icon.swift" "$ICONSET" >/dev/null 2>&1 && \
    iconutil -c icns "$ICONSET" -o "$CONTENTS/Resources/Wisprit.icns" 2>/dev/null; then
     ICON_KEY='<key>CFBundleIconFile</key><string>Wisprit</string>'
-    echo "  icon: built Wisprit.icns"
+    echo "  icon: built Wisprit.icns (flat fallback — actool unavailable)"
 else
     ICON_KEY=''
-    echo "  icon: skipped (swift/iconutil unavailable)"
+    echo "  icon: skipped (actool/swift/iconutil unavailable)"
 fi
 
 # --- Info.plist -------------------------------------------------------------
