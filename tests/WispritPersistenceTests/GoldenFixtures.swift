@@ -213,6 +213,12 @@ enum Golden {
     static let metricsVocabRetroRow =
         #"{"ts": 1786399512.204418, "held_ms": 0.0, "engine": "apple_dictation", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "vocab_retro", "chars": 0, "vocab_ms": 1243.6, "vocab_hits": 2, "vocab_delta": 1, "applied": true}"# + "\n"
 
+    /// The same row since 2026-08-12, with the diagnosis trio appended after
+    /// `applied`: an `applied: false` finally says WHY — here a proposed edit
+    /// the input method turned down, on the rung that streamed the text in.
+    static let metricsVocabRetroDiagnosedRow =
+        #"{"ts": 1786399512.204418, "held_ms": 0.0, "engine": "apple_dictation", "finalize_ms": 0.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "vocab_retro", "chars": 0, "vocab_ms": 1243.6, "vocab_hits": 2, "vocab_delta": 1, "applied": false, "rung": "im_streaming", "apply_detail": "noDocumentAccess"}"# + "\n"
+
     /// The `edit_observed` deviation row (Phase 5): a field re-read finally
     /// showed what became of text some earlier utterance inserted. Reference-
     /// less like `vocab_retro`, and engine-less — `edit_scope` names the reader.

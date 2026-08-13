@@ -247,18 +247,24 @@ public final class SessionController: @unchecked Sendable {
         /// Log/test label; never shown to the user.
         var label: String
         var action: @Sendable () -> Void
+        /// Runs when the work is discarded instead of drained — a new utterance
+        /// dropping it, or a newer plan replacing it. Telemetry only: the hook
+        /// that keeps a parked proposal from vanishing without a metrics row.
+        var onDrop: (@Sendable () -> Void)?
     }
 
     /// Park work for the next idle tick. Deliberately a single slot: a second
     /// enqueue REPLACES the first, because the newer reconciliation is the
     /// better one and a queue of stale edits is worse than none.
-    func enqueueDeferred(_ label: String, _ action: @escaping @Sendable () -> Void) {
+    func enqueueDeferred(_ label: String, onDrop: (@Sendable () -> Void)? = nil,
+                         _ action: @escaping @Sendable () -> Void) {
         lock.lock()
-        let replaced = deferredWork?.label
-        deferredWork = DeferredWork(label: label, action: action)
+        let replaced = deferredWork
+        deferredWork = DeferredWork(label: label, action: action, onDrop: onDrop)
         lock.unlock()
         if let replaced {
-            log.info("deferred \(replaced, privacy: .public) replaced by \(label, privacy: .public)")
+            log.info("deferred \(replaced.label, privacy: .public) replaced by \(label, privacy: .public)")
+            replaced.onDrop?()
         }
     }
 
@@ -287,11 +293,12 @@ public final class SessionController: @unchecked Sendable {
     /// time this one ends, the document the edit was planned against is gone.
     private func dropDeferred() {
         lock.lock()
-        let dropped = deferredWork?.label
+        let dropped = deferredWork
         deferredWork = nil
         lock.unlock()
         if let dropped {
-            log.info("deferred \(dropped, privacy: .public) dropped — new utterance")
+            log.info("deferred \(dropped.label, privacy: .public) dropped — new utterance")
+            dropped.onDrop?()
         }
     }
 
@@ -470,9 +477,9 @@ public final class SessionController: @unchecked Sendable {
         // the live document and aborts unless our text is still exactly where we
         // left it (`RetroEditPlanner`), which is what stops a stale offset from
         // mangling a sentence the user has since typed into.
-        if correction.wasCrossUtterance, case .retroReplace(let target, let replacement, _, _) = action {
-            correction.notice = applyRetroEdit(target: target, replacement: replacement)
-                ?? correction.notice
+        if correction.wasCrossUtterance, case .retroReplace(let target, let replacement, _, _) = action,
+           case .applied(let notice) = applyRetroEdit(target: target, replacement: replacement) {
+            correction.notice = notice
         }
 
         // Apple Intelligence refinement (prewarmed at record start). Any
@@ -746,19 +753,36 @@ public final class SessionController: @unchecked Sendable {
                         deliveredAt: insertion.deliveredAtMonotonic)
     }
 
-    /// Route a cross-utterance `retroReplace` through the input method. Returns
-    /// the pill notice to use, or nil to keep the learn-only one.
-    func applyRetroEdit(target: String, replacement: String) -> String? {
-        guard let live = liveTyping, live.isEngaged else { return nil }
-        guard let result = live.applyRetroEdit(replace: target, with: replacement) else { return nil }
+    /// One retro-edit attempt, as the metrics row will tell it: the pill notice
+    /// when the edit landed, otherwise the `apply_detail` word for why it did
+    /// not. The words are `IMEditDetail`'s raw values plus two sentinels of our
+    /// own for the cases the input method was never asked — all stable, they
+    /// land in `metrics.log` (the transcript-318 lesson: an os_log info line is
+    /// memory-only and was gone by the time anyone looked).
+    enum RetroEditAttempt: Equatable {
+        case applied(notice: String)
+        case declined(detail: String)
+    }
+
+    /// Route a cross-utterance `retroReplace` through the input method. On
+    /// `.applied` the returned notice replaces the learn-only one.
+    func applyRetroEdit(target: String, replacement: String) -> RetroEditAttempt {
+        guard let live = liveTyping, live.isEngaged else {
+            return .declined(detail: "not_engaged")
+        }
+        guard let result = live.applyRetroEdit(replace: target, with: replacement) else {
+            // Silence (or a crossed `clientAcquired`): the edit cannot be
+            // proven to have landed, which for the caller is a refusal.
+            return .declined(detail: "no_reply")
+        }
         guard result.ok else {
             log.info("""
                 retro edit \(target, privacy: .public) → \(replacement, privacy: .public) \
                 declined: \(result.detail.rawValue, privacy: .public)
                 """)
-            return nil
+            return .declined(detail: result.detail.rawValue)
         }
-        return "Fixed \(replacement)"
+        return .applied(notice: "Fixed \(replacement)")
     }
 
     /// Close out the input method's share of this utterance.
@@ -817,7 +841,6 @@ public final class SessionController: @unchecked Sendable {
         let vocabulary = self.vocabulary
         let history = self.history
         let planRetro = config.vocabularyRetro() && !inserted.isEmpty
-        let onInputMethodRung = SessionController.isInputMethodRung(outcome)
         Task.detached(priority: .utility) { [weak self] in
             guard let reconciliation = await asr.reconcileVocabulary(retained,
                                                                      extraTerms: extraTerms)
@@ -840,16 +863,16 @@ public final class SessionController: @unchecked Sendable {
                     termHits: reconciliation.termHits,
                     knownTerm: { vocabulary?.isKnownTerm($0) ?? false })
                 : VocabularyRetroPlan()
-            self.scheduleVocabularyRetro(plan, reconciliation: reconciliation,
-                                         onInputMethodRung: onInputMethodRung)
+            self.scheduleVocabularyRetro(plan, reconciliation: reconciliation, rung: outcome)
         }
     }
 
     /// `metrics.log`'s `outcome` for the two rungs that can still edit what they
     /// wrote.
     ///
-    /// Taken from the delivery that actually happened, never re-derived at drain
-    /// time: `liveTyping.tier` is live state and by then it can already describe
+    /// Judged on the delivery that actually happened — the `outcome` string
+    /// travels by value into the retro pass — never on `liveTyping.tier`, which
+    /// is live state and by drain time can already describe
     /// a different utterance in a different app. An utterance that was pasted
     /// must reach the learn-only fallback even if the input method has since
     /// come back, because the text in the field is no longer ours to touch.
@@ -861,19 +884,26 @@ public final class SessionController: @unchecked Sendable {
     /// apply — close the books on it immediately.
     private func scheduleVocabularyRetro(_ plan: VocabularyRetroPlan,
                                          reconciliation: VocabularyReconciliation,
-                                         onInputMethodRung: Bool) {
+                                         rung: String) {
         let hits = reconciliation.termHits.values.reduce(0, +)
         guard !plan.edits.isEmpty else {
             if let refusal = plan.refusal {
                 log.info("vocab retro refused: \(refusal.rawValue, privacy: .public)")
             }
             writeVocabularyRetroMetrics(reconciliation: reconciliation, hits: hits,
-                                        proposed: false, applied: false)
+                                        proposed: false, applied: false,
+                                        rung: rung, refusal: plan.refusal)
             return
         }
-        enqueueDeferred("vocab-retro") { [weak self] in
+        // A parked plan's row is written when its fate is known: at drain, or
+        // right here at discard time — a proposal must never vanish silently.
+        enqueueDeferred("vocab-retro", onDrop: { [weak self] in
+            self?.writeVocabularyRetroMetrics(reconciliation: reconciliation, hits: hits,
+                                              proposed: true, applied: false,
+                                              rung: rung, applyDetail: "dropped")
+        }) { [weak self] in
             self?.applyVocabularyRetro(plan, reconciliation: reconciliation, hits: hits,
-                                       onInputMethodRung: onInputMethodRung)
+                                       rung: rung)
         }
     }
 
@@ -888,14 +918,22 @@ public final class SessionController: @unchecked Sendable {
     func applyVocabularyRetro(_ plan: VocabularyRetroPlan,
                               reconciliation: VocabularyReconciliation,
                               hits: Int,
-                              onInputMethodRung: Bool) {
+                              rung: String) {
+        let onInputMethodRung = SessionController.isInputMethodRung(rung)
         var fixed: String?
         var learned: String?
+        var declined: String?
         for edit in plan.edits {
-            if onInputMethodRung,
-               applyRetroEdit(target: edit.replace, replacement: edit.with) != nil {
-                if fixed == nil { fixed = edit.with }
-                continue
+            if onInputMethodRung {
+                switch applyRetroEdit(target: edit.replace, replacement: edit.with) {
+                case .applied:
+                    if fixed == nil { fixed = edit.with }
+                    continue
+                case .declined(let detail):
+                    // The first refusal names the row, like the planner's
+                    // `refusal` names the first gate that said no.
+                    if declined == nil { declined = detail }
+                }
             }
             if learnVocabularyEvidence(term: edit.with, heard: edit.replace), learned == nil {
                 learned = edit.with
@@ -908,8 +946,13 @@ public final class SessionController: @unchecked Sendable {
         } else if let learned {
             pill?.transientNotice("Learned \(learned)")
         }
+        // `apply_detail` only on a proposed-but-not-applied row that ATTEMPTED
+        // an edit. On the paste/type rungs no edit is ever attempted and the
+        // `rung` field is the whole explanation.
         writeVocabularyRetroMetrics(reconciliation: reconciliation, hits: hits,
-                                    proposed: true, applied: fixed != nil)
+                                    proposed: true, applied: fixed != nil,
+                                    rung: rung,
+                                    applyDetail: fixed == nil ? declined : nil)
     }
 
     /// Record the misrecognition against a term the dictionary ALREADY has.
@@ -924,12 +967,18 @@ public final class SessionController: @unchecked Sendable {
 
     /// The reference-less second line. See the note on `MetricsRecord`.
     private func writeVocabularyRetroMetrics(reconciliation: VocabularyReconciliation,
-                                             hits: Int, proposed: Bool, applied: Bool) {
+                                             hits: Int, proposed: Bool, applied: Bool,
+                                             rung: String,
+                                             refusal: VocabularyRetroRefusal? = nil,
+                                             applyDetail: String? = nil) {
         metrics.write(MetricsRecord(
             heldMs: 0, engine: VocabularyChannel.engineName, finalizeMs: 0,
             timedOut: false, postMs: 0, insertMs: 0, outcome: "vocab_retro", chars: 0,
             vocabMs: reconciliation.elapsedMs, vocabHits: hits,
-            vocabDelta: proposed ? 1 : 0, applied: applied))
+            vocabDelta: proposed ? 1 : 0, applied: applied,
+            vocabRefusal: refusal?.rawValue,
+            rung: rung.isEmpty ? nil : rung,
+            applyDetail: applyDetail))
     }
 
     private func flashError(_ message: String) {

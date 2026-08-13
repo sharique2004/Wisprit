@@ -144,6 +144,45 @@ final class MetricsWriterTests: XCTestCase {
         XCTAssertEqual(record.jsonLine(), Golden.metricsVocabRetroRow)
     }
 
+    func testVocabRetroDiagnosedRowMatchesItsGoldenLine() {
+        let record = MetricsRecord(
+            ts: 1786399512.204418, heldMs: 0, engine: "apple_dictation", finalizeMs: 0,
+            timedOut: false, postMs: 0, insertMs: 0, outcome: "vocab_retro", chars: 0,
+            vocabMs: 1243.62, vocabHits: 2, vocabDelta: 1, applied: false,
+            rung: "im_streaming", applyDetail: "noDocumentAccess")
+        XCTAssertEqual(record.jsonLine(), Golden.metricsVocabRetroDiagnosedRow)
+    }
+
+    /// The 2026-08-12 diagnosis trio appends after every existing key, in
+    /// on-disk order, and only when set — a row with none of it is byte-for-byte
+    /// what the previous build wrote (`testVocabRetroRowMatchesItsGoldenLine`).
+    func testVocabRetroDiagnosisFieldsAppendAfterEverythingAndOmitWhenAbsent() throws {
+        let with = MetricsRecord(
+            ts: 1786399512.204418, heldMs: 0, engine: "apple_dictation", finalizeMs: 0,
+            timedOut: false, postMs: 0, insertMs: 0, outcome: "vocab_retro", chars: 0,
+            vocabMs: 1243.62, vocabHits: 2, vocabDelta: 0, applied: false,
+            vocabRefusal: "aligned", rung: "paste", applyDetail: "dropped")
+        guard case .object(let object) = try WispritJSON.parse(with.jsonLine()) else {
+            return XCTFail("not an object")
+        }
+        XCTAssertEqual(object.keys, [
+            "ts", "held_ms", "engine", "finalize_ms", "timed_out", "post_ms",
+            "insert_ms", "outcome", "chars",
+            "vocab_ms", "vocab_hits", "vocab_delta", "applied",
+            "vocab_refusal", "rung", "apply_detail",
+        ])
+        XCTAssertEqual(object["vocab_refusal"], .string("aligned"))
+        XCTAssertEqual(object["rung"], .string("paste"))
+        XCTAssertEqual(object["apply_detail"], .string("dropped"))
+        let without = MetricsRecord(
+            ts: 1786399512.204418, heldMs: 0, engine: "apple_dictation", finalizeMs: 0,
+            timedOut: false, postMs: 0, insertMs: 0, outcome: "vocab_retro", chars: 0,
+            vocabMs: 1243.62, vocabHits: 2, vocabDelta: 1, applied: true).jsonLine()
+        for key in ["vocab_refusal", "rung", "apply_detail"] {
+            XCTAssertFalse(without.contains(key), "\(key) must be omitted, not null")
+        }
+    }
+
     /// The additive promise again, for the four newest keys: an utterance row is
     /// byte-identical to what the previous build wrote.
     func testAnUtteranceRowNeverCarriesTheVocabFields() {

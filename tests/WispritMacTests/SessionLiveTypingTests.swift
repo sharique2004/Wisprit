@@ -493,6 +493,9 @@ final class SessionLiveTypingTests: XCTestCase {
         XCTAssertEqual(row?.vocabHits, 1)
         XCTAssertEqual(row?.vocabDelta, 1)
         XCTAssertEqual(row?.applied, true)
+        XCTAssertEqual(row?.rung, "im_streaming", "the rung its utterance went in by")
+        XCTAssertNil(row?.applyDetail, "an applied row has nothing to explain")
+        XCTAssertNil(row?.vocabRefusal)
         // It is its own line, not a rewrite of the utterance's.
         XCTAssertEqual(h.metrics.records.map(\.outcome), ["im_streaming", "vocab_retro"])
         XCTAssertNil(h.metrics.records.first?.vocabMs,
@@ -513,7 +516,74 @@ final class SessionLiveTypingTests: XCTestCase {
         XCTAssertEqual(row?.vocabHits, 2)
         XCTAssertEqual(row?.vocabDelta, 0, "the planner proposed nothing")
         XCTAssertEqual(row?.applied, false)
+        XCTAssertEqual(row?.vocabRefusal, "aligned",
+                       "the gate that said no is on the row, not just in os_log")
+        XCTAssertEqual(row?.rung, "im_streaming")
         XCTAssertEqual(h.peer.count(of: "apply_edit"), 0)
+    }
+
+    func testADeclinedRetroEditWritesTheRefusalDetailOnTheRow() {
+        let h = Harness(reconcile: true)
+        arm(h)
+        h.vocabulary.known = ["InsForge"]
+
+        h.utterance()
+        h.waitForDeferred()
+        // The user types over the word inside the reconcile window: the input
+        // method re-reads its document, finds the committed text gone, and
+        // refuses the edit rather than guess.
+        h.peer.userEdits("in forge", with: "informed")
+        h.session.drainDeferred()
+        let row = h.waitForVocabRow()
+
+        XCTAssertEqual(row?.vocabDelta, 1)
+        XCTAssertEqual(row?.applied, false)
+        XCTAssertEqual(row?.applyDetail, "fieldChanged",
+                       "the transcript-318 fix: the reason survives to disk")
+        XCTAssertEqual(row?.rung, "im_streaming")
+        XCTAssertEqual(h.pill.notices, ["Learned InsForge"],
+                       "the learn fallback is untouched — telemetry only")
+    }
+
+    func testADroppedPlanStillWritesItsRow() {
+        let h = Harness(reconcile: true)
+        arm(h)
+
+        h.utterance()
+        h.waitForDeferred()
+
+        // The next utterance begins inside the reconcile window: `begin()`
+        // discards the parked plan — which must close its books, not vanish.
+        h.session.dispatch(HotkeyEvent(.press, ts: 2))
+        let row = h.waitForVocabRow()
+
+        XCTAssertEqual(row?.vocabDelta, 1, "the plan HAD an edit; the row says so")
+        XCTAssertEqual(row?.applied, false)
+        XCTAssertEqual(row?.applyDetail, "dropped")
+        XCTAssertEqual(row?.rung, "im_streaming")
+        XCTAssertEqual(h.peer.count(of: "apply_edit"), 0, "dropped means never attempted")
+    }
+
+    func testAPasteRungRowNamesItsRungAndCarriesNoApplyDetail() {
+        let h = Harness(liveTypingEnabled: false, reconcile: true)
+        arm(h)
+        h.vocabulary.known = ["InsForge"]
+
+        h.utterance()
+        h.waitForDeferred()
+        h.session.drainDeferred()
+        let row = h.waitForVocabRow()
+
+        XCTAssertEqual(row?.rung, "paste")
+        XCTAssertEqual(row?.applied, false)
+        XCTAssertNil(row?.applyDetail,
+                     "no edit was attempted — the rung is the whole explanation")
+    }
+
+    func testARetroEditWithNoEngagedInputMethodReportsNotEngaged() {
+        let h = Harness(liveTypingEnabled: false)
+        XCTAssertEqual(h.session.applyRetroEdit(target: "a", replacement: "b"),
+                       .declined(detail: "not_engaged"))
     }
 
     func testSameUtteranceCorrectionNeverReachesTheInputMethod() {

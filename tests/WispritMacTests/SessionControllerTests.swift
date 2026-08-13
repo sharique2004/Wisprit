@@ -1113,6 +1113,36 @@ final class SessionControllerTests: XCTestCase {
                        + "land after the next one")
     }
 
+    /// Both ways out of the slot that are not the drain — a new utterance
+    /// dropping it, a newer plan replacing it — run the drop hook exactly once,
+    /// so a parked proposal always gets to close its books.
+    func testDiscardedDeferredWorkRunsItsDropHook() {
+        let h = Harness()
+        let ran = Recorder<String>()
+        let dropped = Recorder<String>()
+
+        h.session.enqueueDeferred("stale", onDrop: { dropped.append("stale") }) {
+            ran.append("stale")
+        }
+        h.session.enqueueDeferred("fresh", onDrop: { dropped.append("fresh") }) {
+            ran.append("fresh")
+        }
+        XCTAssertEqual(dropped.values, ["stale"], "replaced is discarded, so the hook runs")
+
+        h.utterance()
+        h.session.drainDeferred()
+        XCTAssertEqual(dropped.values, ["stale", "fresh"], "…and dropped is discarded too")
+        XCTAssertEqual(ran.values, [], "a discarded action never runs")
+
+        h.session.enqueueDeferred("drained", onDrop: { dropped.append("drained") }) {
+            ran.append("drained")
+        }
+        h.session.drainDeferred()
+        XCTAssertEqual(ran.values, ["drained"])
+        XCTAssertEqual(dropped.values, ["stale", "fresh"],
+                       "the drain is the work's own ending — no drop hook")
+    }
+
     // MARK: - interrupt mapping
 
     func testHotkeyInterruptMapsOneToOneOntoInterruptSignal() {
