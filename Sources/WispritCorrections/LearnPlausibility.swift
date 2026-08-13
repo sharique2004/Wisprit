@@ -83,6 +83,16 @@ public enum LearnPlausibility {
     /// IS a known term, a spelled run that is even loosely like it is a
     /// re-spelling, not a new name.
     public static let anchorScore = 0.80
+    /// The orthographic veto floor. Letters are ground truth — the user just
+    /// spelled them — so phonetics alone must never pick the merge target. The
+    /// live incident: A-L-I-X, spelled to correct "Alex", merged into `WellX`
+    /// because Double Metaphone codes ALIX, Alex, and WellX identically (ALKS,
+    /// phonetic 0.853/0.869) while the letters disagree almost everywhere
+    /// (similarity 0.400). A candidate sharing neither half its letters nor
+    /// its first letter with the run is a phonetic twin, not a mangled
+    /// spelling. 0.5 keeps `SHAIKD` (exactly 0.500 against `Sharique`, same
+    /// initial besides) inside the anchored rule it calibrates.
+    public static let orthographicFloor = 0.5
     /// Floor the run itself must clear under the anchored rule — the same 0.62
     /// the antecedent matcher cuts at, so the two gates agree on "related".
     public static let anchorFloor = AntecedentMatcher.threshold
@@ -144,6 +154,10 @@ public enum LearnPlausibility {
         for term in candidates {
             let score = PhoneticScorer.score(collapsed, term)
             let similarity = 1 - StringMetrics.normalizedLevenshtein(run, term.lowercased())
+            // The orthographic veto: sounding alike argues FOR a merge, but
+            // only the letters can make one safe (see `orthographicFloor`).
+            guard similarity >= orthographicFloor || run.first == term.lowercased().first
+            else { continue }
             let anchored = !antecedent.isEmpty && score >= anchorFloor
                 && PhoneticScorer.score(antecedent, term) >= anchorScore
             guard score >= mergeScore || similarity >= mergeSimilarity || anchored

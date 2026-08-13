@@ -82,6 +82,65 @@ final class LearnPlausibilityTests: XCTestCase {
             .quarantine(term: "SHARIQ"))
     }
 
+    /// The live incident of 2026-08-12: the user spelled A-L-I-X to correct
+    /// "Alex", and the gate merged it into `WellX` — Double Metaphone codes
+    /// ALIX, Alex, and WellX identically (ALKS), so every phonetic gate fires
+    /// while the letters disagree almost everywhere. The spelled run must
+    /// survive as a new name; the orthographic veto is what saves it.
+    func testASpelledNewNameIsNotHijackedByAPhoneticTwin() {
+        XCTAssertEqual(
+            LearnPlausibility.classify(
+                collapsed: "ALIX", antecedent: "Alex", candidates: dictionary + ["WellX"]),
+            .quarantine(term: "ALIX"))
+
+        // The numbers that made the hijack possible, pinned so a scorer change
+        // that resurrects it fails loudly: phonetics clear the merge gate, the
+        // letters fall below the veto floor, and the initials differ.
+        XCTAssertGreaterThanOrEqual(
+            PhoneticScorer.score("ALIX", "WellX"), LearnPlausibility.mergeScore)
+        XCTAssertLessThan(
+            1 - StringMetrics.normalizedLevenshtein("alix", "wellx"),
+            LearnPlausibility.orthographicFloor)
+    }
+
+    /// Once the spelled name IS vocabulary, the next spelling of it must land
+    /// on that entry, not the phonetic twin: the exact term outscores WellX.
+    func testTheSpelledNameItselfWinsOnceLearned() {
+        XCTAssertEqual(
+            LearnPlausibility.classify(
+                collapsed: "ALIX", antecedent: "Alex",
+                candidates: dictionary + ["WellX", "ALIX"]),
+            .merge(into: "ALIX"))
+    }
+
+    /// Pins the `>=` in the similarity arm, alone. CHERIE sits EXACTLY on the
+    /// 0.500 floor with a DIFFERENT initial (c ≠ s), so the initial escape
+    /// cannot rescue it — a `>` would silently veto the very Cherie/Sharique
+    /// rescue pair the PhoneticScorer doc comment is calibrated on.
+    func testTheSimilarityFloorIsInclusive() {
+        XCTAssertEqual(
+            1 - StringMetrics.normalizedLevenshtein("cherie", "sharique"),
+            LearnPlausibility.orthographicFloor, accuracy: 0.0001)
+        XCTAssertEqual(
+            LearnPlausibility.classify(
+                collapsed: "CHERIE", antecedent: "Sharik", candidates: dictionary),
+            .merge(into: "Sharique"))
+    }
+
+    /// Pins the first-letter escape, alone. SHIRK is the spelled run with its
+    /// letters transposed by the ASR: similarity 0.375 is BELOW the floor, so
+    /// only the matching initial keeps the merge alive — deleting the escape
+    /// clause turns this into a junk quarantined term.
+    func testAMatchingInitialRescuesAGarbledRunBelowTheFloor() {
+        XCTAssertLessThan(
+            1 - StringMetrics.normalizedLevenshtein("shirk", "sharique"),
+            LearnPlausibility.orthographicFloor)
+        XCTAssertEqual(
+            LearnPlausibility.classify(
+                collapsed: "SHIRK", antecedent: "Sharik", candidates: dictionary),
+            .merge(into: "Sharique"))
+    }
+
     /// An unrelated dictionary must not attract anything. Merging into the
     /// wrong term would put a word the user never said into their document,
     /// which is worse than learning a junk one.
