@@ -131,6 +131,54 @@ final class SelfCorrectionTests: XCTestCase {
         ])
     }
 
+    // MARK: - tier (a): possessive date pairs
+
+    func testPossessiveDatePairs() {
+        // Verbatim from the bug report: "tonight's meeting? Actually,
+        // tomorrow's meeting?" must come out as tomorrow's meeting alone.
+        let raw = "Could you write an email saying that I'd be late for "
+            + "tonight's meeting? Actually, tomorrow's meeting?"
+        let fixed = "Could you write an email saying that I'd be late for "
+            + "tomorrow's meeting?"
+        XCTAssertEqual(PostProcess.process(raw), fixed)
+        assertCases([
+            (raw, fixed),
+            ("tonight's meeting no actually tomorrow's meeting",
+             "tomorrow's meeting"),
+            ("I'll miss Monday's standup, no wait, Tuesday's standup",
+             "I'll miss Tuesday's standup"),
+            ("March's numbers sorry April's numbers", "April's numbers"),
+            ("late for tonight's meeting. Actually, tomorrow's meeting.",
+             "late for tomorrow's meeting."),
+            // the recognizer punctuates the hesitation AND emits the curly
+            // apostrophe — the live path sees exactly this
+            ("late for tonight\u{2019}s meeting? Actually, tomorrow\u{2019}s meeting?",
+             "late for tomorrow\u{2019}s meeting?"),
+            // multi-word head, repeated verbatim on both sides
+            ("skip tonight's team meeting, actually tomorrow's team meeting",
+             "skip tomorrow's team meeting"),
+            // the DATE classes may cross — a day corrects a day
+            ("Friday's meeting no actually tomorrow's meeting",
+             "tomorrow's meeting"),
+            // a chain resolves through the fixpoint loop
+            ("tonight's meeting no tomorrow's meeting no Friday's meeting",
+             "Friday's meeting"),
+            // fillers in the joint, as the live path sees them
+            ("tonight's meeting umm no actually tomorrow's meeting",
+             "tomorrow's meeting"),
+        ])
+        assertUntouched([
+            // different head noun — ambiguous prose, verbatim
+            "compare Monday's numbers, actually Friday's report is better",
+            // no possessive (contraction reading) on the right side
+            "tonight's meeting, no, tomorrow's fine",
+            // 's as a contraction, no pair at all
+            "tonight's the night",
+            // "and actually" is prose, not a joint
+            "I checked yesterday's numbers and actually today's numbers too",
+        ])
+    }
+
     // MARK: - tier (a): refusals
 
     func testCrossClassRefusals() {

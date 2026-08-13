@@ -25,6 +25,13 @@
 //      and "I actually think Friday works" are untouched, because nothing on
 //      the left of "actually" is a weekday.
 //
+//      POSSESSIVE DATE PAIR, the phrase form of tier (a): "<class>'s <head>
+//      <connective> <class>'s <head>" with the SAME head noun on both sides
+//      keeps the right phrase wholesale — "tonight's meeting? Actually,
+//      tomorrow's meeting" -> "tomorrow's meeting". The repeated head is what
+//      makes the weak connectives safe on a two-token side, exactly as class
+//      membership does for a bare one. See `possessivePairRx`.
+//
 //   b. GENERAL MARKER. The Python rule ("no wait"), plus two new markers that
 //      are unambiguous enough to work on any word: "no actually" and "I mean".
 //      The replaced span is the Python span — the single word before the
@@ -75,7 +82,7 @@ public enum SelfCorrection {
     ///
     /// Pure, allocation-light and fast enough to run on every partial: a sweep
     /// only allocates when it actually rewrites something, and a string with no
-    /// marker in it costs three regex scans and returns the input unchanged.
+    /// marker in it costs four regex scans and returns the input unchanged.
     public static func apply(_ text: String) -> String {
         guard !text.isEmpty else { return text }
         var text = text
@@ -99,7 +106,11 @@ public enum SelfCorrection {
     static let maxPasses = 4
 
     static func sweep(_ text: String) -> String {
-        var text = correctJoints(text)
+        // Possessive date pair first — its evidence (same head noun on both
+        // sides) is stronger than anything the joint sweep can establish, so
+        // it gets first claim on the span. See `possessivePairRx`.
+        var text = possessivePairRx.replacingAll(in: text, with: "$2")
+        text = correctJoints(text)
         // "scratch that" — keep only what follows the LAST occurrence (greedy).
         if scratchProbeRx.matches(text) {
             text = scratchRx.replacingAll(in: text, with: "")
@@ -516,6 +527,35 @@ private let jointPattern = "(?<![\\w'-])"
     + gap
     + "(?:(" + classAlternation + ")(?![\\w'-]))?"
 private let jointRx = Rx(jointPattern)
+
+// MARK: - Possessive date pair
+
+// "tonight's meeting? Actually, tomorrow's meeting" -> "tomorrow's meeting".
+//
+// Tier (a)'s safety argument, one construction wider: both sides are a
+// possessive DATE-class item ("tonight's", "Friday's", "March's") and the head
+// noun after it repeats verbatim, so the weak connectives — bare "actually",
+// "sorry", "no" — are safe here for the same reason they are safe in a
+// closed-class sandwich. The repeated head is the load-bearing evidence: it is
+// exactly what the contraction reading ("tomorrow's fine" = "tomorrow is
+// fine") can never produce, and without it the sentence is ambiguous prose
+// ("Monday's numbers, actually Friday's report is better") and passes
+// verbatim. The three DATE classes may cross ("Friday's meeting no actually
+// tomorrow's meeting") — a day corrects a day; clock times and numbers are not
+// in the rule because their possessives do not occur in speech.
+//
+// Y — its possessor, its copy of the head, casing and all — stays verbatim;
+// X, the joint, and X's copy of the head go, which is what `sweep` replaces
+// the whole match with via `$2`. The head may span up to three words
+// ("tomorrow's team meeting"), compared case-insensitively through the
+// backreference. Chains resolve through the fixpoint loop in `apply`.
+private let datePossessive = "(?:" + weekdayPattern + "|" + monthPattern + "|"
+    + relativeDayPattern + ")['\u{2019}]s"
+private let possessivePairRx = Rx(
+    "(?<![\\w'-])" + datePossessive
+        + "\\s+([\\w']+(?:\\s+[\\w']+){0,2})" + gap
+        + "(?:" + markerPhrases.map(\.pattern).joined(separator: "|") + ")" + gap
+        + "(" + datePossessive + "\\s+\\1)(?![\\w'-])")
 
 // "scratch that" — keep only what follows the LAST occurrence (greedy).
 private let scratchRx = Rx(#"^.*\bscratch\s+that\b[,.]?\s*"#,
