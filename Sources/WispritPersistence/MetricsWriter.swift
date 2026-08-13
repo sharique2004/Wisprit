@@ -21,10 +21,10 @@ import WispritKit
 ///    it. A reference-less second line carrying `vocab_ms` / `vocab_hits` /
 ///    `vocab_delta` / `applied` is the honest shape; attributing the numbers to
 ///    the next utterance's row would not be. One such row is written per
-///    completed reconciliation, at the moment `applied` is finally known —
-///    which means a plan whose deferred application is dropped by a new
-///    utterance writes no row at all, rather than a row claiming `applied:
-///    false` for an edit that was never attempted.
+///    completed reconciliation, at the moment `applied` is finally known. For
+///    a plan whose deferred application a new utterance discards, that moment
+///    is the discard itself, and the row says so (`apply_detail: "dropped"`,
+///    2026-08-12) — a proposal must never vanish from the stream silently.
 
 public struct MetricsRecord: Sendable {
     public var ts: Double            // wall-clock seconds, Python's time.time()
@@ -78,6 +78,13 @@ public struct MetricsRecord: Sendable {
     public var onboardMs: Double?    // first launch → first successful dictation
     public var stepsSkipped: Int?    // onboarding steps the user skipped
     public var relaunches: Int?      // relaunch count before the first dictation
+    // 2026-08-12: the `vocab_retro` row's diagnosis trio — why `applied` is
+    // false. Before these, applied:false could mean a correct planner refusal,
+    // a real apply failure, or a dropped plan, indistinguishably.
+    public var vocabRefusal: String? // VocabularyRetroRefusal.rawValue: the gate that proposed nothing
+    public var rung: String?         // the utterance's insertion `outcome`, carried onto its retro row
+    public var applyDetail: String?  // why a proposed edit did not land:
+                                     // IMEditDetail.rawValue | not_engaged | no_reply | dropped
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
@@ -92,7 +99,9 @@ public struct MetricsRecord: Sendable {
                 restoreMs: Double? = nil, repressQueued: Bool? = nil,
                 noiseFloor: Double? = nil, firstVoicedMs: Double? = nil,
                 onboardMs: Double? = nil, stepsSkipped: Int? = nil,
-                relaunches: Int? = nil) {
+                relaunches: Int? = nil,
+                vocabRefusal: String? = nil, rung: String? = nil,
+                applyDetail: String? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -126,6 +135,9 @@ public struct MetricsRecord: Sendable {
         self.onboardMs = onboardMs
         self.stepsSkipped = stepsSkipped
         self.relaunches = relaunches
+        self.vocabRefusal = vocabRefusal
+        self.rung = rung
+        self.applyDetail = applyDetail
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -177,6 +189,12 @@ public struct MetricsRecord: Sendable {
         if let onboardMs { entry["onboard_ms"] = .double(MetricsWriter.round1(onboardMs)) }
         if let stepsSkipped { entry["steps_skipped"] = .int(stepsSkipped) }
         if let relaunches { entry["relaunches"] = .int(relaunches) }
+        // The `vocab_retro` diagnosis trio (2026-08-12), strictly after every
+        // key above — the append-only rule once more. Absent on every row an
+        // earlier build could have written, so those stay byte-for-byte prefixes.
+        if let vocabRefusal { entry["vocab_refusal"] = .string(vocabRefusal) }
+        if let rung { entry["rung"] = .string(rung) }
+        if let applyDetail { entry["apply_detail"] = .string(applyDetail) }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -221,6 +239,11 @@ public enum MetricsField {
     public static let onboardMs = "onboard_ms"
     public static let stepsSkipped = "steps_skipped"
     public static let relaunches = "relaunches"
+    // The `vocab_retro` diagnosis trio (2026-08-12) — strings, session-written
+    // as a `MetricsRecord` directly, like `applied`.
+    public static let vocabRefusal = "vocab_refusal"
+    public static let rung = "rung"
+    public static let applyDetail = "apply_detail"
 }
 
 public final class MetricsWriter: @unchecked Sendable {

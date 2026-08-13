@@ -125,8 +125,22 @@ reads and the third native appendix in `Settings.defaults` (append-only, after
   `Golden.metricsVocabRetroRow` and `MetricsSummaryTests`.
   Exactly one row is written per completed reconciliation, at the moment
   `applied` is finally known. A plan whose deferred application is dropped
-  because the user started speaking again writes **no** row, rather than one
-  claiming `applied: false` for an edit that was never attempted.
+  because the user started speaking again writes its row at the drop, marked
+  `apply_detail: "dropped"` — a proposal must never vanish from the stream
+  silently. (Amended 2026-08-12: it previously wrote **no** row, which made a
+  dropped plan indistinguishable from a pass that never proposed anything.)
+- **The `vocab_retro` diagnosis trio (2026-08-12), appended after `applied`:**
+  `vocab_refusal` (the planner gate that proposed nothing,
+  `VocabularyRetroRefusal.rawValue`), `rung` (the utterance's insertion
+  `outcome`, carried onto its retro row so a paste-rung learn-only row stops
+  looking like a failure), and `apply_detail` (why a proposed edit did not
+  land: `IMEditDetail.rawValue`, or `not_engaged` / `no_reply` when the input
+  method was never asked / never answered, or `dropped` as above). Before
+  these, every `vocab_retro` row with `applied: false` was indistinguishable
+  from every other — a correct refusal, a real apply failure (transcript 318's
+  was logged only at os_log info level, which is memory-only, and was lost),
+  or a dropped plan. Telemetry only; reconciliation behavior is unchanged.
+  Pinned by `Golden.metricsVocabRetroDiagnosedRow`.
 
 ## Self-correction beyond the Python markers (2026-08-10)
 
