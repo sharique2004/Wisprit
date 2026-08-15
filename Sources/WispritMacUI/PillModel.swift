@@ -55,18 +55,32 @@ public struct PillRender: Equatable, Sendable {
     /// NEW — true while the tail is the live dead-mic cue (R10): notice
     /// styling, muted ink, never orange and never an alarm.
     public var tailMuted: Bool
-    /// NEW — the meter levels as they stood the moment `finalizing`/`refining`
-    /// collapsed them (oldest first, full slot count), so the surface can play
-    /// the §2.5 staggered collapse from them. Empty when there is nothing to
-    /// collapse; `bars` itself already reads all-floor — a held waveform would
-    /// be a lie, and every existing assertion on `bars` stays true.
-    public var collapseFrom: [Double]
 
     public static let collapsed = PillRender(
         isVisible: false, state: .hidden, tint: PillPalette.tint(for: .hidden), level: 0,
         bars: [], bubble: "", bubbleWidth: 0, message: "", glyph: .none,
         totalWidth: PillGeometry.widthListening, height: PillGeometry.height,
-        tailMuted: false, collapseFrom: [])
+        tailMuted: false)
+
+    /// Whether the only thing that moved between two frames is the meter.
+    ///
+    /// This is the predicate that keeps the SwiftUI view tree completely inert
+    /// during dictation: a render that passes it is handed straight to the
+    /// meter's `CALayer`s and never written to `PillRenderBox`, so the hosting
+    /// view is not asked to lay anything out twenty times a second.
+    ///
+    /// It is deliberately *not* "the frame change is `.none`". The first level
+    /// tick of an utterance also leaves the width and the visibility alone, but
+    /// it ends `prewarming` — and the tint crossfade, the body and the
+    /// accessibility label ("Starting" → "Listening") all live in SwiftUI. Key
+    /// this on the frame kind and the surface freezes in `prewarming`.
+    public static func isMeterOnly(_ old: PillRender, _ new: PillRender) -> Bool {
+        guard !new.bars.isEmpty else { return false }
+        var a = old, b = new
+        a.bars = []; a.level = 0
+        b.bars = []; b.level = 0
+        return a == b
+    }
 }
 
 /// Work the view layer must schedule on a real timer. `pill.py` used
@@ -110,8 +124,12 @@ public final class PillModel {
     public private(set) var bubbleWidth: Double = 0
     /// The retained error / notice message (§2.7).
     public private(set) var message: String = ""
-    /// The scrolling meter. Pure, and the reason silence is free (§2.3).
-    public private(set) var waveform = WaveformBuffer(slots: PillGeometry.barCount)
+    /// The meter. Pure, seeded, and still the reason silence is free — the
+    /// bars now breathe in place instead of scrolling (`BarSynthesizer`).
+    private var synth = BarSynthesizer(barCount: PillGeometry.barCount)
+    /// The last targets the synthesizer emitted, oldest-to-newest by position
+    /// rather than by time: bar *i* is bar *i*, always.
+    private var barValues = [Double](repeating: 0, count: PillGeometry.barCount)
 
     /// §2.4's "width held": once an utterance has widened the panel, the
     /// finalize/refine/error states keep that width rather than snapping back —
@@ -137,9 +155,6 @@ public final class PillModel {
     /// listen"). Same styling contract as the dead-mic cue — muted ink, never
     /// an alarm — which is why both feed one `tailMuted` flag rather than two.
     private var patienceCue = false
-
-    /// The §2.5 staggered-collapse source — see `PillRender.collapseFrom`.
-    private var collapseFrom: [Double] = []
 
     /// `pill.py._hidden()` — the `pill_hidden` setting. Injected so the UI
     /// target imports nothing from `WispritPersistence`.
@@ -173,23 +188,27 @@ public final class PillModel {
             glyph: glyph,
             totalWidth: totalWidth,
             height: PillGeometry.height,
-            tailMuted: deadMicCue || patienceCue,
-            collapseFrom: collapseFrom)
+            tailMuted: deadMicCue || patienceCue)
     }
 
     // MARK: - public API (main thread)
 
-    /// The Flow-style resting bar. Compact cream dots, always on screen
-    /// unless the user hid it. Hold the key and it expands into the meter.
+    /// The Flow-style resting bar: ten cream dots in the same 96 pt capsule
+    /// the meter uses, always on screen unless the user hid it.
+    ///
+    /// It no longer *expands* into the meter, because there is nothing to
+    /// expand — idle is the listening frame at silence, which is exactly what
+    /// the real Flow app does (its idle and listening capsules measure the same
+    /// width, and its "dots" are its bars at floor). `idle → listening` is
+    /// therefore a colour crossfade and the bars coming alive, nothing else.
     public func showIdle() {
         guard !isSuppressed() else { return }
         cancelSchedule()
         level = 0
-        waveform.collapse()
+        collapseMeter()
         clearBubbleState()
         heldWidth = nil
         resetDeadMicTracking()
-        collapseFrom = []
         state = .idle
         isVisible = true
         emit()
@@ -200,7 +219,7 @@ public final class PillModel {
     /// state is deliberately not orange.
     public func showPrewarming() {
         level = 0
-        waveform.collapse()
+        collapseMeter()
         clearBubbleState()
         heldWidth = nil
         resetDeadMicTracking()
@@ -210,7 +229,7 @@ public final class PillModel {
     /// `show_recording`: level reset to 0, panel ordered front.
     public func showRecording() {
         level = 0
-        waveform.collapse()
+        collapseMeter()
         clearBubbleState()
         heldWidth = nil
         resetDeadMicTracking()
@@ -220,11 +239,12 @@ public final class PillModel {
     /// `update_level`: silent while the pill is suppressed; never changes
     /// visibility.
     ///
-    /// Two disciplines meet here. The buffer scrolls, so an *unchanged* level
-    /// still moves the waveform and still redraws — but once the incoming level
-    /// and every slot are at floor, `push` returns false and nothing is emitted
-    /// at all. An idle-but-visible pill costs zero redraws, which is the whole
-    /// budget the CGEventTap left us (§2.3).
+    /// Two disciplines meet here. The bars breathe in place, so an *unchanged*
+    /// level still moves them — the envelope is still settling and each bar's
+    /// jitter still has its own deadline — but once the envelope has snapped to
+    /// zero and the row is already at floor, `push` returns nil and nothing is
+    /// emitted at all. An idle-but-visible pill costs zero redraws, which is
+    /// the whole budget the CGEventTap left us (§2.3).
     public func updateLevel(_ newLevel: Double) {
         guard !isSuppressed() else { return }
         level = PillGeometry.clampLevel(newLevel)
@@ -232,7 +252,11 @@ public final class PillModel {
         // ends `prewarming`.
         let opened = (state == .prewarming)
         if opened { state = .recording }
-        let changed = waveform.push(level)
+        var changed = false
+        if let targets = synth.push(level) {
+            barValues = targets
+            changed = true
+        }
         let cued = trackDeadMic()
         if changed || opened || cued { emit() }
     }
@@ -326,8 +350,7 @@ public final class PillModel {
     public func showFinalizing() {
         holdWidth()
         level = 0
-        captureCollapse()
-        waveform.collapse()
+        collapseMeter()
         clearBubbleState()
         show(.finalizing)
         armPatience()
@@ -339,15 +362,17 @@ public final class PillModel {
     public func showRefining() {
         holdWidth()
         level = 0
-        captureCollapse()
-        waveform.collapse()
+        collapseMeter()
         clearBubbleState()
         show(.refining)
         armPatience()
     }
 
-    /// `flash_success`: auto-hide after 0.6 s. The panel contracts to a 28 pt
-    /// circle — a check mark needs no width.
+    /// `flash_success`: auto-hide after 0.6 s.
+    ///
+    /// The panel contracts back to the 96 pt resting capsule — no check mark,
+    /// no 28 pt circle. The text is already in the field; a receipt for it is
+    /// the pill talking about itself.
     public func flashSuccess() {
         clearBubbleState()
         heldWidth = nil
@@ -371,10 +396,35 @@ public final class PillModel {
     /// no glyph, no shake — Flow fades; we name it quietly and go.
     public func flashMissed(_ message: String = PillGeometry.missedMessage) {
         holdWidth()
-        waveform.collapse()
+        collapseMeter()
         showMessageState(.missed,
                          message.isEmpty ? PillGeometry.missedMessage : message,
                          hideAfter: PillGeometry.missedHideDelay)
+    }
+
+    /// NEW (2026-08-15) — the marginal-audio miss: we heard the user, the room
+    /// was louder than they were, and there is something they can do about it.
+    ///
+    /// The `missed` body, because this is not a fault — but laid out like the
+    /// alarm states and held like `blockedSecure`, because unlike "Didn't catch
+    /// that" the copy is an INSTRUCTION. A miss's 196 pt tail truncates at ~26
+    /// characters, which is exactly wide enough to show a diagnosis and cut off
+    /// the remedy; 0.9 s is likewise the right dwell for two words and the wrong
+    /// one for a sentence the user has to act on.
+    public func flashTooQuiet(_ message: String) {
+        holdWidth()
+        collapseMeter()
+        if !isSuppressed() {
+            let flat = PartialTail.notice(message.isEmpty ? PillGeometry.missedMessage : message,
+                                          maxCharacters: PillGeometry.errorMessageCharacters)
+            self.message = flat
+            bubble = flat
+            bubbleWidth = PillTailGeometry.errorWidth(forCharacters: flat.count)
+            deadMicCue = false
+            patienceCue = false
+        }
+        show(.missed)
+        schedule(PillGeometry.blockedSecureHideDelay, .settle)
     }
 
     /// NEW — the focused app holds Secure Keyboard Entry. Distinct from an
@@ -394,11 +444,10 @@ public final class PillModel {
         state = .hidden
         isVisible = false
         level = 0
-        waveform.collapse()
+        collapseMeter()
         clearBubbleState()
         heldWidth = nil
         resetDeadMicTracking()
-        collapseFrom = []
         emit()
     }
 
@@ -454,32 +503,36 @@ public final class PillModel {
 
     // MARK: - internals
 
-    /// The meter, sized for the frame: the compact 7-bar field when a text tail
-    /// shares the capsule, nothing at all in the states whose meter is replaced
-    /// by a glyph.
+    /// The meter — one ten-bar field, in every state that has one.
+    ///
+    /// The old compact/idle/full split is gone. Flow has a single field and
+    /// grows the capsule around it: its idle dots and its listening bars are
+    /// the same ten objects in the same places, which is why `idle → listening`
+    /// there is not a transition at all, only the bars coming alive. The two
+    /// alarm states keep an empty meter because their glyph *is* the meter.
     private var bars: [Double] {
         switch state {
-        case .prewarming, .recording, .finalizing, .refining:
-            return bubble.isEmpty ? waveform.normalized
-                                  : waveform.newest(PillGeometry.barCountCompact)
-        case .missed:
-            // Flow flattens the waveform and leaves. We keep the dots
-            // beside the quiet copy so a miss is not a warning glyph.
-            return waveform.newest(PillGeometry.barCountCompact)
-        case .idle:
-            return waveform.newest(PillGeometry.barCountIdle)
-        case .hidden, .success, .error, .blockedSecure:
+        case .hidden, .error, .blockedSecure:
             return []
+        case .prewarming, .recording, .finalizing, .refining, .missed, .success, .idle:
+            return barValues
         }
     }
 
     private var glyph: PillGlyph {
         switch state {
-        case .success: return bubble.isEmpty ? .checkmark : .sparkle
+        // No commit glyph. Flow has none — the inserted text is the
+        // confirmation — and a check mark that contracts the pill to a circle
+        // was the loudest thing in a moment that should be the quietest. A
+        // notice still gets its sparkle: that one is *news*, not a receipt.
+        case .success: return bubble.isEmpty ? .none : .sparkle
         case .error: return .warning
         case .blockedSecure: return .lock
-        case .refining: return .sparkles
-        case .hidden, .prewarming, .recording, .finalizing, .missed, .idle: return .none
+        // `refining`'s sparkles are gone too: the spinner already says "still
+        // working", and the patience copy already says which work. Two glyphs
+        // for one wait is chrome, not information.
+        case .hidden, .prewarming, .recording, .finalizing, .refining, .missed, .idle:
+            return .none
         }
     }
 
@@ -489,21 +542,22 @@ public final class PillModel {
             ? PillGeometry.widthListening
             : PillTailGeometry.totalWidth(tailWidth: bubbleWidth)
         switch state {
-        case .success:
-            // `committed` contracts to a circle — unless it is carrying a
-            // notice, which is a text row that happens to be green.
-            return bubble.isEmpty ? PillGeometry.widthCommitted : natural
         case .error:
             return max(PillGeometry.errorMinWidth, max(natural, heldWidth ?? 0))
         case .blockedSecure:
             return max(PillGeometry.blockedSecureMinWidth, max(natural, heldWidth ?? 0))
         case .finalizing, .refining:
-            return max(natural, heldWidth ?? 0)
+            // The processing floor: Flow widens ×1.34 on release to make room
+            // for the spinner beside a leading-aligned dot row. When a patience
+            // line is also in the tail, the spinner's own room is added on top
+            // — otherwise the copy runs underneath it.
+            let waiting = bubble.isEmpty ? natural : natural + PillTailGeometry.spinnerAllowance
+            return max(PillGeometry.widthProcessing, max(waiting, heldWidth ?? 0))
         case .missed:
             return max(natural, heldWidth ?? 0)
-        case .idle:
-            return PillGeometry.widthIdle
-        case .hidden, .prewarming, .recording:
+        // `success` and `idle` are the same resting capsule now — the commit
+        // is a contraction back to it, not to a circle.
+        case .hidden, .prewarming, .recording, .success, .idle:
             return natural
         }
     }
@@ -538,9 +592,6 @@ public final class PillModel {
     private func show(_ newState: PillState) {
         guard !isSuppressed() else { return }
         cancelSchedule()
-        // The collapse choreography belongs to the two states that own it;
-        // any other show means the meter's story is over.
-        if newState != .finalizing && newState != .refining { collapseFrom = [] }
         state = newState
         isVisible = true
         emit()
@@ -562,12 +613,17 @@ public final class PillModel {
         deadMicCue = false
     }
 
-    /// Snapshot the meter for the §2.5 staggered collapse — taken just before
-    /// `waveform.collapse()`, and only when there is something to collapse
-    /// (re-entering via `showRefining` right after `showFinalizing` finds the
-    /// buffer already at floor and must not restart the choreography).
-    private func captureCollapse() {
-        collapseFrom = waveform.isSilent ? [] : waveform.normalized
+    /// Every bar back to floor.
+    ///
+    /// There is no snapshot to hand the surface any more, and no choreography
+    /// to restart: the meter's layers already hold the heights they are at, so
+    /// a collapse is one retarget to zero and the render server plays the fall
+    /// from wherever each bar happens to be. `showRefining` right after
+    /// `showFinalizing` is therefore a no-op on screen, which is what it should
+    /// always have been — the same wait wearing a different label.
+    private func collapseMeter() {
+        synth.reset()
+        barValues = [Double](repeating: 0, count: PillGeometry.barCount)
     }
 
     private func schedule(_ seconds: Double, _ action: PillDeferredAction) {

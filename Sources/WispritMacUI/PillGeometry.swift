@@ -144,6 +144,26 @@ public enum PillPalette {
         }
     }
 
+    /// The meter's own colour — three values, and the state decides.
+    ///
+    /// Cream at rest (idle, prewarming, the settled commit), mic-orange while
+    /// the microphone is open, and muted grey while the pill is working. That
+    /// last one is measured: on release Flow's cream bars dim to about 50 %
+    /// grey as the capsule widens, and the dimming is half of what makes the
+    /// release read as a handover rather than a pause.
+    ///
+    /// It resolves the *dark* tokens unconditionally, because the panel pins
+    /// its appearance to `darkAqua` — the pill floats on its own near-black
+    /// body whatever the Mac is set to.
+    public static func meterTint(for state: PillState) -> PillColor {
+        switch state {
+        case .recording: return hot
+        case .finalizing, .refining: return muted
+        case .hidden, .prewarming, .success, .error, .blockedSecure, .missed, .idle:
+            return cream
+        }
+    }
+
     /// Body fill and alpha. The two alarm states swap the near-black body for a
     /// *tinted* near-black — red for an error, warm for a block — which is the
     /// whole reason either one reads correctly before its text is parsed, and
@@ -164,35 +184,59 @@ public enum PillGeometry {
     /// the pill is a full capsule.
     public static let height: Double = 28.0
     public static var radius: Double { height / 2.0 }
-    /// The listening panel: aspect 3.43 : 1.
+    /// The one capsule. Idle, listening and the compact-with-a-tail frame all
+    /// share it — measured against the real Flow app, whose idle capsule and
+    /// listening capsule are the *same* 107 px object and whose "idle dots" are
+    /// simply its bars at floor. There is no idle geometry any more, which is
+    /// also why `idle → listening` needs no frame change at all.
     public static let widthListening: Double = 96.0
-    /// The Flow-style resting bar: compact capsule, five floor dots.
-    public static let widthIdle: Double = 48.0
-    public static let barCountIdle = 5
-    /// `committed` contracts to a circle.
-    public static let widthCommitted: Double = 28.0
+    /// The processing capsule: ×1.34 of the listening one (Flow's measured
+    /// 107 → 143 px), snapped to the 8 pt grid. Wide enough for the dot row to
+    /// sit leading-aligned with the spinner at the trailing inset.
+    public static let widthProcessing: Double = 128.0
     /// `_BOTTOM_MARGIN` for the default bottom-centre placement — unchanged.
     public static let bottomMargin: Double = 90.0
     /// §2.6 edge flip: keep this much clear of the screen's right edge.
     public static let edgeMargin: Double = 8.0
 
-    /// The meter (§2.2). Odd bar count, so there is a true centre bar.
-    public static let barCount = 15
-    public static let barWidth: Double = 2.5
-    public static let barPitch: Double = 5.0
-    /// `15 × 5.0 − 2.5`.
-    public static let barFieldWidth: Double = 72.5
+    /// The meter. Ten bars, everywhere — Flow uses one field and so do we.
+    ///
+    /// Bar width is `Flowbar.svg`'s 0.080·h and the peak is its 0.509·h. The
+    /// **pitch is not** its 0.152·h, and that is a deliberate call between two
+    /// disagreeing sources. Flowbar puts the field at 42 % of the capsule; the
+    /// real macOS app, measured off video, runs its ten bars at 0.056 of the
+    /// pill's width — 56 % of the capsule — and Wispr's own After Effects
+    /// export uses a 41 % duty cycle (3.3 on 8.0). 5.5 pt satisfies both of
+    /// those (41 % duty, 54 % field) and lands on whole pixels at 2×; the
+    /// marketing SVG is the outlier, and the app is what the user compares us
+    /// against.
+    ///
+    /// An *even* count on purpose: the dome below has no true centre bar and
+    /// the measured envelope has a flat top, so an odd count would be inventing
+    /// a spike the reference does not have.
+    public static let barCount = 10
+    public static let barWidth: Double = 2.25
+    public static let barPitch: Double = 5.5
+    /// `9 × 5.5 + 2.25` — the ink, first bar's left edge to last bar's right.
+    public static let barFieldWidth: Double = 51.75
     /// 0.50·h.
     public static let barPeak: Double = 14.0
     /// `= barWidth`, so silence is a perfect dot. The single best detail in
     /// Wispr's pill, and it is kept.
-    public static let barFloor: Double = 2.5
-    /// `(96 − 72.5) / 2`.
-    public static let sideInset: Double = 11.75
-    /// Meter width when a text tail is present.
-    public static let barCountCompact = 7
-    /// `7 × 5.0 − 2.5`.
-    public static let barFieldCompact: Double = 32.5
+    public static let barFloor: Double = 2.25
+    /// `(96 − 51.75) / 2`.
+    public static let sideInset: Double = 22.125
+
+    // MARK: - the processing spinner
+
+    /// Eight ticks around a ~12 pt box (0.45·h), stepping 45° every 110 ms —
+    /// the measured ~880 ms per revolution of Flow's own release spinner.
+    public static let spinnerTicks = 8
+    public static let spinnerBox: Double = 12.0
+    public static let spinnerTickWidth: Double = 1.5
+    public static let spinnerTickLength: Double = 4.0
+    /// Opacity of the dimmest tick; the brightest is 1.
+    public static let spinnerMinAlpha: Double = 0.25
 
     /// Minimum panel width for the two alarm states, so a 40-character message
     /// is not squeezed into a listening-width capsule (§2.4).
@@ -297,9 +341,32 @@ public enum PillTailGeometry {
     /// frame. 288 is the next `widthStep` multiple that fits the whole budget.
     public static let errorMaxWidth: Double = 288.0
 
-    /// Everything around the text: `12 + 32.5 + 8 + w + 12` (§2.2).
+    /// Everything around the text: `12 + 51.75 + 8 + w + 12`, rounded up to a
+    /// whole point.
+    ///
+    /// The meter no longer narrows when a tail arrives — Flow keeps one field
+    /// and grows the capsule around it — so this is the full bar field now.
+    ///
+    /// The rounding is not tidiness. `NSWindow` snaps its frame to the backing
+    /// store's pixel grid and SwiftUI does not, so a 227.75 pt render becomes a
+    /// 228 pt panel hosting a 227.75 pt capsule — and the quarter point of
+    /// panel that the capsule does not cover is a hairline of un-tinted glass
+    /// down one edge. Tail widths are already multiples of 8 and every floor
+    /// width is a whole number, so rounding here is the one place that makes
+    /// *every* panel width integral.
     public static var chrome: Double {
-        textInset + PillGeometry.barFieldCompact + gap + textInset
+        (textInset + PillGeometry.barFieldWidth + gap + textInset).rounded(.up)
+    }
+
+    /// Room the processing spinner needs at the trailing end, beside a tail.
+    ///
+    /// The spinner is an overlay pinned to the trailing inset, so it does not
+    /// take part in the row's layout — but the copy must not run underneath it,
+    /// and a patience line arriving during a wait is exactly when that would
+    /// happen. One gap plus the spinner's box, added to the width the tail
+    /// asked for.
+    public static var spinnerAllowance: Double {
+        gap + PillGeometry.spinnerBox
     }
 
     /// Quantised tail width for an `n`-character string. 0 characters means no
@@ -357,13 +424,22 @@ extension PillTailGeometry {
 /// AppKit-free so the durations, the curve choices and the per-bar collapse
 /// choreography are assertions, not vibes.
 ///
-/// The split of labour the plan prescribes: the *panel frame* transitions
-/// (appear fade+rise, width spring, committed contraction, hide sink) run
+/// The split of labour: the *panel frame* transitions (appear fade+rise, width
+/// spring, the commit's contraction back to the resting capsule, hide sink) run
 /// through `NSAnimationContext`/`animator()` in `Pill.apply`; the *drawn
-/// surface* transitions (bar tint crossfade, desaturate, staggered collapse,
-/// glyph crossfade) run through SwiftUI in `PillSurface`. The 20 Hz level path
-/// animates nothing — the 50 ms tick *is* the spec's 50 ms linear row — and
-/// silence still costs zero redraws.
+/// surface* transitions (body, rim, glyph, tail) run through SwiftUI in
+/// `PillSurface`; and the *meter* runs through explicit Core Animation in
+/// `PillMeterLayerView`, which is the one lane the 20 Hz level path touches.
+///
+/// That last split is the change this table exists for. The old note here said
+/// interpolating between level ticks "would double the draw rate to buy nothing
+/// the eye can see". Both halves are false. The eye plainly sees it — it is the
+/// difference between Flow's glide and our tick, and it is what the user asked
+/// for — and the cost goes *down*, not up: one 20 Hz `CATransaction` retargeting
+/// ten layers measures 12.9 µs on this machine against ~95 µs for the `Canvas`
+/// raster it replaces, and the render server then interpolates at the display's
+/// own rate with no further process wakeups. The CGEventTap budget argues *for*
+/// compositor-driven 60 fps, not against it.
 public enum PillMotion {
     // MARK: §2.5 rows — durations and travel
 
@@ -372,8 +448,10 @@ public enum PillMotion {
     public static let appearRise: Double = 4.0
     /// `prewarming → listening`: 140 ms bar tint crossfade, `.easeInOut`.
     public static let tintCrossfadeDuration: Double = 0.14
-    /// `listening → finalizing`: 120 ms desaturate (`.easeIn`), then the
-    /// staggered collapse below.
+    /// `listening → finalizing`: 120 ms. One duration doing two jobs at once,
+    /// which is the point — the bars fall to floor *while* the cream dims to
+    /// muted, as one event. Flow does not stagger the collapse and neither do
+    /// we any more: its dot row drops as a unit inside two 40 ms frames.
     public static let desaturateDuration: Double = 0.12
     /// Width change (tail grows): 120 ms, `.spring(response: 0.28,
     /// dampingFraction: 0.9)` — damping 0.9 is a near-critically-damped
@@ -382,9 +460,18 @@ public enum PillMotion {
     public static let widthDuration: Double = 0.12
     public static let widthSpringResponse: Double = 0.28
     public static let widthSpringDamping: Double = 0.9
-    /// `finalizing → committed`: 140 ms, `.spring(response: 0.22,
-    /// dampingFraction: 0.86)`; the panel contracts 260.5 → 28 pt while the
-    /// checkmark crossfades in.
+    /// `processing → committed`: 140 ms, `.spring(response: 0.22,
+    /// dampingFraction: 0.86)`. The panel contracts from whatever width the
+    /// utterance earned back to the 96 pt resting capsule while the dots
+    /// brighten muted → cream and the spinner fades out.
+    ///
+    /// **Deliberate deviation, not fidelity.** Flow's pill *vanishes* on commit
+    /// — measured between two consecutive 40 ms frames, twice — with no glyph
+    /// and no flash. Wisprit keeps the resting bar on the desktop instead,
+    /// because that is the contract the user has lived with (`.settle` →
+    /// `showIdle`) and because a pill that disappears has to be re-summoned by
+    /// the next press. What we take from Flow is the *absence of a commit
+    /// glyph*: the inserted text is the confirmation.
     public static let committedDuration: Double = 0.14
     public static let committedSpringResponse: Double = 0.22
     public static let committedSpringDamping: Double = 0.86
@@ -405,28 +492,63 @@ public enum PillMotion {
     public static let appearSpringResponse: Double = 0.26
     public static let appearSpringDamping: Double = 0.82
 
-    // MARK: the thinking wave (NEW — `finalizing` / `refining`)
+    // MARK: the meter's 60 fps (the whole point of this rewrite)
 
-    /// One crest crossing the dot row, left to right, forever until the stage
-    /// ends. This is the pill's "I am working on it": the same instrument that
-    /// was reacting to the voice a moment ago, now moving under its own power
-    /// at a quarter of the amplitude. No spinner, no second chrome element,
-    /// and — unlike a pulsing dot — it says *which way time is going*.
-    public static let thinkingCycle: Double = 1.5
-    /// Peak height of the crest, as a share of full scale. Low enough that it
-    /// can never be mistaken for speech.
-    public static let thinkingAmplitude: Double = 0.34
-    /// Crest width as a share of the row. Wide enough to move several bars at
-    /// once, so it reads as a wave and not as a running light.
-    public static let thinkingCrestWidth: Double = 0.5
-    /// Where the crest parks under Reduce Motion.
+    /// How long one bar takes to reach a freshly arrived target.
     ///
-    /// Not zero, and that is the whole point: the contract is "durations
-    /// survive, only motion goes", not "the state stops being legible". A still
-    /// shallow arc across the centre of the row is visibly *not* the flat idle
-    /// dot row, so a user who has turned motion off can still tell at a glance
-    /// that the pill is working — with nothing on screen moving at all.
-    public static let reducedMotionThinkingPhase: Double = 0.5
+    /// The level feed is 20 Hz and stays 20 Hz; each sample starts a tween
+    /// toward the new height and the render server draws the frames in between.
+    /// This is Wispr's own technique in both of their artefacts: their web demo
+    /// calls `element.animate({duration: 300, fill: 'forwards'})` on every
+    /// 50 ms sample, and their After Effects export retargets each bar every
+    /// 166 ms. 200 ms overlaps four ticks, so a bar is always in motion and
+    /// never lands on a target and waits.
+    public static let meterTweenDuration: Double = 0.20
+
+    /// The tween is **linear**, and that is a decision rather than a default.
+    ///
+    /// Both Flow sources are linear — the Lottie's rect-size keyframes carry
+    /// (0.167, 0.167) → (0.833, 0.833) handles, which is exactly linear, and
+    /// the web demo takes `element.animate`'s linear default. Easing here would
+    /// double-count: the attack/release asymmetry the ear reads already lives
+    /// in `BarSynthesizer`'s envelope coefficients, and an ease-out on top of
+    /// it turns every syllable into a soft landing the voice did not make.
+    public static let meterTweenIsLinear = true
+
+    // MARK: the processing spinner (`finalizing` / `refining`)
+
+    /// One 45° step per 110 ms — eight of them is the measured ~880 ms per
+    /// revolution. Discrete, like every iOS spinner: it ticks, it does not
+    /// sweep. Runs as one repeating `CAKeyframeAnimation` in the render server,
+    /// so a wait of any length costs the main thread nothing at all.
+    public static let spinnerStepDuration: Double = 0.11
+    public static var spinnerRevolution: Double {
+        spinnerStepDuration * Double(PillGeometry.spinnerTicks)
+    }
+    /// It arrives just after the bars have dropped, not with them: two events
+    /// in 160 ms read as "the voice stopped, *then* the work started", which is
+    /// the truth. Leaving is faster than arriving — the result is already here.
+    public static let spinnerFadeIn: Double = 0.12
+    public static let spinnerFadeInDelay: Double = 0.04
+    public static let spinnerFadeOut: Double = 0.08
+
+    // MARK: the toast unfold (`transientNotice`, and every app-authored line)
+
+    /// Wispr's toast idiom, measured off their own Lottie and folded onto our
+    /// tail rather than added as a second chrome element: the capsule pops, the
+    /// width *unfolds* with heavy deceleration, holds, then folds back
+    /// accelerating. Their numbers, our element.
+    public static let noticePopDuration: Double = 0.133
+    public static let noticeUnfoldDuration: Double = 0.40
+    public static let noticeFoldDuration: Double = 0.25
+    /// The unfold's bezier: leaves fast, arrives asymptotically (their measured
+    /// out-x ≈ 0.16, in-y = 1). The fold is its mirror — accelerating away.
+    public static let noticeUnfoldControl: (Double, Double, Double, Double) = (0.16, 0, 0.2, 1)
+    public static let noticeFoldControl: (Double, Double, Double, Double) = (0.6, 0, 1, 1)
+    /// How far the rim brightens as a notice lands. An edge-light pop, not a
+    /// scale: the hosting view clips to the panel, so anything that grows past
+    /// the capsule has its own pop sheared off at the sides.
+    public static let noticeRimPop: Double = 0.18
 
     // MARK: the commit (NEW)
 
@@ -441,58 +563,51 @@ public enum PillMotion {
     /// to read than a flash, and it never startles.
     public static let alarmRimDuration: Double = 0.20
 
-    // MARK: the staggered collapse (§2.4 `finalizing`, §2.5 row 6)
-
-    /// 6 ms × index — precomputed here, in the model layer, because the spec's
-    /// alternative (15 view identities each carrying `.delay(i × 6ms)`) is the
-    /// one way this redesign could make dictation worse (§2.7).
-    public static let collapseStagger: Double = 0.006
-    /// How long one bar takes to fall to floor once its turn comes.
-    public static let collapseBarFall: Double = 0.12
-
-    public static func collapseDelay(forBar index: Int) -> Double {
-        Double(max(0, index)) * collapseStagger
-    }
-
-    /// Full choreography length: the last bar's delay plus its fall.
-    public static func collapseDuration(barCount: Int) -> Double {
-        collapseDelay(forBar: max(0, barCount - 1)) + collapseBarFall
-    }
-
-    /// Per-bar progress (0 = full height, 1 = at floor) for a global phase
-    /// 0…1 driven by one animatable scalar. One `Canvas`, one animation, no
-    /// per-bar view identity.
-    public static func collapseProgress(phase: Double, bar index: Int, barCount: Int) -> Double {
-        let total = collapseDuration(barCount: barCount)
-        guard total > 0, collapseBarFall > 0 else { return 1 }
-        let clamped = min(1.0, max(0.0, phase))
-        let elapsed = clamped * total - collapseDelay(forBar: index)
-        return min(1.0, max(0.0, elapsed / collapseBarFall))
-    }
-
-    /// The thinking crest's contribution to one bar, for a global phase 0…1.
-    ///
-    /// Pure and seamless by construction: the crest enters off the left edge
-    /// and leaves off the right, so phase 0 and phase 1 are both a flat row and
-    /// the `repeatForever` loop has no visible seam. Same discipline as the
-    /// collapse — one animatable scalar, one `Canvas`, no per-bar view
-    /// identity.
-    public static func thinkingLevel(phase: Double, bar index: Int, barCount: Int) -> Double {
-        guard barCount > 1, thinkingCrestWidth > 0 else { return 0 }
-        let position = Double(min(max(0, index), barCount - 1)) / Double(barCount - 1)
-        let clamped = min(1.0, max(0.0, phase))
-        let crest = -thinkingCrestWidth / 2 + clamped * (1 + thinkingCrestWidth)
-        let distance = abs(position - crest)
-        guard distance < thinkingCrestWidth / 2 else { return 0 }
-        // cos² — 1 at the crest, exactly 0 at both shoulders, smooth in between.
-        let shaped = cos(.pi * distance / thinkingCrestWidth)
-        return thinkingAmplitude * shaped * shaped
-    }
-
     // MARK: the panel-frame decision
 
+    /// The curve a frame change rides. Named rather than inlined at the AppKit
+    /// edge so the toast's two beziers are assertions, not literals buried in
+    /// a `switch`.
+    public enum Curve: Equatable, Sendable {
+        case easeOut
+        case easeIn
+        /// The toast unfold: leaves fast, arrives asymptotically.
+        case unfold
+        /// Its mirror — accelerating away.
+        case fold
+
+        /// Control points for the two custom curves; nil means "AppKit's named
+        /// timing function is exactly right".
+        public var control: (Double, Double, Double, Double)? {
+            switch self {
+            case .easeOut, .easeIn: return nil
+            case .unfold: return PillMotion.noticeUnfoldControl
+            case .fold: return PillMotion.noticeFoldControl
+            }
+        }
+    }
+
+    /// Whether app-authored copy is arriving in the tail, leaving it, or
+    /// neither. A *live partial* is none of these: it grows word by word and
+    /// wants the 120 ms width spring, while a notice, an error, a miss or a
+    /// patience line is a toast and wants Wispr's 400 ms unfold.
+    public enum NoticeChange: Equatable, Sendable {
+        case none
+        case opening
+        case closing
+
+        /// Derived from two renders. `message` is the discriminator because it
+        /// is set by exactly the paths that author copy — and never by
+        /// `livePartial`, which fills `bubble` alone.
+        public static func between(_ old: PillRender, _ new: PillRender) -> NoticeChange {
+            if old.bubble.isEmpty, !new.bubble.isEmpty, !new.message.isEmpty { return .opening }
+            if !old.bubble.isEmpty, new.bubble.isEmpty, !old.message.isEmpty { return .closing }
+            return .none
+        }
+    }
+
     /// What `Pill.apply` should do to the panel frame for one render change.
-    /// Pure, so the seven-rows-present claim is a unit test.
+    /// Pure, so every row is a unit test.
     public struct FrameChange: Equatable, Sendable {
         public enum Kind: Equatable, Sendable {
             case none
@@ -502,7 +617,8 @@ public enum PillMotion {
             case hide
             /// Animate `setFrame` to the new width.
             case resize
-            /// The committed contraction — same mechanism, its own timing.
+            /// The commit's contraction back to the resting capsule — same
+            /// mechanism, its own timing.
             case contract
         }
 
@@ -510,39 +626,54 @@ public enum PillMotion {
         public var duration: Double
         /// Vertical travel in points. 0 under Reduce Motion — only motion goes.
         public var travel: Double
-        /// Whether the frame itself animates. Reduce Motion snaps the frame
-        /// (the committed contraction becomes the SwiftUI crossfade alone) but
+        /// Whether the frame itself animates. Reduce Motion snaps the frame but
         /// keeps the opacity fades — durations survive.
         public var animatesFrame: Bool
+        public var curve: Curve
 
-        public init(kind: Kind, duration: Double, travel: Double, animatesFrame: Bool) {
+        public init(kind: Kind, duration: Double, travel: Double,
+                    animatesFrame: Bool, curve: Curve = .easeOut) {
             self.kind = kind
             self.duration = duration
             self.travel = travel
             self.animatesFrame = animatesFrame
+            self.curve = curve
         }
     }
 
     public static func frameChange(wasVisible: Bool, isVisible: Bool,
                                    oldWidth: Double, newWidth: Double,
                                    newState: PillState,
-                                   reduceMotion: Bool) -> FrameChange {
+                                   reduceMotion: Bool,
+                                   notice: NoticeChange = .none) -> FrameChange {
         if isVisible && !wasVisible {
             return FrameChange(kind: .appear, duration: appearDuration,
                                travel: reduceMotion ? 0 : appearRise,
-                               animatesFrame: !reduceMotion)
+                               animatesFrame: !reduceMotion, curve: .easeOut)
         }
         if !isVisible && wasVisible {
             return FrameChange(kind: .hide, duration: hideDuration,
                                travel: reduceMotion ? 0 : hideSink,
-                               animatesFrame: !reduceMotion)
+                               animatesFrame: !reduceMotion, curve: .easeIn)
         }
         if isVisible && oldWidth != newWidth {
-            let contracting = (newState == .success && newWidth < oldWidth)
-            return FrameChange(kind: contracting ? .contract : .resize,
-                               duration: contracting ? committedDuration : widthDuration,
-                               travel: 0,
-                               animatesFrame: !reduceMotion)
+            // The commit is the one shrink with its own name: the pill is
+            // returning to rest, not resizing for content.
+            if newState == .success && newWidth < oldWidth && notice != .closing {
+                return FrameChange(kind: .contract, duration: committedDuration,
+                                   travel: 0, animatesFrame: !reduceMotion, curve: .easeOut)
+            }
+            switch notice {
+            case .opening:
+                return FrameChange(kind: .resize, duration: noticeUnfoldDuration,
+                                   travel: 0, animatesFrame: !reduceMotion, curve: .unfold)
+            case .closing:
+                return FrameChange(kind: .resize, duration: noticeFoldDuration,
+                                   travel: 0, animatesFrame: !reduceMotion, curve: .fold)
+            case .none:
+                return FrameChange(kind: .resize, duration: widthDuration,
+                                   travel: 0, animatesFrame: !reduceMotion, curve: .easeOut)
+            }
         }
         return FrameChange(kind: .none, duration: 0, travel: 0, animatesFrame: false)
     }

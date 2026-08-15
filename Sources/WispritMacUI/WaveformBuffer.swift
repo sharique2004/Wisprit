@@ -65,8 +65,8 @@ public struct WaveformBuffer: Equatable, Sendable {
         for index in values.indices { values[index] = 0 }
     }
 
-    /// The newest `n` slots, for the compact 7-bar meter that shares the pill
-    /// with a text tail (§2.2's `barCountCompact`).
+    /// The newest `n` slots. The pill no longer asks (its meter is one field
+    /// of ten `CALayer`s now); the mic test's scrolling history still does.
     public func newest(_ n: Int) -> [Double] {
         guard n < values.count else { return values }
         return Array(values.suffix(max(0, n)))

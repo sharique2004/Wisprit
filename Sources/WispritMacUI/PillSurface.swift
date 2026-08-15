@@ -11,6 +11,18 @@ import SwiftUI
 public final class PillRenderBox {
     public var render: PillRender
 
+    /// The 20 Hz bypass.
+    ///
+    /// `PillMeterView` registers the meter's layer view here when it is built.
+    /// `Pill.apply` offers every meter-only render to this sink first, and when
+    /// the sink takes it (returning true) the render is *never* written to
+    /// `render` — so during steady dictation the SwiftUI view tree is asked for
+    /// nothing at all and the only per-tick work is one `CATransaction`.
+    ///
+    /// `@ObservationIgnored` because it is wiring, not state: a view that
+    /// observed its own registration would invalidate itself on attach.
+    @ObservationIgnored public var meterSink: ((PillRender) -> Bool)?
+
     public init(render: PillRender = .collapsed) {
         self.render = render
     }
@@ -28,15 +40,21 @@ public final class PillRenderBox {
 ///    white and on black. The rim is a *lit edge* — bright along the top arc,
 ///    nearly gone underneath — which is the single detail that separates a
 ///    crafted object from a filled shape.
-/// 2. **It never stops telling the truth about time.** Listening is the voice;
-///    finalizing and refining are the same instrument moving under their own
-///    power at a third of the amplitude (`PillMotion.thinkingLevel`); committed
-///    is a check mark that draws itself. No spinner, no second chrome element,
-///    one vocabulary throughout.
+/// 2. **It never stops telling the truth about time.** Listening is the voice,
+///    interpolated at the display's own rate; finalizing and refining are a
+///    discrete eight-tick spinner beside a dimmed dot row; the commit is the
+///    pill going quiet. One vocabulary, and no element that moves without
+///    meaning something.
 /// 3. **Nothing shakes, nothing pops out of its own panel.** The hosting view
 ///    clips to the panel, so the old hover scale and error shake were slicing
 ///    themselves off at the edges. Both are now edge-light changes, which is
 ///    also the calmer reading of an error.
+///
+/// The meter is deliberately *not* drawn here. It is an `NSViewRepresentable`
+/// over ten `CALayer`s, and level ticks reach it through `PillRenderBox`'s
+/// meter sink without ever invalidating this view — see `PillMeterLayer.swift`.
+/// Everything in this file is state-change-only, which is what lets a 20 Hz
+/// meter share a main thread with the CGEventTap.
 public struct PillSurface: View {
     private let box: PillRenderBox
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -46,19 +64,17 @@ public struct PillSurface: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     /// Increase Contrast: one solid edge instead of a lit one.
     @Environment(\.colorSchemeContrast) private var contrast
-    /// The §2.5 staggered collapse (row 6): one animatable phase over a
-    /// snapshot of the meter as it stood at release. Both live here so the
-    /// choreography is view state — the model's `bars` are already at floor,
-    /// which is what every headless test asserts.
-    @State private var collapseBase: [Double] = []
-    @State private var collapsePhase: Double = 1
-    /// The thinking wave's phase. 0 while the meter belongs to the voice.
-    @State private var thinkingPhase: Double = 0
     /// The body's arrival spring. Reset while the panel is off screen, so the
     /// spring always has somewhere to come from.
     @State private var arrived = true
-    /// The committed check mark's stroke, 0…1.
+    /// The committed check mark's stroke, 0…1. Nothing emits `.checkmark` any
+    /// more (the commit has no glyph — see `PillModel.glyph`); the lane is kept
+    /// because the notice path is the one place a check could honestly return,
+    /// and it costs a `Shape` and four lines to leave the door open.
     @State private var checkDrawn = false
+    /// The toast's edge-light pop: a notice landing brightens the rim for
+    /// 133 ms, which is Wispr's own toast pop timing on our own chrome.
+    @State private var noticePop = false
     @State private var hovered = false
 
     public init(box: PillRenderBox) {
@@ -69,6 +85,12 @@ public struct PillSurface: View {
         let render = box.render
 
         content(render)
+            // The capsule is drawn at exactly the width `Pill` says, and
+            // `Pill` says the width the *window* has at this instant — see
+            // `windowDidResize`. Anything looser and the drawn shape and the
+            // panel disagree for the length of a width animation, which is not
+            // a subtle thing: a capsule centred in a narrower panel has both of
+            // its caps clipped off and comes out a hard-edged slab.
             .frame(width: render.totalWidth, height: render.height, alignment: .center)
             .background(body(for: render))
             .scaleEffect(arrived ? 1 : PillMotion.appearScale)
@@ -131,8 +153,12 @@ public struct PillSurface: View {
                     startPoint: .top, endPoint: .bottom))
         }
         // Hovering the resting bar lifts the edge into the light. It is the
-        // whole hover affordance now, and it cannot clip.
-        let boost = (hovered && state == .idle) ? PillPalette.rimHoverBoost : 0
+        // whole hover affordance now, and it cannot clip. A landing notice
+        // borrows the same lane for 133 ms — Wispr's toast pops its capsule as
+        // it unfolds, and an edge that brightens is the version of that pop
+        // which cannot be sheared off by the panel.
+        let boost = ((hovered && state == .idle) ? PillPalette.rimHoverBoost : 0)
+            + (noticePop ? PillMotion.noticeRimPop : 0)
         return AnyShapeStyle(
             LinearGradient(
                 colors: [.white.opacity(PillPalette.rimTopAlpha + boost),
@@ -156,32 +182,25 @@ public struct PillSurface: View {
     @ViewBuilder
     private func content(_ render: PillRender) -> some View {
         let hasTail = !render.bubble.isEmpty
-        let liveness: Double = PillPalette.isLive(render.state) ? 1 : 0
-        // §2.4 holds the width an utterance earned across the finalize stages,
-        // so a wait that follows a live tail is a wide capsule with nothing in
-        // it yet. Lay that case out the way the tail laid it out — meter on the
-        // left, room on the right — rather than re-centring the meter in the
-        // held width: the words were on the right, the patience copy is about
-        // to be on the right, and in between nothing should have moved.
+        let meter = PillMeterFrame.make(for: render, reduceMotion: reduceMotion)
+        // A wait that follows a live tail is a wide capsule with nothing in it
+        // yet, and the processing frame is wide by definition. Lay both out the
+        // way the tail laid it out — meter on the left, room on the right —
+        // rather than re-centring the meter: the words were on the right, the
+        // spinner and the patience copy are about to be on the right, and in
+        // between nothing should have moved.
         let holdingRoom = !hasTail && render.totalWidth > PillGeometry.widthListening
             && (render.state == .finalizing || render.state == .refining)
         let compact = hasTail || holdingRoom
         HStack(spacing: PillTailGeometry.gap) {
-            if !render.bars.isEmpty {
-                // §2.5 rows 2 and 6 plus the thinking wave: three animatable
-                // lanes, one `Canvas`, no per-bar view identity. The 20 Hz
-                // level path drives none of them — `liveness`, `collapsePhase`
-                // and `thinkingPhase` only move at state changes.
-                PillMeter(levels: compact ? newest(render.bars) : render.bars,
-                          metrics: meterMetrics(render.state, compact: compact),
-                          liveness: liveness,
-                          collapseBase: collapseBase,
-                          collapsePhase: collapsePhase,
-                          thinkingPhase: thinkingPhase)
-                    .animation(liveness == 1
-                                   ? .easeInOut(duration: PillMotion.tintCrossfadeDuration)
-                                   : .easeIn(duration: PillMotion.desaturateDuration),
-                               value: liveness)
+            if !meter.targets.isEmpty {
+                // Ten `CALayer`s the render server owns. Nothing about this
+                // view changes at 20 Hz — the level ticks reach the layers
+                // through `box.meterSink`, never through here.
+                PillMeterView(frame: meter, box: box)
+                    .frame(width: PillGeometry.barFieldWidth, height: render.height)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
             }
             glyph(render)
             if hasTail {
@@ -202,6 +221,24 @@ public struct PillSurface: View {
         }
         .padding(.horizontal, compact ? PillTailGeometry.textInset : 0)
         .frame(maxWidth: .infinity, alignment: compact ? .leading : .center)
+        // The processing chrome sits at the trailing inset, where Flow puts it.
+        //
+        // An overlay rather than a row member on purpose: the spinner must be
+        // pinned to the capsule's own edge whatever width the utterance
+        // earned, and a trailing `Spacer` would make the row's width depend on
+        // whether the pill is thinking. `PillTailGeometry.spinnerAllowance` is
+        // the model's half of the same bargain — it keeps the copy from
+        // running underneath this.
+        .overlay(alignment: .trailing) {
+            if meter.spinning {
+                PillSpinnerView(spinning: true, animated: !reduceMotion)
+                    .frame(width: PillGeometry.spinnerBox, height: PillGeometry.spinnerBox)
+                    .padding(.trailing, PillTailGeometry.textInset)
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                    .transition(.opacity)
+            }
+        }
         // §2.5 row 7's other half: when the glyph changes, its insertion —
         // and whatever it replaces — crossfades over the committed duration
         // instead of popping. Under Reduce Motion this fade *is* the committed
@@ -217,25 +254,14 @@ public struct PillSurface: View {
         .accessibilityAddTraits(.isStaticText)
     }
 
-    /// One instrument, three scales — the resting bar gets the larger dot
-    /// because it has no waveform to resolve, only a pulse to have.
-    private func meterMetrics(_ state: PillState, compact: Bool) -> TallyMetrics {
-        if state == .idle { return .pillIdle }
-        return compact ? .pillCompact : .pill
-    }
-
-    /// The newest slots, for the compact field. The model already does this for
-    /// every state that *has* a tail; the held-width wait is the one case where
-    /// the view has to, because the tail it is holding room for has not arrived.
-    private func newest(_ bars: [Double]) -> [Double] {
-        guard bars.count > PillGeometry.barCountCompact else { return bars }
-        return Array(bars.suffix(PillGeometry.barCountCompact))
-    }
-
-    /// The commit is the one glyph that is *drawn*. Everything else is an SF
-    /// Symbol, which is the right call for a lock, a warning and a sparkle —
-    /// but a check mark that appears fully formed is a picture of success,
-    /// while one that strokes itself in 220 ms is the act of succeeding.
+    /// A drawn check mark, kept for the one path that could still want one.
+    ///
+    /// The commit no longer has a glyph at all — Flow has none, and the text
+    /// arriving in the field is the confirmation — but a check that strokes
+    /// itself in 220 ms is the act of succeeding rather than a picture of it,
+    /// and the notice path ("Learned Sharique") is where that could honestly
+    /// return. Everything else is an SF Symbol, which is right for a lock, a
+    /// warning and a sparkle.
     @ViewBuilder
     private func glyph(_ render: PillRender) -> some View {
         if render.glyph == .checkmark {
@@ -259,81 +285,33 @@ public struct PillSurface: View {
     /// Every state-change animation in one place, behind one guard.
     ///
     /// The guard is the load-bearing part: this closure runs on every `render`
-    /// change, which during dictation means 20 times a second. A level tick
-    /// changes neither the state, nor the visibility, nor the glyph, so it
-    /// leaves on the first line and touches no `@State` at all.
+    /// change that reaches SwiftUI. A level tick reaches neither this closure
+    /// nor the view (the meter sink consumes it), and even if one did, it
+    /// changes no state, no visibility, no glyph and no message — so it leaves
+    /// on the first line and touches no `@State` at all.
     private func stage(from old: PillRender, to new: PillRender) {
         guard old.state != new.state
                 || old.isVisible != new.isVisible
-                || old.glyph != new.glyph else { return }
-        stageCollapse(from: old, to: new)
-        stageThinking(from: old, to: new)
+                || old.glyph != new.glyph
+                || old.message != new.message else { return }
         stageArrival(from: old, to: new)
         stageCheck(from: old, to: new)
+        stageNotice(from: old, to: new)
     }
 
-    /// Row 6 of §2.5: when `finalizing`/`refining` collapses a live meter, the
-    /// model hands over the pre-collapse levels and the surface plays them to
-    /// floor — 120 ms desaturate first (the tint lane above), then the 6 ms ×
-    /// index stagger. Under Reduce Motion the bars snap, exactly as they do on
-    /// the scroll.
-    private func stageCollapse(from old: PillRender, to new: PillRender) {
-        if new.state == .recording || new.state == .prewarming || new.state == .idle {
-            collapseBase = []
-            collapsePhase = 1
-            return
-        }
-        guard !new.collapseFrom.isEmpty, old.collapseFrom.isEmpty,
-              new.state == .finalizing || new.state == .refining
-        else { return }
-        guard !reduceMotion else {
-            collapseBase = []
-            collapsePhase = 1
-            return
-        }
-        collapseBase = new.collapseFrom
-        collapsePhase = 0
-        let duration = PillMotion.collapseDuration(barCount: new.collapseFrom.count)
-        withAnimation(.easeIn(duration: duration).delay(PillMotion.desaturateDuration)) {
-            collapsePhase = 1
-        }
-    }
-
-    /// The thinking wave. Starts once the collapse has landed the meter on its
-    /// dots — the bars fall silent, and *then* the pill starts working — and
-    /// keeps crossing until the stage ends.
+    /// The toast's edge-light pop.
     ///
-    /// `finalizing → refining` is the same wait wearing a different label, so
-    /// the wave rides straight through it rather than restarting: a stutter
-    /// there would read as a hitch in the work, which it is not.
-    ///
-    /// Under Reduce Motion the crest parks at the centre. That is not a
-    /// fallback to nothing: a still, shallow arc is visibly not the flat idle
-    /// dot row, so the state stays legible with zero motion — which is the
-    /// whole contract ("durations survive; only motion goes").
-    private func stageThinking(from old: PillRender, to new: PillRender) {
-        let thinking = isThinking(new)
-        guard thinking else {
-            withTransaction(Transaction(animation: nil)) { thinkingPhase = 0 }
-            return
-        }
-        guard !isThinking(old) else { return }
-        guard !reduceMotion else {
-            withTransaction(Transaction(animation: nil)) {
-                thinkingPhase = PillMotion.reducedMotionThinkingPhase
-            }
-            return
-        }
-        withTransaction(Transaction(animation: nil)) { thinkingPhase = 0 }
-        withAnimation(.linear(duration: PillMotion.thinkingCycle)
-                        .repeatForever(autoreverses: false)
-                        .delay(PillMotion.collapseDuration(barCount: PillGeometry.barCount))) {
-            thinkingPhase = 1
-        }
-    }
-
-    private func isThinking(_ render: PillRender) -> Bool {
-        render.isVisible && (render.state == .finalizing || render.state == .refining)
+    /// Wispr's own toast pops its capsule to a 34.4 pt circle in 133 ms before
+    /// unfolding to full width; our capsule is already on screen, so what pops
+    /// is its edge. It lands with the unfold (which `Pill.apply` is animating
+    /// on the panel frame at the same instant) and decays behind it, so the
+    /// two read as one arrival rather than as a light and then a widening.
+    private func stageNotice(from old: PillRender, to new: PillRender) {
+        guard old.message.isEmpty, !new.message.isEmpty, new.isVisible else { return }
+        guard !reduceMotion else { return }
+        withAnimation(.easeOut(duration: PillMotion.noticePopDuration)) { noticePop = true }
+        withAnimation(.easeInOut(duration: PillMotion.noticeUnfoldDuration)
+                        .delay(PillMotion.noticePopDuration)) { noticePop = false }
     }
 
     /// The body's arrival. The panel's own 90 ms fade + 4 pt rise (§2.5 row 1)
@@ -419,87 +397,6 @@ public struct PillSurface: View {
         case .missed: return render.message.isEmpty ? PillGeometry.missedMessage : render.message
         case .idle: return "Ready"
         }
-    }
-}
-
-// MARK: - the meter's animated lanes
-
-/// The pill's meter with the three §2.5 animations `TallyWaveform` itself must
-/// never carry: the bar tint crossfade (`liveness`, muted ↔ hot), the staggered
-/// collapse (`collapsePhase` over `collapseBase`), and the thinking wave
-/// (`thinkingPhase`). One `Animatable` scalar triple, one `Canvas` underneath,
-/// no per-bar view identity — the per-bar delays and crest heights come
-/// precomputed from `PillMotion` (§2.12's constraint).
-///
-/// Steady states cost nothing: while recording, `liveness == 1`,
-/// `collapsePhase == 1` and `thinkingPhase == 0`, so `displayedLevels` returns
-/// the model's array without touching it and the only redraws are the level
-/// ticks TallyWaveform was already drawing — and silence never reaches this
-/// view at all.
-private struct PillMeter: View, Animatable {
-    var levels: [Double]
-    var metrics: TallyMetrics
-    /// 0 = `studioMuted`, 1 = mic-orange. Only 1 while the mic is open (§1.6).
-    var liveness: Double
-    /// Pre-collapse levels (oldest first), empty when no collapse is playing.
-    var collapseBase: [Double]
-    /// 0 → 1 across `PillMotion.collapseDuration`.
-    var collapsePhase: Double
-    /// 0 → 1 across `PillMotion.thinkingCycle`, looping. 0 means "not thinking".
-    var thinkingPhase: Double
-    @Environment(\.colorScheme) private var colorScheme
-
-    var animatableData: AnimatablePair<Double, AnimatablePair<Double, Double>> {
-        get { AnimatablePair(liveness, AnimatablePair(collapsePhase, thinkingPhase)) }
-        set {
-            liveness = newValue.first
-            collapsePhase = newValue.second.first
-            thinkingPhase = newValue.second.second
-        }
-    }
-
-    var body: some View {
-        TallyWaveform(levels: displayedLevels, metrics: metrics, color: blendedColor)
-    }
-
-    /// While the collapse plays, draw the snapshot staggering down to floor; at
-    /// phase 1 the drawn levels equal the model's truth (all floor). The
-    /// thinking crest then rides over whatever that leaves, so the two never
-    /// fight: during the collapse the crest is still off the left edge, and by
-    /// the time it arrives the bars are dots.
-    private var displayedLevels: [Double] {
-        let base: [Double]
-        if collapsePhase < 1, !collapseBase.isEmpty {
-            let count = collapseBase.count
-            base = collapseBase.enumerated().map { index, value in
-                value * (1 - PillMotion.collapseProgress(phase: collapsePhase,
-                                                         bar: index, barCount: count))
-            }
-        } else {
-            base = levels
-        }
-        guard thinkingPhase > 0 else { return base }
-        let count = base.count
-        return base.enumerated().map { index, value in
-            max(value, PillMotion.thinkingLevel(phase: thinkingPhase,
-                                                bar: index, barCount: count))
-        }
-    }
-
-    /// The tint crossfade, interpolated in sRGB between the same two colours
-    /// the static states use — `studioMuted` is appearance-independent and
-    /// `hot` resolves per appearance, so the endpoints match `Theme` exactly.
-    private var blendedColor: Color {
-        let rest = PillPalette.cream
-        let hot = PillColor(hex: colorScheme == .light
-                                ? Theme.Token.hot.light
-                                : Theme.Token.hot.dark)
-        let t = min(1.0, max(0.0, liveness))
-        return Color(.sRGB,
-                     red: rest.r + (hot.r - rest.r) * t,
-                     green: rest.g + (hot.g - rest.g) * t,
-                     blue: rest.b + (hot.b - rest.b) * t,
-                     opacity: 1)
     }
 }
 

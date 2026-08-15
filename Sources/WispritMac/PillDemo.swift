@@ -25,27 +25,60 @@ enum PillDemo {
         /// Seconds to dwell before moving on.
         let dwell: Double
         /// When to take the shot, measured from the start of the step. Flash
-        /// states auto-hide, so theirs lands early; the thinking states get a
-        /// late one, after the collapse has played out.
+        /// states auto-hide, so theirs lands early; the waiting states get a
+        /// late one, once the release has played out.
         let shotAt: Double
+        /// Extra shots, in seconds from the start of the step, for looking at
+        /// *motion* rather than at a state.
+        ///
+        /// A single screenshot cannot show interpolation — that is the whole
+        /// reason the old pill's tick was hard to argue about. A burst across
+        /// one transition can: eight frames 40 ms apart over a 200 ms tween
+        /// show the bars mid-flight, at heights no 20 Hz sample ever asked for.
+        let burst: [Double]
+        /// When, in step time, the state change actually fires.
+        ///
+        /// Normally zero. It is non-zero for the two transitions that finish
+        /// faster than `screencapture` can start: a launched capture does not
+        /// photograph the instant it was asked for, it photographs a couple of
+        /// hundred milliseconds later, so a 120 ms collapse fired at t = 0 is
+        /// over before the first frame lands. Starting the burst first and
+        /// pulling the trigger into the middle of it is the honest fix —
+        /// nothing about the transition changes, only when the camera was
+        /// switched on.
+        let enterAt: Double
         let enter: (Pill) -> Void
-        /// Synthetic level for a tick `t` seconds into the step, or nil for
-        /// "this state has no microphone".
-        let level: ((Double) -> Double)?
+        /// Synthetic level for a tick `t` seconds into the step. Returning nil
+        /// means "no sample this tick" — which is what makes the
+        /// single-sample proof possible: feed one level, then stop, and every
+        /// frame that follows is the compositor's own work.
+        let level: ((Double) -> Double?)?
 
         init(_ name: String, dwell: Double = 2.0, shotAt: Double = 1.2,
-             level: ((Double) -> Double)? = nil,
+             burst: [Double] = [], enterAt: Double = 0,
+             level: ((Double) -> Double?)? = nil,
              enter: @escaping (Pill) -> Void) {
             self.name = name
             self.dwell = dwell
             self.shotAt = shotAt
+            self.burst = burst
+            self.enterAt = enterAt
             self.enter = enter
             self.level = level
         }
     }
 
     /// The level ticker's cadence, matching `SessionController.levelTickInterval`.
+    /// This is what the *pill* sees, and it does not change.
     private static let tickInterval: Double = 0.05
+    /// The driver's own clock.
+    ///
+    /// Five times finer than the level feed, and only so that a burst frame
+    /// can be asked for at 30 ms rather than 50 ms — a 200 ms tween sampled at
+    /// the feed's own rate would only ever be photographed at the moments the
+    /// feed acted, which is precisely the evidence that proves nothing. The
+    /// pill still receives exactly one sample every 50 ms.
+    private static let frameInterval: Double = 0.01
 
     static func run(arguments: [String]) -> Never {
         let shotsDirectory = value(of: "--shots", in: arguments).map {
@@ -105,16 +138,31 @@ enum PillDemo {
     /// own pill.
     static func demoOrigin() -> CGPoint? {
         guard let screen = NSScreen.main else { return nil }
-        return CGPoint(x: screen.frame.midX - PillGeometry.widthIdle / 2,
+        return CGPoint(x: screen.frame.midX - PillGeometry.widthListening / 2,
                        y: screen.frame.minY + PillGeometry.bottomMargin * 4)
     }
 
-    /// The test card. Ordinary window level, so it sits under the pill's
-    /// `.statusBar` panel and — crucially — *behind* it, which is what the
-    /// behind-window material samples.
+    /// The widest window this verb is ever allowed to put on a real desktop.
+    ///
+    /// It exists as a named number because it is a safety rail, not a layout:
+    /// the backdrop below is a QA affordance, and a QA affordance that covers
+    /// somebody's screen with test bars is a bug, not a feature. Everything the
+    /// demo draws is derived from the pill's own frame plus `shotMargin`, and
+    /// this is the assertion that keeps it that way.
+    static var maxCardWidth: Double {
+        PillTailGeometry.totalWidth(tailWidth: PillTailGeometry.errorMaxWidth) + shotMargin * 2
+    }
+
+    /// The test card. `.floating` — above ordinary windows so whatever the user
+    /// happens to have open cannot get between the card and the pill, and still
+    /// well below the pill's own `.statusBar` panel, which is what the
+    /// behind-window material has to sample.
     private static func makeBackdrop() -> NSWindow? {
         guard let origin = demoOrigin() else { return nil }
-        let size = cardSize
+        // Clamped, belt and braces: the card is derived from the pill's widest
+        // frame, and it is *also* refused permission to exceed it.
+        var size = cardSize
+        size.width = min(size.width, maxCardWidth)
         // Anchored to the pill's own origin, not to the screen: the card grows
         // rightward with the pill and never larger than the widest pill.
         let frame = NSRect(x: origin.x - shotMargin,
@@ -122,7 +170,7 @@ enum PillDemo {
                            width: size.width, height: size.height)
         let window = NSWindow(contentRect: frame, styleMask: [.borderless],
                               backing: .buffered, defer: false)
-        window.level = .normal
+        window.level = .floating
         window.isOpaque = true
         window.isReleasedWhenClosed = false
         window.ignoresMouseEvents = true
@@ -178,50 +226,83 @@ enum PillDemo {
 
             Step("02-prewarming", dwell: 1.2, shotAt: 0.6) { $0.showPrewarming() },
 
+            // The bars coming alive. Idle and listening are the same capsule
+            // now, so this transition moves no frame at all — which is exactly
+            // what the burst should show: ten dots in place, growing.
+            Step("03-listening-bloom", dwell: 2.0, shotAt: 1.2,
+                 burst: [0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.40, 0.50],
+                 level: { t in speech(t) }) { $0.showRecording() },
+
             // Quiet speech: the gamma in `WaveformBuffer.shaped` is what makes
             // this visible at all, so it is worth a shot of its own.
-            Step("03-listening-quiet", dwell: 2.4, shotAt: 1.6,
+            Step("04-listening-quiet", dwell: 2.4, shotAt: 1.6,
                  level: { t in 0.012 + 0.010 * sin(t * 7.0) }) { $0.showRecording() },
 
             // Speech at a normal level, with the syllable rate a real voice has.
-            Step("04-listening-loud", dwell: 2.4, shotAt: 1.8,
+            Step("05-listening-loud", dwell: 2.4, shotAt: 1.8,
                  level: { t in speech(t) }) { _ in },
 
+            // **The interpolation proof.** One sample at t = 0.05 s and then
+            // nothing: the feed goes silent, so every frame after it is the
+            // render server tweening on its own. If these eight PNGs differ,
+            // the pill is drawing frames nobody asked it for — which is the
+            // entire difference between Flow's glide and our old tick.
+            Step("06-single-sample-tween", dwell: 1.4, shotAt: 1.3,
+                 burst: [0.07, 0.10, 0.13, 0.16, 0.19, 0.22, 0.25, 0.30],
+                 level: { t in t < 0.06 ? 0.9 : nil }) { $0.showRecording() },
+
             // The live tail: the capsule opens rightwards for the words.
-            Step("05-listening-tail", dwell: 2.6, shotAt: 1.8,
+            Step("07-listening-tail", dwell: 2.6, shotAt: 1.8,
                  level: { t in speech(t) }) { pill in
+                pill.showRecording()
                 pill.livePartial("so I was thinking about")
             },
 
-            // Release. The meter desaturates, staggers down to dots, and the
-            // thinking crest starts to cross.
-            Step("06-finalizing", dwell: 2.0, shotAt: 1.1) { $0.showFinalizing() },
+            // **The release.** Bars to floor, cream to muted, capsule to
+            // 128 pt, spinner in — all inside 160 ms, as one event.
+            Step("08-finalizing", dwell: 2.2, shotAt: 1.6,
+                 burst: [0.00, 0.04, 0.08, 0.12, 0.16, 0.20, 0.26, 0.34],
+                 enterAt: 0.26) {
+                $0.showFinalizing()
+            },
 
             // The long one (AUDIT-2026-08-14): a batch rescue can hold this
             // state for seconds. At 1.4 s the pill says what it is waiting on.
-            Step("07-rescue-wait", dwell: 3.4, shotAt: 2.4) { $0.showFinalizing() },
+            Step("09-rescue-wait", dwell: 3.4, shotAt: 2.4) { $0.showFinalizing() },
 
-            Step("08-refining", dwell: 2.4, shotAt: 1.4) { $0.showRefining() },
+            // The spinner mid-revolution, four frames a step apart, so the
+            // discrete 45° tick is visible as a tick.
+            Step("10-refining", dwell: 2.4, shotAt: 1.4,
+                 burst: [0.60, 0.71, 0.82, 0.93]) { $0.showRefining() },
 
-            Step("09-committed", dwell: 1.6, shotAt: 0.35) { $0.flashSuccess() },
+            // **The commit.** 128 → 96 with the spinner going and the dots
+            // brightening back to cream. No check mark: the text is the
+            // confirmation.
+            Step("11-committed", dwell: 1.8, shotAt: 0.9,
+                 burst: [0.00, 0.04, 0.08, 0.12, 0.16, 0.22, 0.30, 0.40],
+                 enterAt: 0.26) { $0.flashSuccess() },
 
-            Step("10-notice", dwell: 2.2, shotAt: 0.9) {
+            // **The toast.** Wispr's unfold: a 133 ms edge pop and a 400 ms
+            // width unfold on the heavy-deceleration bezier.
+            Step("12-notice", dwell: 2.4, shotAt: 1.2,
+                 burst: [0.00, 0.05, 0.11, 0.17, 0.23, 0.30, 0.38, 0.48],
+                 enterAt: 0.26) {
                 $0.transientNotice("Learned Sharique")
             },
 
-            Step("11-missed", dwell: 1.8, shotAt: 0.45) {
+            Step("13-missed", dwell: 1.8, shotAt: 0.45) {
                 $0.flashMissed("Didn't catch that")
             },
 
-            Step("12-error", dwell: 2.2, shotAt: 0.8) {
+            Step("14-error", dwell: 2.2, shotAt: 0.8) {
                 $0.flashError("Microphone delivered no audio")
             },
 
-            Step("13-blocked-secure", dwell: 3.0, shotAt: 0.9) {
+            Step("15-blocked-secure", dwell: 3.0, shotAt: 0.9) {
                 $0.flashBlockedSecure()
             },
 
-            Step("14-settled", dwell: 1.6, shotAt: 1.0) { $0.showIdle() },
+            Step("16-settled", dwell: 1.6, shotAt: 1.0) { $0.showIdle() },
         ]
     }
 
@@ -258,6 +339,11 @@ enum PillDemo {
         private var index = -1
         private var elapsed: Double = 0
         private var shotTaken = false
+        /// How many of the current step's burst frames have been taken.
+        private var burstTaken = 0
+        /// When the next 20 Hz level sample is due, in step time.
+        private var nextSample: Double = PillDemo.tickInterval
+        private var entered = false
         private var timer: Timer?
 
         init(pill: Pill, steps: [Step], shots: URL?, backdrop: NSWindow?) {
@@ -272,7 +358,7 @@ enum PillDemo {
                  + String(format: "%.1f", steps.reduce(0) { $0 + $1.dwell }) + " s total")
             if let shots { emit("pill-demo: shots → \(shots.path)") }
             advance()
-            let timer = Timer.scheduledTimer(withTimeInterval: PillDemo.tickInterval,
+            let timer = Timer.scheduledTimer(withTimeInterval: PillDemo.frameInterval,
                                              repeats: true) { [weak self] _ in
                 MainActor.assumeIsolated { self?.tick() }
             }
@@ -283,23 +369,50 @@ enum PillDemo {
         private func tick() {
             guard index >= 0, index < steps.count else { return }
             let step = steps[index]
-            elapsed += PillDemo.tickInterval
-            if let level = step.level { pill.updateLevel(level(elapsed)) }
-            if !shotTaken, elapsed >= step.shotAt {
+            elapsed += PillDemo.frameInterval
+            let now = elapsed + 1e-9          // float accumulation, not a fudge
+
+            if !entered, now >= step.enterAt {
+                entered = true
+                step.enter(pill)
+            }
+            if now >= nextSample {
+                nextSample += PillDemo.tickInterval
+                // A nil sample is a *skipped* tick, not a zero: feeding zero
+                // would retarget the bars to floor and destroy the very thing
+                // the single-sample burst is there to photograph.
+                if let level = step.level, let value = level(elapsed) {
+                    pill.updateLevel(value)
+                }
+            }
+
+            // One burst frame per turn: two `screencapture` launches in the
+            // same millisecond photograph the same instant twice.
+            if burstTaken < step.burst.count, now >= step.burst[burstTaken] {
+                capture(named: String(format: "%@-f%02d", step.name, burstTaken + 1))
+                burstTaken += 1
+            }
+            if !shotTaken, now >= step.shotAt {
                 shotTaken = true
                 capture(named: step.name)
             }
-            if elapsed >= step.dwell { advance() }
+            if now >= step.dwell { advance() }
         }
 
         private func advance() {
             index += 1
             elapsed = 0
             shotTaken = false
+            burstTaken = 0
+            nextSample = PillDemo.tickInterval
+            entered = false
             guard index < steps.count else { return finish() }
             let step = steps[index]
             emit("pill-demo: → \(step.name)")
-            step.enter(pill)
+            if step.enterAt <= 0 {
+                entered = true
+                step.enter(pill)
+            }
         }
 
         private func finish() {

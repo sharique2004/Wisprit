@@ -32,30 +32,19 @@ public struct TallyMetrics: Equatable, Sendable {
         self.floor = floor
     }
 
-    /// The pill, and inline in the practice step.
+    /// The pill — one field in every state it has one.
+    ///
+    /// The compact and idle variants are gone. They existed because the meter
+    /// used to change size with the frame: fifteen bars alone, seven beside a
+    /// tail, five larger dots at rest. Frame measurement of the real Flow app
+    /// says it does none of that — its idle capsule and its listening capsule
+    /// are the same object, and the "idle dots" are the listening bars at
+    /// floor. One field is both simpler and more faithful, and it is why
+    /// `idle → listening` now needs no geometry change at all.
     public static let pill = TallyMetrics(
         barCount: PillGeometry.barCount, barWidth: PillGeometry.barWidth,
         barPitch: PillGeometry.barPitch, height: PillGeometry.height,
         peak: PillGeometry.barPeak, floor: PillGeometry.barFloor)
-
-    /// The pill sharing its capsule with a text tail.
-    public static let pillCompact = TallyMetrics(
-        barCount: PillGeometry.barCountCompact, barWidth: PillGeometry.barWidth,
-        barPitch: PillGeometry.barPitch, height: PillGeometry.height,
-        peak: PillGeometry.barPeak, floor: PillGeometry.barFloor)
-
-    /// The resting bar.
-    ///
-    /// The listening meter is fifteen 2.5 pt bars because it has to resolve a
-    /// waveform; the resting bar is five dots because it has to resolve
-    /// *nothing* — and at 2.5 pt in a 48 pt capsule that read as an empty pill
-    /// rather than a ready one. 3 pt on a 6 pt pitch is the same instrument at
-    /// the scale idle actually needs: `floor == barWidth` still holds, so they
-    /// are still perfect dots, and the field (27 pt) still sits well inside the
-    /// capsule.
-    public static let pillIdle = TallyMetrics(
-        barCount: PillGeometry.barCountIdle, barWidth: 3, barPitch: 6,
-        height: PillGeometry.height, peak: PillGeometry.barPeak, floor: 3)
 
     /// The onboarding mic test (§4.2 step 3).
     public static let micTest = TallyMetrics(
@@ -68,10 +57,17 @@ public struct TallyMetrics: Equatable, Sendable {
     /// Bars are fully-rounded capsules.
     public var cornerRadius: Double { barWidth / 2.0 }
 
-    /// `n × pitch − width` — the trailing half-gap does not belong to the field.
+    /// The ink: first bar's left edge to last bar's right edge.
+    ///
+    /// This used to read `n × pitch − width`, which is the same number *only*
+    /// when a bar is exactly half its pitch — true of the old 2.5-on-5 meter
+    /// and false of Flowbar's 53 % duty cycle (2.25 on 4.25), where it
+    /// overstated the field by a quarter point and pushed the row off centre.
+    /// `(n − 1) × pitch + width` is the measurement itself and is right at any
+    /// duty cycle.
     public func fieldWidth(count: Int) -> Double {
         guard count > 0 else { return 0 }
-        return Double(count) * barPitch - barWidth
+        return Double(count - 1) * barPitch + barWidth
     }
 
     public var fieldWidth: Double { fieldWidth(count: barCount) }
@@ -93,23 +89,25 @@ public struct TallyMetrics: Equatable, Sendable {
         barRect(index: index, value: value, count: count, in: size, displayScale: 0)
     }
 
-    /// The same rect, with the horizontal origin snapped to the backing store's
-    /// pixel grid.
+    /// The same rect, with the **field's** origin snapped to the backing
+    /// store's pixel grid.
     ///
-    /// Only the **origin** snaps, and deliberately so. Snapping the width would
-    /// round a 2.5 pt bar to 3 px on a 1× display and take the pitch and the
-    /// centred field with it; snapping the height would quantise the waveform
-    /// into 1 pt steps, which is the one dimension the eye is actually reading.
-    /// Moving the origin alone leaves every derived dimension intact and buys
-    /// the whole row a hard left edge on non-Retina and half-Retina scales.
+    /// Three things deliberately do not snap. The width would round a 2.25 pt
+    /// bar to 2 px on a 1× display and take the whole field's proportions with
+    /// it. The height would quantise the waveform into 1 pt steps, which is the
+    /// one dimension the eye is actually reading. And the *pitch* must not:
+    /// snapping each bar's own origin — which is what this used to do — is
+    /// invisible while the pitch is an integer and turns a 4.25 pt pitch into
+    /// an uneven 4, 4, 5, 4 row the moment it is not. Snapping the field once
+    /// buys the row a hard left edge and leaves every derived dimension exact.
     ///
     /// `displayScale <= 0` means "don't", which is what the four-argument
     /// spelling above passes — the geometry every test asserts is untouched.
     public func barRect(index: Int, value: Double, count: Int,
                         in size: CGSize, displayScale: Double) -> CGRect {
         let field = fieldWidth(count: count)
-        let originX = TallyMetrics.pixelAligned(
-            (size.width - field) / 2.0 + Double(index) * barPitch, scale: displayScale)
+        let originX = TallyMetrics.pixelAligned((size.width - field) / 2.0, scale: displayScale)
+            + Double(index) * barPitch
         let h = barHeight(value)
         return CGRect(x: originX, y: (size.height - h) / 2.0, width: barWidth, height: h)
     }
@@ -122,17 +120,20 @@ public struct TallyMetrics: Equatable, Sendable {
 }
 
 #if canImport(SwiftUI)
-/// The signature component: a live capsule waveform, scrolling right-to-left,
-/// collapsing to a row of perfect dots at silence.
+/// A capsule waveform in one `Canvas` — the **onboarding mic test's** meter.
 ///
-/// **One `Canvas`, one draw pass, no view identity.** Fifteen `RoundedRectangle`
-/// views re-identified at 20 Hz on the same main thread that carries the
-/// CGEventTap is the one way this redesign could make dictation worse (§2.7).
+/// The pill no longer draws through this. Its meter is `PillMeterLayerView`,
+/// ten `CALayer` capsules the render server tweens between 20 Hz samples,
+/// because the note that used to live here — "interpolating between frames
+/// would double the draw rate to buy nothing the eye can see" — turned out to
+/// be wrong twice over: the eye sees it plainly (it is the difference between
+/// Wispr Flow's glide and our tick) and the Core Animation path measures 12.9 µs
+/// a tick against ~95 µs for this raster.
 ///
-/// There is no implicit animation on the bar heights either, and that is not an
-/// omission: the level ticker delivers a frame every 50 ms, which *is* the
-/// spec's 50 ms linear tick. Interpolating between frames would double the
-/// draw rate to buy nothing the eye can see.
+/// It stays exactly as it is for the mic test, where the meter is a large
+/// scrolling history the user is asked to *look at* rather than a live status
+/// light, where nothing is competing for the main thread, and where one
+/// `Canvas` with no view identity is still the right answer.
 public struct TallyWaveform: View {
     /// Shaped 0…1 levels, oldest first — straight from `WaveformBuffer`.
     public var levels: [Double]

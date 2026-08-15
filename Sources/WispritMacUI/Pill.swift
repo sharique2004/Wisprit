@@ -10,8 +10,10 @@ import WispritKit
 /// persists through an injected callback.
 ///
 /// The panel, the drag contract and the deferred-action timer are unchanged;
-/// what it hosts is not. The 26 pt dot is now the Tally — a capsule waveform
-/// drawn by `PillSurface` in one `Canvas` (`ui-redesign.md` §2).
+/// what it hosts is not. The 26 pt dot is a ten-bar capsule waveform: body,
+/// rim, tail and glyphs drawn by `PillSurface`, and the meter itself by
+/// `PillMeterLayerView`, whose `CALayer`s the render server tweens between the
+/// 20 Hz level samples. Nothing in the level path touches SwiftUI.
 ///
 /// Every public method must be called on the main thread — the session routes
 /// through `WispritUI.callOnMain`.
@@ -44,9 +46,10 @@ public final class Pill: NSObject, NSWindowDelegate {
     /// The frame the hosted SwiftUI view reads. Built once (§6.3).
     private let box = PillRenderBox()
     private var host: NSHostingView<PillSurface>?
-    /// The glass under the body. Kept as the panel's `contentView` so the
-    /// window shadow is derived from its capsule mask rather than from a
-    /// rectangle (§2.2 — the pill is a capsule all the way down).
+    /// The glass under the body. A sibling of the hosting view rather than its
+    /// parent, so Reduce Transparency can take the blur away without taking the
+    /// pill with it, and capsule-masked so the window shadow hugs the pill's
+    /// real silhouette (§2.2 — the pill is a capsule all the way down).
     private var glass: PillGlassView?
     private var deferredTimer: Timer?
     /// Guards `windowDidMove` against our own frame changes — only a user drag
@@ -99,6 +102,9 @@ public final class Pill: NSObject, NSWindowDelegate {
     public func flashMissed(_ message: String = PillGeometry.missedMessage) {
         model.flashMissed(message)
     }
+    /// NEW — the marginal-audio miss: a `missed` body with the alarm states'
+    /// width and dwell, because the copy is an instruction.
+    public func flashTooQuiet(_ message: String) { model.flashTooQuiet(message) }
     /// NEW — Secure Keyboard Entry blocked the insertion; the text is on the
     /// clipboard. Until the session adopts it, `flashError` carries the same
     /// message with the shorter error timing.
@@ -133,7 +139,7 @@ public final class Pill: NSObject, NSWindowDelegate {
     /// panel cannot be made we keep answering every call and simply draw
     /// nothing, rather than taking dictation down with us.
     private func build() {
-        let frame = NSRect(x: 0, y: 0, width: PillGeometry.widthIdle, height: PillGeometry.height)
+        let frame = NSRect(x: 0, y: 0, width: PillGeometry.widthListening, height: PillGeometry.height)
         let panel = NSPanel(contentRect: frame,
                             styleMask: [.nonactivatingPanel],
                             backing: .buffered,
@@ -166,6 +172,13 @@ public final class Pill: NSObject, NSWindowDelegate {
         let content = PillPanelView(frame: NSRect(origin: .zero, size: frame.size))
         let glass = PillGlassView(frame: content.bounds)
         let host = PillHostingView(rootView: PillSurface(box: box))
+        // Frame-driven, never content-driven. `PillSurface` fills whatever it
+        // is given (see its `body`), so an `NSHostingView` that still consults
+        // its intrinsic content size resolves "fill" as *unbounded* and draws
+        // a capsule thousands of points wide — of which the panel shows the
+        // flat middle. A rectangle, in other words, and one that only appears
+        // once a width animation has been through.
+        host.sizingOptions = []
         host.frame = content.bounds
         host.autoresizingMask = [.width, .height]
         content.addSubview(glass)
@@ -211,7 +224,7 @@ public final class Pill: NSObject, NSWindowDelegate {
         }
         guard let screen = NSScreen.main else { return }
         let f = screen.frame
-        let origin = NSPoint(x: f.origin.x + (f.size.width - PillGeometry.widthIdle) / 2.0,
+        let origin = NSPoint(x: f.origin.x + (f.size.width - PillGeometry.widthListening) / 2.0,
                              y: f.origin.y + PillGeometry.bottomMargin)
         preferredOrigin = origin
         panel.setFrameOrigin(origin)
@@ -242,15 +255,58 @@ public final class Pill: NSObject, NSWindowDelegate {
         config.persistPosition(panel.frame.origin)
     }
 
+    /// Every step of every width animation, including the ones AppKit drives
+    /// on the animator's own clock. Two jobs, and both are shape correctness.
+    ///
+    /// **The hosting view must not lag the panel.** SwiftUI draws the capsule
+    /// at the render's width; if the panel has already contracted past it, the
+    /// capsule is clipped to a rectangle for the rest of the animation. Pinning
+    /// the host here — rather than only in the completion handler — means the
+    /// drawn shape is a capsule in every intermediate frame.
+    ///
+    /// **The window shadow must be re-derived.** A borderless window's shadow
+    /// comes from its rendered alpha and is then cached; AppKit does not
+    /// recompute it because the frame moved. One stale rectangular shadow and
+    /// the pill stops being capsule-shaped — it paints the two corner regions
+    /// the capsule leaves empty. `pill-demo` caught exactly that on a
+    /// held-width `finalizing` and mid-unfold on a notice.
+    public func windowDidResize(_ notification: Notification) {
+        guard let panel, let host else { return }
+        let size = panel.frame.size
+        if host.frame.size != size { host.frame = NSRect(origin: .zero, size: size) }
+        // Draw the capsule at the width the window *actually has*, right now.
+        //
+        // A panel-frame animation is driven by AppKit on its own clock, and
+        // SwiftUI knows nothing about it: left alone it keeps drawing the
+        // capsule at the render's final width while the window is still
+        // travelling, and a wide capsule centred in a narrow panel loses both
+        // caps to the clip — the pill spends the whole animation as a slab.
+        // Feeding the live width back is what makes the two exact.
+        //
+        // It writes `box.render` at the display's rate, which sounds expensive
+        // and is not: this only ever runs during a state transition. The 20 Hz
+        // level path changes no width, so it never comes through here.
+        if frameAnimations > 0, box.render.totalWidth != size.width {
+            box.render.totalWidth = size.width
+        }
+        glass?.refreshMask()
+        panel.invalidateShadow()
+    }
+
     // MARK: - rendering
 
-    /// One render, one frame decision. The §2.5 panel-frame rows live here:
-    /// appear fade + 4 pt rise (90 ms ease-out), width change (120 ms, the
-    /// spec's near-critically-damped spring), the committed contraction
-    /// (140 ms), and the hide fade + 3 pt sink (160 ms ease-in, order-out on
-    /// completion). Under Reduce Motion the frame snaps and only the opacity
-    /// fades survive — durations stay, motion goes. The 20 Hz level path never
-    /// reaches this switch's animated arms: level ticks change no width.
+    /// One render, one frame decision. The panel-frame rows live here: appear
+    /// fade + 4 pt rise (90 ms ease-out), width change (120 ms, or the toast's
+    /// 400 ms unfold / 250 ms fold), the commit's contraction back to the
+    /// resting capsule (140 ms), and the hide fade + 3 pt sink (160 ms ease-in,
+    /// order-out on completion). Under Reduce Motion the frame snaps and only
+    /// the opacity fades survive — durations stay, motion goes.
+    ///
+    /// The 20 Hz level path leaves on the first branch and never reaches the
+    /// switch at all: a meter-only render goes straight to the layer view, so
+    /// during dictation neither SwiftUI nor AppKit is asked to lay anything
+    /// out. That branch is the CGEventTap's whole budget, and it is why the
+    /// meter can afford to interpolate at 60 fps.
     private func apply(_ render: PillRender) {
         guard let panel, let host else { return }
         let previous = appliedRender
@@ -261,11 +317,25 @@ public final class Pill: NSObject, NSWindowDelegate {
         // the pill must stay exactly where they put it — unless that would put
         // it off the right edge, which is what `placedOrigin` handles.
         let target = NSRect(origin: placedOrigin(width: render.totalWidth), size: size)
+
+        // The bypass. It still owes the `.none` arm's two non-drawing duties —
+        // the frame correction and the order front/out — because those are
+        // panel plumbing, not rendering, and dropping them would leave a pill
+        // that never came back after a hide.
+        if PillRender.isMeterOnly(previous, render), box.meterSink?(render) == true {
+            if frameAnimations == 0, panel.frame != target {
+                setFrameDirect(panel, host, target)
+            }
+            if render.isVisible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
+            return
+        }
+
         let change = PillMotion.frameChange(
             wasVisible: previous.isVisible, isVisible: render.isVisible,
             oldWidth: previous.totalWidth, newWidth: render.totalWidth,
             newState: render.state,
-            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion)
+            reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
+            notice: PillMotion.NoticeChange.between(previous, render))
 
         switch change.kind {
         case .appear:
@@ -283,7 +353,7 @@ public final class Pill: NSObject, NSWindowDelegate {
                 setFrameDirect(panel, host, target)
             }
             panel.orderFrontRegardless()
-            animateFrame(duration: change.duration, timing: .easeOut) {
+            animateFrame(duration: change.duration, curve: change.curve) {
                 panel.animator().alphaValue = 1
                 if change.animatesFrame { panel.animator().setFrame(target, display: true) }
             }
@@ -292,16 +362,38 @@ public final class Pill: NSObject, NSWindowDelegate {
             // The content keeps its last visible frame while the panel sinks;
             // the hidden render lands once the panel is off screen.
             let sunk = panel.frame.offsetBy(dx: 0, dy: -change.travel)
-            animateFrame(duration: change.duration, timing: .easeIn,
+            animateFrame(duration: change.duration, curve: change.curve,
                          hideCompletion: hideGeneration) {
                 panel.animator().alphaValue = 0
                 if change.animatesFrame { panel.animator().setFrame(sunk, display: true) }
             }
 
         case .resize, .contract:
-            box.render = render
+            // Start the drawn capsule where the *window* is, not where it is
+            // going: `windowDidResize` takes over from the first step, but the
+            // first step has not happened yet, and one frame of slab is still
+            // a frame of slab.
             if change.animatesFrame {
-                animateFrame(duration: change.duration, timing: .easeOut) {
+                var drawn = render
+                drawn.totalWidth = panel.frame.width
+                box.render = drawn
+            } else {
+                box.render = render
+            }
+            if change.animatesFrame {
+                // The hosting view travels *with* the panel, in the same group
+                // and on the same curve.
+                //
+                // Left to itself it does not: AppKit resizes it when the
+                // animation lands, so for the length of the animation the
+                // drawn capsule and the window disagree about how wide the pill
+                // is. Both spellings of that disagreement are ugly and both
+                // were photographed — a capsule centred in a narrower host has
+                // *both* caps clipped and comes out a slab, and a capsule
+                // narrower than the panel leaves bare glass beside it. Neither
+                // is a thing SwiftUI can fix from inside; the two frames simply
+                // have to move together.
+                animateFrame(duration: change.duration, curve: change.curve) {
                     panel.animator().setFrame(target, display: true)
                 }
             } else {
@@ -310,9 +402,12 @@ public final class Pill: NSObject, NSWindowDelegate {
             if render.isVisible { panel.orderFrontRegardless() }
 
         case .none:
-            // A 20 Hz level tick lands here. Never touch the frame while an
-            // animation is in flight — the animator already owns the target,
-            // and a direct `setFrame` would snap the width mid-spring.
+            // A state change that moved nothing the panel owns — the tint
+            // crossfade at the end of `prewarming`, a glyph swap, a message.
+            // (A level tick never gets here: the meter sink took it above.)
+            // Never touch the frame while an animation is in flight — the
+            // animator already owns the target, and a direct `setFrame` would
+            // snap the width mid-spring.
             if frameAnimations == 0, panel.frame != target {
                 setFrameDirect(panel, host, target)
             }
@@ -326,11 +421,27 @@ public final class Pill: NSObject, NSWindowDelegate {
         }
     }
 
+    /// The one place a named curve becomes a real one.
+    ///
+    /// Two of the four are AppKit's own; the toast's unfold and fold are
+    /// Wispr's measured beziers, and they are the reason this is a lookup
+    /// rather than a `CAMediaTimingFunctionName` parameter. An unfold that
+    /// leaves fast and arrives asymptotically is what makes a widening capsule
+    /// read as *unfolding* rather than as growing.
+    private static func timingFunction(_ curve: PillMotion.Curve) -> CAMediaTimingFunction {
+        guard let c = curve.control else {
+            return CAMediaTimingFunction(name: curve == .easeIn ? .easeIn : .easeOut)
+        }
+        return CAMediaTimingFunction(controlPoints: Float(c.0), Float(c.1),
+                                     Float(c.2), Float(c.3))
+    }
+
     private func setFrameDirect(_ panel: NSPanel, _ host: NSView, _ frame: NSRect) {
         suppressMoveNotifications = true
         panel.setFrame(frame, display: false)
         suppressMoveNotifications = false
         host.frame = NSRect(origin: .zero, size: frame.size)
+        panel.invalidateShadow()
     }
 
     /// `NSAnimationContext` around the panel's animator, with the drag guard
@@ -338,13 +449,13 @@ public final class Pill: NSObject, NSWindowDelegate {
     /// completion handler captures nothing but `self` (a main-actor class) and
     /// value types, so it crosses the Sendable boundary cleanly.
     private func animateFrame(duration: Double,
-                              timing: CAMediaTimingFunctionName,
+                              curve: PillMotion.Curve,
                               hideCompletion generation: Int? = nil,
                               _ changes: () -> Void) {
         frameAnimations += 1
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = duration
-            context.timingFunction = CAMediaTimingFunction(name: timing)
+            context.timingFunction = Pill.timingFunction(curve)
             context.allowsImplicitAnimation = true
             changes()
         }, completionHandler: { [weak self] in
@@ -352,8 +463,15 @@ public final class Pill: NSObject, NSWindowDelegate {
                 guard let self else { return }
                 self.frameAnimations -= 1
                 if self.frameAnimations == 0, let panel = self.panel, let host = self.host {
-                    // Settle the hosting view on the final content size.
+                    // Settle the hosting view on the final content size, and
+                    // re-cut the glass: both the capsule mask and the window
+                    // shadow are only correct once the frame has stopped.
                     host.frame = NSRect(origin: .zero, size: panel.frame.size)
+                    // Hand the logical render back: the live width above is a
+                    // travelling value, not the truth about the frame.
+                    self.box.render = self.appliedRender
+                    self.glass?.refreshMask()
+                    panel.invalidateShadow()
                 }
                 if let generation { self.completeHide(ifCurrent: generation) }
             }
@@ -446,11 +564,35 @@ final class PillGlassView: NSVisualEffectView {
         fatalError("init(coder:) is not used — the pill is built in code")
     }
 
+    /// Re-assert the mask on every resize.
+    ///
+    /// A layer `cornerRadius` is *not* an option here, however much tidier it
+    /// would be: for a `.behindWindow` material the blur is composited by the
+    /// window server rather than drawn into this view's layer, so the layer's
+    /// own clipping does nothing and the glass comes back as a rectangle. The
+    /// stretchable cap-inset image is the sanctioned way to shape one, and it
+    /// wants re-asserting when the view changes size.
+    override func setFrameSize(_ newSize: NSSize) {
+        super.setFrameSize(newSize)
+        refreshMask()
+    }
+
+    /// Assign the mask again.
+    ///
+    /// Assigning it *during* a frame animation does not stick — the window
+    /// server is holding the blur region it had when the animation started —
+    /// so `Pill` calls this again once the animation settles. Without that
+    /// second call the glass stays a rectangle for the rest of the pill's life,
+    /// which is a dark slab in the two corners the capsule leaves empty.
+    func refreshMask() {
+        maskImage = PillGlassView.capsuleMask(height: PillGeometry.height)
+    }
+
     override var mouseDownCanMoveWindow: Bool { true }
 
     /// A resizable capsule: two end caps and one stretchable point between
-    /// them, so every panel width from 28 to 288 pt gets the same true capsule
-    /// without ever rebuilding the image.
+    /// them, so every panel width gets the same true capsule without ever
+    /// rebuilding the image.
     static func capsuleMask(height: Double) -> NSImage {
         let radius = height / 2
         let size = NSSize(width: radius * 2 + 1, height: height)

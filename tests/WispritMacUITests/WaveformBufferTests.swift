@@ -1,11 +1,13 @@
 import XCTest
 @testable import WispritMacUI
 
-/// The ring buffer and the Tally's geometry — `ui-redesign.md` §2.3, §2.2, §7.
+/// The ring buffer and the Tally's geometry.
 ///
-/// Both are pure, and both are where the 120% went: the shaping curve, the
-/// dot-collapse, and the zero-redraw silence that keeps a 20 Hz meter off the
-/// main thread's back while the hotkey tap is live.
+/// The buffer is now the **onboarding mic test's** meter rather than the
+/// pill's — the pill breathes in place through `BarSynthesizer` instead of
+/// scrolling — but its shaping curve is still the pill's (`shaped` is what
+/// `BarSynthesizer.push` calls first), and the scroll semantics below are
+/// still exactly what the mic test draws.
 final class WaveformBufferTests: XCTestCase {
 
     // MARK: - shaping
@@ -119,14 +121,22 @@ final class TallyMetricsTests: XCTestCase {
 
     func testThePillScaleMatchesTheSpec() {
         let m = TallyMetrics.pill
-        XCTAssertEqual(m.barCount, 15)
-        XCTAssertEqual(m.barWidth, 2.5)
-        XCTAssertEqual(m.barPitch, 5.0)
+        XCTAssertEqual(m.barCount, 10, "one field, in every state that has one")
+        XCTAssertEqual(m.barWidth, 2.25)
+        XCTAssertEqual(m.barPitch, 5.5)
         XCTAssertEqual(m.height, 28)
         XCTAssertEqual(m.peak, 14)
-        XCTAssertEqual(m.floor, 2.5)
-        XCTAssertEqual(m.fieldWidth, 72.5)
-        XCTAssertEqual(m.fieldWidth(count: 7), 32.5, "the compact meter")
+        XCTAssertEqual(m.floor, 2.25)
+        XCTAssertEqual(m.fieldWidth, 51.75, "9 × 5.5 + 2.25 — the ink")
+        // Bar width and peak are Flowbar.svg's ratios against our capsule.
+        XCTAssertEqual(m.barWidth / m.height, 0.080, accuracy: 0.002)
+        XCTAssertEqual(m.peak / m.height, 0.509, accuracy: 0.01)
+        // The pitch answers to the *app* instead: its ten bars run at 0.056 of
+        // the pill's width, and Wispr's own export uses a 41 % duty cycle.
+        XCTAssertEqual(m.barPitch / PillGeometry.widthListening, 0.056, accuracy: 0.002)
+        XCTAssertEqual(m.barWidth / m.barPitch, 0.41, accuracy: 0.01)
+        XCTAssertEqual(m.fieldWidth / PillGeometry.widthListening, 0.56, accuracy: 0.03,
+                       "the field has to fill the capsule the way the app's does")
     }
 
     func testTheMicTestScaleMatchesTheSpec() {
@@ -151,7 +161,7 @@ final class TallyMetricsTests: XCTestCase {
     /// Silence is a perfect dot — `floor == barWidth`, so a silent bar is a
     /// circle and not a stub. The single best detail in Wispr's pill.
     func testSilenceCollapsesToAPerfectDot() {
-        for metrics in [TallyMetrics.pill, .pillCompact, .micTest] {
+        for metrics in [TallyMetrics.pill, .micTest] {
             XCTAssertEqual(metrics.barHeight(0), metrics.barWidth, "\(metrics.height) pt scale")
             XCTAssertEqual(metrics.cornerRadius, metrics.barWidth / 2)
         }
@@ -160,24 +170,23 @@ final class TallyMetricsTests: XCTestCase {
     func testBarHeightAndAlphaInterpolate() {
         let m = TallyMetrics.pill
         XCTAssertEqual(m.barHeight(1), 14)
-        XCTAssertEqual(m.barHeight(0.5), 8.25)
-        XCTAssertEqual(m.barHeight(-1), 2.5, "clamped, like every other level")
+        XCTAssertEqual(m.barHeight(0.5), 8.125)
+        XCTAssertEqual(m.barHeight(-1), 2.25, "clamped, like every other level")
         XCTAssertEqual(m.barAlpha(0), 0.45, "silence recedes to dim dots")
         XCTAssertEqual(m.barAlpha(1), 1.0, "and speech is full tint")
     }
 
-    /// The resting bar is the same instrument at the scale idle needs: five
-    /// perfect dots, large enough to read as "ready" rather than as an empty
-    /// capsule, and still comfortably inside the 48 pt bar.
-    func testTheRestingBarIsTheSameInstrumentAtItsOwnScale() {
-        let m = TallyMetrics.pillIdle
-        XCTAssertEqual(m.barCount, PillGeometry.barCountIdle)
+    /// The resting bar is not a scale of its own any more — it is this one at
+    /// silence. That is the measured truth about Flow (idle capsule and
+    /// listening capsule are the same 107 px object) and it is what removes a
+    /// transition the pill never needed.
+    func testTheRestingBarIsTheListeningMeterAtSilence() {
+        let m = TallyMetrics.pill
         XCTAssertEqual(m.height, PillGeometry.height, "the capsule never changes height")
         XCTAssertEqual(m.floor, m.barWidth, "silence is still a perfect dot")
-        XCTAssertGreaterThan(m.barWidth, TallyMetrics.pill.barWidth,
-                             "no waveform to resolve, so the dot can be bigger")
-        XCTAssertLessThan(m.fieldWidth, PillGeometry.widthIdle - 2 * Theme.Space.s8,
-                          "the field has to sit inside the resting bar")
+        XCTAssertEqual(m.barHeight(0), m.barWidth)
+        XCTAssertLessThan(m.fieldWidth, PillGeometry.widthListening - 2 * Theme.Space.s8,
+                          "the field has to sit inside the capsule")
     }
 
     // MARK: - pixel alignment (§2.2, crisp at every backing scale)
@@ -186,20 +195,25 @@ final class TallyMetricsTests: XCTestCase {
     /// 3 px on a 1× display and the pitch and centred field with it; rounding
     /// the height would quantise the waveform into 1 pt steps, which is the one
     /// dimension the eye is actually reading.
-    func testOnlyTheBarOriginSnapsToThePixelGrid() {
+    func testOnlyTheFieldOriginSnapsToThePixelGrid() {
         let m = TallyMetrics.pill
         let size = CGSize(width: PillGeometry.widthListening, height: PillGeometry.height)
         for scale in [1.0, 2.0] {
-            let rect = m.barRect(index: 0, value: 0.5, count: 15, in: size, displayScale: scale)
+            let rect = m.barRect(index: 0, value: 0.5, count: 10, in: size, displayScale: scale)
             XCTAssertEqual((rect.minX * scale).truncatingRemainder(dividingBy: 1), 0,
                            accuracy: 1e-9, "origin off the grid at \(scale)×")
             XCTAssertEqual(rect.width, m.barWidth, "the width is not rounded")
             XCTAssertEqual(rect.height, m.barHeight(0.5), "nor the height")
         }
-        // The pitch survives the snap, which is what keeps the field even.
-        let first = m.barRect(index: 0, value: 0, count: 15, in: size, displayScale: 1)
-        let second = m.barRect(index: 1, value: 0, count: 15, in: size, displayScale: 1)
-        XCTAssertEqual(second.minX - first.minX, m.barPitch)
+        // The pitch survives the snap at every scale, which is what keeps the
+        // field even. Snapping each bar separately would give 4, 4, 5, 4 here.
+        for scale in [1.0, 2.0] {
+            let first = m.barRect(index: 0, value: 0, count: 10, in: size, displayScale: scale)
+            let second = m.barRect(index: 1, value: 0, count: 10, in: size, displayScale: scale)
+            let last = m.barRect(index: 9, value: 0, count: 10, in: size, displayScale: scale)
+            XCTAssertEqual(second.minX - first.minX, m.barPitch, "pitch at \(scale)×")
+            XCTAssertEqual(last.minX - first.minX, 9 * m.barPitch, accuracy: 1e-9)
+        }
     }
 
     /// No scale means no snapping — the geometry every other assertion here
@@ -207,11 +221,11 @@ final class TallyMetricsTests: XCTestCase {
     func testTheUnscaledSpellingIsUnchanged() {
         let m = TallyMetrics.pill
         let size = CGSize(width: PillGeometry.widthListening, height: PillGeometry.height)
-        XCTAssertEqual(m.barRect(index: 3, value: 0.4, count: 15, in: size),
-                       m.barRect(index: 3, value: 0.4, count: 15, in: size, displayScale: 0))
-        XCTAssertEqual(TallyMetrics.pixelAligned(11.75, scale: 0), 11.75)
-        XCTAssertEqual(TallyMetrics.pixelAligned(11.75, scale: 1), 12)
-        XCTAssertEqual(TallyMetrics.pixelAligned(11.75, scale: 2), 12)
+        XCTAssertEqual(m.barRect(index: 3, value: 0.4, count: 10, in: size),
+                       m.barRect(index: 3, value: 0.4, count: 10, in: size, displayScale: 0))
+        XCTAssertEqual(TallyMetrics.pixelAligned(22.125, scale: 0), 22.125)
+        XCTAssertEqual(TallyMetrics.pixelAligned(22.125, scale: 1), 22)
+        XCTAssertEqual(TallyMetrics.pixelAligned(22.125, scale: 2), 22, "44.25 px → 44")
         XCTAssertEqual(TallyMetrics.pixelAligned(11.6, scale: 2), 11.5)
     }
 
@@ -220,11 +234,11 @@ final class TallyMetricsTests: XCTestCase {
     func testBarsAreCentredHorizontallyAndOnTheMidline() {
         let m = TallyMetrics.pill
         let size = CGSize(width: PillGeometry.widthListening, height: PillGeometry.height)
-        let first = m.barRect(index: 0, value: 0, count: 15, in: size)
+        let first = m.barRect(index: 0, value: 0, count: 10, in: size)
         XCTAssertEqual(first.minX, PillGeometry.sideInset)
         XCTAssertEqual(first.midY, size.height / 2)
 
-        let last = m.barRect(index: 14, value: 1, count: 15, in: size)
+        let last = m.barRect(index: 9, value: 1, count: 10, in: size)
         XCTAssertEqual(last.maxX, size.width - PillGeometry.sideInset, accuracy: 1e-9)
         XCTAssertEqual(last.midY, size.height / 2, "bars grow symmetrically up and down")
         XCTAssertEqual(last.height, m.peak)

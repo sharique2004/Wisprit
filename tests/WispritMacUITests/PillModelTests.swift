@@ -34,20 +34,50 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(PillGeometry.height, 28.0)
         XCTAssertEqual(PillGeometry.radius, 14.0, "a full capsule: h/2")
         XCTAssertEqual(PillGeometry.widthListening, 96.0)
-        XCTAssertEqual(PillGeometry.widthIdle, 48.0)
-        XCTAssertEqual(PillGeometry.barCountIdle, 5)
-        XCTAssertEqual(PillGeometry.barCount, 15, "odd, so there is a true centre bar")
-        XCTAssertEqual(PillGeometry.barWidth, 2.5)
-        XCTAssertEqual(PillGeometry.barPitch, 5.0)
+        XCTAssertEqual(PillGeometry.barCount, 10, "one field, everywhere")
+        XCTAssertEqual(PillGeometry.barWidth, 2.25, "Flowbar's 0.080·h")
+        XCTAssertEqual(PillGeometry.barPitch, 5.5, "the app's 0.056 of the pill width")
         XCTAssertEqual(PillGeometry.barPeak, 14.0)
         XCTAssertEqual(PillGeometry.barFloor, PillGeometry.barWidth,
                        "silence must be a perfect dot")
         XCTAssertEqual(PillGeometry.barFieldWidth,
-                       Double(PillGeometry.barCount) * PillGeometry.barPitch - PillGeometry.barWidth)
-        XCTAssertEqual(PillGeometry.barFieldCompact,
-                       Double(PillGeometry.barCountCompact) * PillGeometry.barPitch - PillGeometry.barWidth)
+                       Double(PillGeometry.barCount - 1) * PillGeometry.barPitch
+                           + PillGeometry.barWidth)
+        XCTAssertEqual(PillGeometry.barFieldWidth, TallyMetrics.pill.fieldWidth)
         XCTAssertEqual(PillGeometry.sideInset,
                        (PillGeometry.widthListening - PillGeometry.barFieldWidth) / 2)
+    }
+
+    /// The processing capsule is Flow's measured ×1.34, on the 8 pt grid, and
+    /// wide enough for the dot row plus the spinner plus both insets.
+    func testTheProcessingWidthFitsItsContents() {
+        XCTAssertEqual(PillGeometry.widthProcessing, 128.0)
+        XCTAssertEqual(PillGeometry.widthProcessing / PillGeometry.widthListening,
+                       1.34, accuracy: 0.01, "Flow widens 107 → 143 px on release")
+        XCTAssertEqual(PillGeometry.widthProcessing
+                           .truncatingRemainder(dividingBy: PillTailGeometry.widthStep), 0)
+        let needed = 2 * PillTailGeometry.textInset + PillGeometry.barFieldWidth
+            + PillTailGeometry.spinnerAllowance
+        XCTAssertGreaterThan(PillGeometry.widthProcessing, needed)
+    }
+
+    /// A patience line arriving during a wait must not slide under the
+    /// spinner. The spinner is an overlay pinned to the trailing inset, so the
+    /// width has to buy its room explicitly.
+    func testAWaitWithCopyBuysRoomForItsSpinner() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.showFinalizing()
+        model.fireDeferred(.patience)
+        let text = PillGeometry.finalizingPatienceMessage
+        let tail = PillTailGeometry.width(forCharacters: text.count)
+        XCTAssertEqual(sink.last.bubble, text)
+        XCTAssertGreaterThanOrEqual(
+            sink.last.totalWidth,
+            PillTailGeometry.totalWidth(tailWidth: tail) + PillTailGeometry.spinnerAllowance,
+            "the copy would render underneath the spinner")
+        XCTAssertEqual(PillTailGeometry.spinnerAllowance,
+                       PillTailGeometry.gap + PillGeometry.spinnerBox)
     }
 
     /// The timings are the one thing the user has felt for months.
@@ -154,12 +184,32 @@ final class PillModelTests: XCTestCase {
         model.showIdle()
         XCTAssertEqual(model.state, .idle)
         XCTAssertTrue(sink.last.isVisible)
-        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthIdle)
-        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCountIdle))
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening,
+                       "idle and listening are one capsule — Flow measures them equal")
+        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount))
         XCTAssertEqual(sink.last.glyph, .none)
         XCTAssertEqual(sink.last.tint, PillPalette.muted)
         XCTAssertNotEqual(sink.last.tint, PillPalette.hot)
+        XCTAssertEqual(PillPalette.meterTint(for: .idle), PillPalette.cream,
+                       "the resting dots are cream, not grey")
         XCTAssertEqual(PillPalette.bodyFill(for: .idle).color, PillPalette.body)
+    }
+
+    /// The consequence worth its own name: `idle → listening` moves no frame
+    /// at all. The bars are already where they will be; only their colour and
+    /// their heights change, which is exactly what the real app does.
+    func testIdleAndListeningShareOneFrame() {
+        let (model, sink) = makeModel()
+        model.showIdle()
+        let idle = sink.last
+        model.showRecording()
+        let listening = sink.last
+        XCTAssertEqual(idle.totalWidth, listening.totalWidth)
+        XCTAssertEqual(idle.bars.count, listening.bars.count)
+        XCTAssertEqual(PillMotion.frameChange(
+            wasVisible: true, isVisible: true,
+            oldWidth: idle.totalWidth, newWidth: listening.totalWidth,
+            newState: .recording, reduceMotion: false).kind, PillMotion.FrameChange.Kind.none)
     }
 
     func testShowRecordingGoesOrangeVisibleAndZeroLevel() {
@@ -188,17 +238,53 @@ final class PillModelTests: XCTestCase {
 
         model.flashSuccess()
         XCTAssertEqual(model.state, .success)
-        XCTAssertEqual(sink.last.glyph, .checkmark)
-        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthCommitted,
-                       "committed contracts to a circle")
+        XCTAssertEqual(sink.last.glyph, .none,
+                       "no commit glyph — the inserted text is the confirmation")
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening,
+                       "the commit contracts back to the resting capsule, not to a circle")
+        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount))
+        XCTAssertEqual(PillPalette.meterTint(for: .success), PillPalette.cream,
+                       "the dots brighten muted → cream on the way home")
         XCTAssertEqual(sink.scheduled.last?.seconds, 0.6)
         XCTAssertEqual(sink.scheduled.last?.action, .settle)
 
         model.fireDeferred(.settle)
         XCTAssertEqual(model.state, .idle)
         XCTAssertTrue(sink.last.isVisible, "Flow stays on the desktop")
-        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthIdle)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening)
         XCTAssertEqual(sink.last.glyph, .none)
+    }
+
+    /// The processing frame: one look for both waiting states, widened for the
+    /// spinner, with the meter dimmed to grey and no glyph competing with it.
+    func testProcessingIsOneWidenedDimmedLook() {
+        for enter in [{ (m: PillModel) in m.showFinalizing() },
+                      { (m: PillModel) in m.showRefining() }] {
+            let (model, sink) = makeModel()
+            model.showRecording()
+            model.updateLevel(0.5)
+            enter(model)
+            XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthProcessing, "\(model.state)")
+            XCTAssertEqual(sink.last.glyph, .none, "the spinner is the chrome, not a symbol")
+            XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount))
+            XCTAssertEqual(PillPalette.meterTint(for: model.state), PillPalette.muted)
+        }
+    }
+
+    /// `finalizing → refining` must change nothing on screen: it is the same
+    /// wait wearing a different label, and a stutter there reads as a hitch in
+    /// the work.
+    func testRefiningAfterFinalizingChangesNoFrame() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.updateLevel(0.5)
+        model.showFinalizing()
+        var before = sink.last
+        model.showRefining()
+        var after = sink.last
+        before.state = .finalizing
+        after.state = .finalizing
+        XCTAssertEqual(before, after, "only the label changed")
     }
 
     func testFlashErrorAutoHidesAfterOnePointSix() {
@@ -272,12 +358,13 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(sink.last.tint, PillPalette.hot)
     }
 
-    func testRefiningKeepsTheMeterAndAddsTheSparklesGlyph() {
+    func testRefiningKeepsTheMeterAndDropsTheSparklesGlyph() {
         let (model, sink) = makeModel()
         model.showRecording()
         model.showRefining()
         XCTAssertEqual(model.state, .refining)
-        XCTAssertEqual(sink.last.glyph, .sparkles)
+        XCTAssertEqual(sink.last.glyph, .none,
+                       "the spinner already says 'working'; the patience copy says which work")
         XCTAssertEqual(sink.last.tint, PillPalette.muted)
         XCTAssertEqual(sink.last.bars.count, PillGeometry.barCount)
         XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount))
@@ -334,7 +421,7 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(sink.last.glyph, .none, "a miss is not a warning triangle")
         XCTAssertEqual(sink.last.tint, PillPalette.muted)
         XCTAssertEqual(PillPalette.bodyFill(for: .missed).color, PillPalette.body)
-        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCountCompact),
+        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount),
                        "the waveform flattens to dots, the way Flow leaves")
         XCTAssertEqual(sink.scheduled.last?.seconds, PillGeometry.missedHideDelay)
         XCTAssertEqual(sink.scheduled.last?.action, .settle)
@@ -581,7 +668,7 @@ final class PillModelTests: XCTestCase {
         model.flashSuccess()
         XCTAssertEqual(model.bubble, "")
         XCTAssertFalse(sink.last.tailMuted)
-        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthCommitted)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening)
     }
 
     /// It is a reassurance, never a replacement: anything the app actually had
@@ -619,40 +706,34 @@ final class PillModelTests: XCTestCase {
         XCTAssertTrue(sink.frames.isEmpty)
     }
 
-    // MARK: - the staggered-collapse source (§2.5 row 6, FINAL-PLAN R13)
+    // MARK: - the release collapse
 
-    /// The surface needs the levels the collapse starts from; the model's
-    /// `bars` are already at floor — a held waveform would be a lie, and every
-    /// assertion above stays true.
-    func testFinalizingHandsTheSurfaceThePreCollapseBars() {
+    /// There is no pre-collapse snapshot any more, and there does not need to
+    /// be one: the meter's layers already hold the heights they are at, so the
+    /// release is one retarget to floor and the render server plays the fall
+    /// from wherever each bar happens to be. The model's `bars` go straight to
+    /// floor, which is what every assertion here has always said.
+    func testTheReleaseTakesEveryBarToFloorAtOnce() {
         let (model, sink) = makeModel()
         model.showRecording()
         model.updateLevel(0.5)
+        XCTAssertFalse(sink.last.bars.allSatisfy { $0 == 0 })
         model.showFinalizing()
+        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount),
+                       "Flow's row drops as a unit — no stagger")
+    }
+
+    /// A fresh press starts from the dot row rather than from the last
+    /// utterance's tail: the synthesizer's envelope and every jitter deadline
+    /// are reset, so bar 3 does not inherit a height from a minute ago.
+    func testAFreshPressStartsFromTheDotRow() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.updateLevel(0.9)
+        model.showFinalizing()
+        model.fireDeferred(.settle)
+        model.showRecording()
         XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount))
-        XCTAssertEqual(sink.last.collapseFrom.count, PillGeometry.barCount)
-        XCTAssertEqual(sink.last.collapseFrom.last, WaveformBuffer.shaped(0.5))
-
-        model.showRefining()
-        XCTAssertEqual(sink.last.collapseFrom, [],
-                       "refining right after finalizing must not restart the choreography")
-    }
-
-    func testASilentReleaseHasNothingToCollapse() {
-        let (model, sink) = makeModel()
-        model.showRecording()
-        model.showFinalizing()
-        XCTAssertEqual(sink.last.collapseFrom, [])
-    }
-
-    func testTheCommitClearsTheCollapseSource() {
-        let (model, sink) = makeModel()
-        model.showRecording()
-        model.updateLevel(0.7)
-        model.showFinalizing()
-        XCTAssertFalse(sink.last.collapseFrom.isEmpty)
-        model.flashSuccess()
-        XCTAssertEqual(sink.last.collapseFrom, [])
     }
 
     // MARK: - width held (§2.4)
@@ -700,18 +781,26 @@ final class PillModelTests: XCTestCase {
 
     // MARK: - the meter
 
-    func testUpdateLevelScrollsTheWaveformAndNeverChangesVisibility() {
+    /// The single biggest divergence from Flow, now fixed: **the bars do not
+    /// scroll.** Frame-to-frame cross-correlation of the real app's listening
+    /// waveform is 0.90 at lag 0 — the pattern stays in place and breathes.
+    /// Here that is visible as a symmetric dome that grows with the voice
+    /// instead of a value marching in from the right.
+    func testUpdateLevelBreathesInPlaceAndNeverChangesVisibility() {
         let (model, sink) = makeModel()
         model.updateLevel(0.5)
         XCTAssertFalse(sink.last.isVisible)
 
         model.showRecording()
-        model.updateLevel(0.5)
-        XCTAssertEqual(sink.last.bars.last, WaveformBuffer.shaped(0.5))
-        model.updateLevel(0.5)
-        XCTAssertEqual(Array(sink.last.bars.suffix(2)),
-                       [WaveformBuffer.shaped(0.5), WaveformBuffer.shaped(0.5)],
-                       "an unchanged level still scrolls — that is what makes it a waveform")
+        for _ in 0..<6 { model.updateLevel(0.5) }
+        let bars = sink.last.bars
+        XCTAssertEqual(bars.count, PillGeometry.barCount)
+        // Every bar carries the voice, and the middle carries more of it than
+        // the ends — which is what makes it read as one instrument.
+        XCTAssertTrue(bars.allSatisfy { $0 > 0 }, "no bar is left at floor while speaking")
+        let middle = (bars[4] + bars[5]) / 2
+        XCTAssertGreaterThan(middle, bars[0] * 1.3)
+        XCTAssertGreaterThan(middle, bars[9] * 1.3)
     }
 
     /// The non-negotiable one: the main thread carries the CGEventTap, so an
@@ -724,34 +813,48 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(sink.frames.count, count, "a silent pill must not redraw")
     }
 
-    /// …and it converges: a loud burst drains through the buffer in at most
-    /// `barCount` ticks and then silence is free again.
-    func testSilenceBecomesFreeOnceTheBurstScrollsOut() {
+    /// …and it converges, which is the half the exponential release could not
+    /// do on its own.
+    ///
+    /// The envelope decays by `1 − release` a tick and would *never* reach
+    /// zero, so a mid-dictation pause would emit sub-visible frames for
+    /// minutes. The snap fixes that with a closed form: from the height one
+    /// full-scale tick reaches (`attack`), it takes
+    /// `⌈ln(quantum / attack) / ln(1 − release)⌉ = 12` ticks — 600 ms — to fall
+    /// under one quantum, at which point it is set to exactly zero, the row
+    /// lands on its dots, and every tick after that is free forever.
+    func testSilenceBecomesFreeOnceTheEnvelopeDecays() {
         let (model, sink) = makeModel()
         model.showRecording()
         model.updateLevel(0.8)
         var emitted = 0
-        for _ in 0..<(PillGeometry.barCount * 3) {
+        for _ in 0..<(PillGeometry.barCount * 6) {
             let before = sink.frames.count
             model.updateLevel(0)
             if sink.frames.count > before { emitted += 1 }
         }
-        XCTAssertLessThanOrEqual(emitted, PillGeometry.barCount)
+        let expected = Int((log(WaveformBuffer.quantum / BarSynthesizer.attack)
+                            / log(1 - BarSynthesizer.release)).rounded(.up))
+        XCTAssertEqual(emitted, expected, "the release is 600 ms and then it is over")
+        XCTAssertLessThanOrEqual(Double(expected) * BarSynthesizer.tickInterval, 1.0)
+        XCTAssertTrue(sink.last.bars.allSatisfy { $0 == 0 })
         let settled = sink.frames.count
         for _ in 0..<20 { model.updateLevel(0) }
-        XCTAssertEqual(sink.frames.count, settled)
+        XCTAssertEqual(sink.frames.count, settled, "and then silence is free again")
     }
 
-    /// A text tail halves the meter so the pill stays a pill.
-    func testTheMeterGoesCompactWhenATailSharesTheCapsule() {
+    /// A text tail no longer halves the meter: Flow keeps one field and grows
+    /// the capsule around it, so the bars the user was watching do not
+    /// rearrange themselves the moment a word arrives.
+    func testTheMeterKeepsItsFieldWhenATailSharesTheCapsule() {
         let (model, sink) = makeModel()
         model.showRecording()
         model.updateLevel(0.6)
-        XCTAssertEqual(sink.last.bars.count, PillGeometry.barCount)
+        let before = sink.last.bars
+        XCTAssertEqual(before.count, PillGeometry.barCount)
         model.livePartial("hello there world")
-        XCTAssertEqual(sink.last.bars.count, PillGeometry.barCountCompact)
-        XCTAssertEqual(sink.last.bars.last, WaveformBuffer.shaped(0.6),
-                       "the compact meter keeps the newest slots")
+        XCTAssertEqual(sink.last.bars, before, "the same ten bars, in the same places")
+        XCTAssertGreaterThan(sink.last.totalWidth, PillGeometry.widthListening)
     }
 
     // MARK: - livePartial
@@ -823,8 +926,11 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(unclamped.truncatingRemainder(dividingBy: PillTailGeometry.widthStep), 0)
 
         XCTAssertEqual(PillTailGeometry.totalWidth(tailWidth: 0), PillGeometry.widthListening)
-        XCTAssertEqual(PillTailGeometry.totalWidth(tailWidth: PillTailGeometry.minWidth), 108.5)
-        XCTAssertEqual(PillTailGeometry.totalWidth(tailWidth: PillTailGeometry.maxWidth), 260.5)
+        // `12 + 40.25 + 8 + w + 12` — the chrome grew when the meter stopped
+        // narrowing for a tail.
+        XCTAssertEqual(PillTailGeometry.chrome, 84, "whole points: NSWindow snaps, SwiftUI does not")
+        XCTAssertEqual(PillTailGeometry.totalWidth(tailWidth: PillTailGeometry.minWidth), 128)
+        XCTAssertEqual(PillTailGeometry.totalWidth(tailWidth: PillTailGeometry.maxWidth), 280)
     }
 
     // MARK: - transientNotice
