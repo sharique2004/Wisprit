@@ -324,6 +324,125 @@ final class ParallelAnchorTests: XCTestCase {
         }
     }
 
+    // MARK: - production
+
+    /// Tonight's live dictation session, `~/.wisprit/history.sqlite`
+    /// `utterance_detail` rows 171-179, replayed end to end.
+    ///
+    /// This is the only table in the file whose inputs nobody wrote: they are
+    /// what a person actually said into the microphone, with the recognizer's
+    /// own spelling ("Hatathon") and its own punctuation left exactly as
+    /// recorded. Five resolved on the night; two did not, and both are fixed
+    /// here — so the whole session is pinned together, the wins as regression
+    /// cover for the fixes.
+    func testTonightsProductionUtterances() {
+        let session: [(row: Int, raw: String, expected: String)] = [
+            // 171 — the cue behind an interjection. Shipped as "…today.
+            // tomorrow.": the span read "Oh" as the word being corrected,
+            // deleted it with the cue, and left BOTH dates in the sentence.
+            (171, "I was thinking of going to Hackathon today. Oh, I mean tomorrow.",
+             "I was thinking of going to Hackathon tomorrow."),
+            (172, "I was going to a hackathon tomorrow. I mean today.",
+             "I was going to a hackathon today."),
+            (173, "I was going to a hackathon today, I mean tomorrow.",
+             "I was going to a hackathon tomorrow."),
+            (174, "I was going to Hatathon today. I mean tomorrow.",
+             "I was going to Hatathon tomorrow."),
+            (175, "I was going to a hackathon today, I mean tomorrow.",
+             "I was going to a hackathon tomorrow."),
+            (176, "Going to a hackathon tomorrow, I mean today.",
+             "Going to a hackathon today."),
+            (177, "I was planning on going for dinner with Vivek tonight. I mean, tomorrow morning.",
+             "I was planning on going for dinner with Vivek tomorrow morning."),
+            // 179 — no cue at all. The recognizer never transcribed it, so
+            // the parallelism is the only evidence in the sentence.
+            (179, "I was planning on going for dinner tomorrow, today morning.",
+             "I was planning on going for dinner today morning."),
+        ]
+        for (row, raw, expected) in session {
+            assertPipeline(raw, expected, "utterance \(row)")
+        }
+        // Rows from the same session that carry no correction, verbatim.
+        assertVerbatim([
+            (170, "Okay, testing, dictation now with a new bill."),
+            (178, "I was..."),
+            (180, "This is what the test showed based on everything that, you know, I usually "
+                + "kind of talk about, but yeah, it's not working. Fix it."),
+        ].map { (id: "utterance \($0.0)", raw: $0.1) })
+    }
+
+    /// A correction is spoken the moment the speaker notices the mistake, and
+    /// noticing has its own vocabulary. The cue may sit behind up to two of
+    /// them; the pause still has to be there, and the anchor still has to
+    /// exist.
+    func testCueSurvivesAnInterjection() {
+        for lead in ["Oh,", "Oh", "Ah,", "Well,", "Hmm,", "um,", "Oh, well,"] {
+            assertPipeline("I was going to a hackathon today. \(lead) I mean tomorrow.",
+                           "I was going to a hackathon tomorrow.", lead)
+        }
+        // The interjection is not itself correctable content — this is what
+        // stops the span consuming the cue before this tier can read it.
+        assertVerbatim([
+            ("oh-no-anchor", "I was thinking about it. Oh, I mean the whole backlog is a mess."),
+            ("oh-literal", "Oh, I mean it. Stop."),
+            ("well-literal", "Well, I know what you mean about the deadline."),
+        ])
+    }
+
+    // MARK: - cue-less parallels
+
+    /// The recognizer drops the spoken cue often enough that production hit it
+    /// on the first night. Two touching temporals of the same class, a pause
+    /// between them and nothing else, the second one bare and ending the
+    /// clause: the later phrase wins.
+    func testBareParallelRestatement() {
+        let cases: [(id: String, raw: String, expected: String)] = [
+            ("production-179", "I was planning on going for dinner tomorrow, today morning.",
+             "I was planning on going for dinner today morning."),
+            ("terminator", "I was thinking of going to hackathon today. tomorrow.",
+             "I was thinking of going to hackathon tomorrow."),
+            ("weekday", "let's meet Monday, Tuesday.", "let's meet Tuesday."),
+            ("slot-modifier", "dinner tomorrow, today at six.", "dinner today at six."),
+            ("month", "the offsite is in March, April.", "the offsite is in April."),
+        ]
+        for (id, raw, expected) in cases { assertPipeline(raw, expected, id) }
+    }
+
+    /// The fences, one shape each. Every one of these is ordinary English that
+    /// the rule must leave alone — a list, a range, a new clause, an
+    /// enumeration, or emphasis.
+    func testBareParallelMustNotFire() {
+        assertVerbatim([
+            // A conjunction between them: a list, not a restatement.
+            ("and", "today and tomorrow"),
+            ("or", "today or tomorrow"),
+            ("nor", "we meet Monday nor Tuesday"),
+            // A range.
+            ("to", "Monday to Friday"),
+            ("through", "Monday through Wednesday"),
+            ("until", "the deadline is Monday until Friday"),
+            // The second temporal opens a new clause.
+            ("new-clause", "We shipped today. Tomorrow we rest."),
+            ("new-clause-2", "I went yesterday, tomorrow I'll fly"),
+            // Content after the survivor — not bare, not clause-final. This is
+            // the guard that keeps the sentence its subject.
+            ("clause-end", "the meeting is at nine, ten people are coming"),
+            // Three or more is an enumeration.
+            ("enumeration", "Monday, Tuesday, Wednesday"),
+            ("enumeration-numbers", "35, 36, 37"),
+            ("enumeration-list", "I can do today, tomorrow and Friday"),
+            ("enumeration-oxford", "office hours are Monday, Tuesday, and Thursday"),
+            // Identical phrases are emphasis, not restatement.
+            ("macbeth", "tomorrow, tomorrow, and tomorrow"),
+            ("repeat", "see you tomorrow, tomorrow."),
+            // Numbers are outside the rule on purpose: a two-element number
+            // list at a clause end is ordinary enumeration.
+            ("numbers", "I'll take 3, 4."),
+            // No pause at all.
+            ("no-pause", "see you tomorrow today"),
+        ])
+    }
+
     // MARK: - contract
 
     func testLiveBudget() {

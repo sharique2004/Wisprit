@@ -175,6 +175,11 @@ public enum SelfCorrection {
         // cue and never a second opinion on a resolved one. That ordering is
         // what keeps every answer the tiers above give byte-identical.
         text = resolveParallelAnchors(text)
+        // Last, and only on what every cued tier declined: two touching
+        // temporals of the same class with nothing between them but a pause.
+        // The recognizer sometimes drops the spoken cue entirely, and then the
+        // parallelism is the only evidence there is.
+        text = resolveBareParallels(text)
         // "scratch that" / "forget that" / "never mind" — keep only what
         // follows the last DIRECTIVE occurrence.
         text = applyScratch(text)
@@ -1575,6 +1580,14 @@ private let hedgeLeaders: Set<String> = [
     "know", "see", "if", "then", "hey", "look", "right", "sure",
     "i", "you", "he", "she", "it", "we", "they",
     "say", "says", "said", "saying",
+    // The bare interjections. Measured in production (utterance 171): "…going
+    // to Hackathon today. Oh, I mean tomorrow." came back "…Hackathon today.
+    // tomorrow." — the span read "Oh" as the content word being replaced,
+    // deleted it along with the cue, and left BOTH temporals standing. An
+    // interjection is never the thing a correction replaces, which is exactly
+    // what this list is for; without them here the span consumes the cue and
+    // the parallel-anchor tier downstream never sees a correction to resolve.
+    "oh", "ah", "aha", "hmm", "hm", "huh", "eh", "oops", "whoops",
 ]
 
 // MARK: - Clause-restart vocabulary
@@ -1916,6 +1929,143 @@ extension SelfCorrection {
         for (i, token) in all.enumerated() where token.closesSentence { clause = i + 1 }
         return Array(all[clause...].suffix(anchorWindow))
     }
+
+    // MARK: cue-less parallels
+
+    /// Two temporal phrases of the same class, touching, with nothing between
+    /// them but a pause — "…for dinner tomorrow, today morning." → "…for
+    /// dinner today morning."
+    ///
+    /// Measured in production (utterance 179): the recognizer never
+    /// transcribed the spoken cue at all, so every tier above declines and the
+    /// utterance ships with both dates in it. The parallelism IS the evidence
+    /// here, and it has to carry the whole weight — which is why this rule is
+    /// the most heavily fenced in the file:
+    ///
+    ///   * TOUCHING. The two phrases must be adjacent WORDS, so a conjunction,
+    ///     a preposition or any other content word between them ends the
+    ///     matter — "today and tomorrow", "Monday to Friday", "Monday through
+    ///     Wednesday" are lists and ranges and never reach the rule.
+    ///   * A PAUSE, and only a pause. The separator must contain a comma or a
+    ///     terminator and nothing else; two temporals with no punctuation
+    ///     between them are not a restatement.
+    ///   * EXACTLY TWO. Three or more in a row is an enumeration, not a
+    ///     correction — "Monday, Tuesday, Wednesday" keeps all three.
+    ///   * NOT IDENTICAL. "tomorrow, tomorrow, and tomorrow" is emphasis (or
+    ///     Macbeth); a restatement restates something DIFFERENT.
+    ///   * BARE, AND AT THE CLAUSE END. The survivor may carry a same-slot
+    ///     modifier ("today MORNING", "Friday AT SIX") and nothing else. A
+    ///     second temporal that opens a new clause is a new sentence, not a
+    ///     replacement: "We shipped today. Tomorrow we rest." keeps both.
+    ///
+    /// Deliberately TEMPORAL-only, though the classifier also knows numbers.
+    /// Two bare numbers at a clause end are ordinary enumeration in a way two
+    /// bare dates are not — "I'll take 3, 4." is a list far more often than a
+    /// correction — and "the meeting is at nine, ten people are coming" sits
+    /// one weak guard away from losing its subject. The temporal shape is what
+    /// production produced and what the classes model well; numbers stay out
+    /// until something measures them.
+    static func resolveBareParallels(_ text: String) -> String {
+        let ns = text as NSString
+        let tokens = anchorTokens(ns, from: 0, to: ns.length,
+                                  stopAtSentenceEnd: false, limit: Int.max)
+        guard tokens.count >= 2 else { return text }
+        let phrases = temporalPhrases(tokens)
+        guard phrases.count >= 2 else { return text }
+        for i in 0..<(phrases.count - 1) {
+            let left = phrases[i], right = phrases[i + 1]
+            guard left.kind == right.kind, left.end == right.start else { continue }
+            // Exactly two: a third parallel touching either side is a list.
+            if i > 0, phrases[i - 1].kind == left.kind, phrases[i - 1].end == left.start {
+                continue
+            }
+            if i + 2 < phrases.count, phrases[i + 2].kind == right.kind,
+               phrases[i + 2].start == right.end {
+                continue
+            }
+            guard !sameSpelling(tokens, left, right) else { continue }
+            guard pauseBetween(ns, tokens[left.end - 1].range, tokens[right.start].range)
+            else { continue }
+            guard isBareToClauseEnd(tokens, from: right) else { continue }
+            return splice(ns, anchorStart: tokens[left.start].range.location,
+                          postCueStart: tokens[right.start].range.location)
+        }
+        return text
+    }
+
+    /// The text's temporal phrases, left to right and non-overlapping, longest
+    /// match at each position.
+    private static func temporalPhrases(_ tokens: [AnchorToken])
+        -> [(kind: AnchorClass, start: Int, end: Int)] {
+        var out: [(kind: AnchorClass, start: Int, end: Int)] = []
+        var i = 0
+        while i < tokens.count {
+            var matched = false
+            for length in stride(from: min(anchorWindow, tokens.count - i), through: 1, by: -1) {
+                guard let kind = semanticClass(Array(tokens[i..<(i + length)])),
+                      kind != .number else { continue }
+                out.append((kind, i, i + length))
+                i += length
+                matched = true
+                break
+            }
+            if !matched { i += 1 }
+        }
+        return out
+    }
+
+    private static func sameSpelling(_ tokens: [AnchorToken],
+                                     _ a: (kind: AnchorClass, start: Int, end: Int),
+                                     _ b: (kind: AnchorClass, start: Int, end: Int)) -> Bool {
+        tokens[a.start..<a.end].map(\.lower) == tokens[b.start..<b.end].map(\.lower)
+    }
+
+    /// Whether the separator between two adjacent words is a pause and nothing
+    /// else. The scan starts at the left word's last alphanumeric, because the
+    /// comma that makes the pause is attached to that word's own token.
+    private static func pauseBetween(_ ns: NSString, _ lhs: NSRange, _ rhs: NSRange) -> Bool {
+        var i = lhs.location + lhs.length
+        while i > lhs.location, !isAlphanumeric(ns.character(at: i - 1)) { i -= 1 }
+        var sawPause = false
+        while i < rhs.location {
+            let c = ns.character(at: i)
+            if isWhitespace(c) { i += 1; continue }
+            if isSentenceTerminator(c) || c == 0x2C { sawPause = true; i += 1; continue }
+            return false
+        }
+        return sawPause
+    }
+
+    /// Whether the surviving phrase runs to the end of its clause, carrying
+    /// nothing but same-slot modifiers.
+    private static func isBareToClauseEnd(_ tokens: [AnchorToken],
+                                          from phrase: (kind: AnchorClass,
+                                                        start: Int, end: Int)) -> Bool {
+        if tokens[phrase.end - 1].closesSentence { return true }
+        var i = phrase.end
+        while i < tokens.count {
+            let token = tokens[i]
+            if bareSlotModifiers.contains(token.lower) {
+                if token.closesSentence { return true }
+                i += 1
+                continue
+            }
+            // "at six", "at 6:30" — a preposition plus its own time.
+            if token.lower == "at", i + 1 < tokens.count,
+               let kind = semanticClass([tokens[i + 1]]), kind == .clock || kind == .number {
+                if tokens[i + 1].closesSentence { return true }
+                i += 2
+                continue
+            }
+            return false
+        }
+        return true
+    }
+
+    private static func isAlphanumeric(_ c: unichar) -> Bool {
+        guard let scalar = Unicode.Scalar(c) else { return false }
+        return CharacterSet.alphanumerics.contains(scalar)
+    }
 }
 
 /// A word as the term-echo tier compares them — fillers stay, because
@@ -2019,15 +2169,39 @@ private let anchorCuePhrases = [
     "sorry",
 ]
 
+/// Modifiers a surviving temporal may carry and still count as "bare": they
+/// narrow the SAME slot rather than adding a new one, so the phrase they trail
+/// is still one date. Anything else after the survivor means a new clause.
+private let bareSlotModifiers: Set<String> = [
+    "morning", "afternoon", "evening", "night", "noon", "midnight",
+    "am", "pm", "a.m", "p.m", "o'clock",
+]
+
 /// Cheap gate: no cue word anywhere in the text, no parallel-anchor work at all.
 private let anchorCueProbeRx = Rx("\\b(?:mean|meant|sorry|rather|actually|wait|make)\\b")
 
-/// `<terminator-or-comma> <fillers?> <cue> <punctuation?> <whitespace>`. The
-/// trailing `\s+` is load-bearing twice over: it proves the replacement has
+/// Interjections that may stand between the pause and the cue. A correction is
+/// spoken the moment the speaker notices the mistake, and noticing has its own
+/// vocabulary — "today. Oh, I mean tomorrow." is the same utterance as "today.
+/// I mean tomorrow." with the flinch left in.
+///
+/// Closed, and capped at two below, because this is the one place the cue may
+/// be separated from its punctuation: an unbounded run of "words that may
+/// appear before a cue" would let the cue drift arbitrarily far from the pause
+/// that licenses it, which is the discipline the whole tier rests on.
+private let anchorCueInterjections = [
+    "oh", "ah", "aha", "hmm+", "hm", "huh", "eh", "oops", "whoops",
+    "um+", "uh+", "uhm", "erm", "well", "like", "sorry",
+]
+
+/// `<terminator-or-comma> <interjections?> <cue> <punctuation?> <whitespace>`.
+/// The trailing `\s+` is load-bearing twice over: it proves the replacement has
 /// actually been spoken, and it puts the match's end exactly on the first
 /// character this tier keeps.
 private let anchorCueRx = Rx(
-    "[,.!?\u{2026}]+\\s*(?:" + filler + "[,.!?\u{2026}]*\\s+)*"
+    "[,.!?\u{2026}]+\\s*"
+        + "(?:(?:" + anchorCueInterjections.joined(separator: "|")
+        + ")[,.!?\u{2026}]*\\s+){0,2}"
         + "(?:" + anchorCuePhrases.joined(separator: "|") + ")"
         + "(?![\\w'-])[,.!?\u{2026}]*\\s+")
 
