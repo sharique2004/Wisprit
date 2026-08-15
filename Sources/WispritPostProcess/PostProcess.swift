@@ -52,15 +52,34 @@ public struct PostProcessOptions: Sendable, Equatable {
     /// Spoken emoji directives ("fire emoji" -> 🔥). Post-Python addition, so it
     /// is the LAST init parameter: every existing call site keeps compiling.
     public var emojiCommands: Bool
+    /// Text immediately before the caret, when context awareness read a field.
+    /// Empty means "no context" — casing and leading space stay as produced.
+    public var precedingText: String
+    /// Frontmost bundle id, used for messaging-style trailing-period removal.
+    public var frontmostBundleID: String
+    /// Strip a trailing "press enter" command and report it on the result.
+    public var pressEnterEnabled: Bool
+    /// Wispr-style Smart Formatting: mid-utterance punctuation, lists, extra
+    /// line-break aliases. Default OFF so the Python goldens / fuzz stay a
+    /// differential net; the app opts in.
+    public var smartFormatting: Bool
 
     public init(fillerRemoval: Bool = true,
                 ensureSentencePeriod: Bool = false,
                 leadingSpace: LeadingSpace = .auto,
-                emojiCommands: Bool = true) {
+                emojiCommands: Bool = true,
+                precedingText: String = "",
+                frontmostBundleID: String = "",
+                pressEnterEnabled: Bool = true,
+                smartFormatting: Bool = false) {
         self.fillerRemoval = fillerRemoval
         self.ensureSentencePeriod = ensureSentencePeriod
         self.leadingSpace = leadingSpace
         self.emojiCommands = emojiCommands
+        self.precedingText = precedingText
+        self.frontmostBundleID = frontmostBundleID
+        self.pressEnterEnabled = pressEnterEnabled
+        self.smartFormatting = smartFormatting
     }
 
     /// Mirrors the Python `settings.get(key)` signature the app context passes
@@ -79,6 +98,10 @@ public struct PostProcessOptions: Sendable, Equatable {
         self.ensureSentencePeriod = bool("ensure_sentence_period", false)
         self.leadingSpace = (get("leading_space") as? String).flatMap(LeadingSpace.init(rawValue:)) ?? .auto
         self.emojiCommands = bool("emoji_commands", true)
+        self.precedingText = (get("preceding_text") as? String) ?? ""
+        self.frontmostBundleID = (get("frontmost_bundle_id") as? String) ?? ""
+        self.pressEnterEnabled = bool("press_enter", true)
+        self.smartFormatting = bool("smart_formatting", false)
     }
 }
 
@@ -94,22 +117,47 @@ public enum PostProcess {
     public static func process(_ text: String?,
                                options: PostProcessOptions = PostProcessOptions(),
                                corrections: (any CorrectionApplying)? = nil) -> String {
-        guard var text, !text.isEmpty else { return "" }
+        processResult(text, options: options, corrections: corrections).text
+    }
+
+    /// Full result, including whether a trailing "press enter" command fired.
+    public static func processResult(_ text: String?,
+                                     options: PostProcessOptions = PostProcessOptions(),
+                                     corrections: (any CorrectionApplying)? = nil) -> PostProcessResult {
+        guard var text, !text.isEmpty else { return PostProcessResult(text: "") }
 
         if options.fillerRemoval { text = removeFillers(text) }
         text = applyDictionary(text, corrections)
         text = joinEmail(text)
         text = joinURL(text)
         text = voiceCommands(text)
+        if options.smartFormatting {
+            text = SmartFormat.applyLineBreakAliases(text)
+        }
         text = selfCorrect(text)
+        // Emoji before spoken punctuation so "star emoji" stays a glyph
+        // and is not rewritten as "* emoji" by the asterisk rule.
         if options.emojiCommands { text = applyEmoji(text) }
+        if options.smartFormatting {
+            text = SmartFormat.applySpokenPunctuation(text)
+            text = SmartFormat.applyLists(text)
+        }
         text = cleanupWhitespace(text)
-        if options.ensureSentencePeriod, let last = text.unicodeScalars.last,
+        var pressEnter = false
+        if options.pressEnterEnabled, options.smartFormatting {
+            (text, pressEnter) = SmartFormat.consumePressEnter(text)
+        }
+        if options.ensureSentencePeriod, !text.isEmpty, let last = text.unicodeScalars.last,
            !Self.sentenceEnders.contains(last) {
             text += "."
         }
-        text = applyLeadingSpace(text, options.leadingSpace)
-        return text
+        if !options.precedingText.isEmpty {
+            text = SmartFormat.applyContextFit(text, preceding: options.precedingText)
+        } else {
+            text = applyLeadingSpace(text, options.leadingSpace)
+        }
+        text = SmartFormat.applyMessagingPeriod(text, bundleID: options.frontmostBundleID)
+        return PostProcessResult(text: text, pressEnter: pressEnter)
     }
 
     private static let sentenceEnders = Set(".!?:\n".unicodeScalars)

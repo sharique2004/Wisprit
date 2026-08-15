@@ -50,6 +50,31 @@
 //      maintain. No shared re-beginning, no clause repair; the single-word
 //      span above still applies under its own rules.
 //
+//   c. SANDWICH CONNECTIVES. "wait" and "instead" are too common as prose
+//      to sit in the general joint ("please wait Monday"). They fire only
+//      as a closed-class pair, including the compatible crosses (clock↔
+//      number, weekday↔relative day): "Thursday wait Friday", "three
+//      instead five".
+//
+//   d. PAST-DAY RESTATEMENT. "yesterday" cannot be listed with a future
+//      day the way "today, tomorrow" can, so a pause between them is a
+//      correction when the survivor ends the utterance or a prepositional
+//      tail: "meet yesterday, tomorrow" → "meet tomorrow". A following
+//      "and" or a new subject keeps the list / clause verbatim.
+//
+//   e. PARALLEL ANCHOR. A cue whose replacement is a fragment PLUS a
+//      continuation — "I want to go tomorrow. I mean, day after to the
+//      hackathon." — reaches none of the tiers above: "day after" is not a
+//      closed class, so no pair forms, and the (b) span refuses a
+//      cross-terminator replacement that is not a bare fragment because
+//      deleting back into the previous sentence fuses two clauses into
+//      garbage. This tier supplies the missing evidence from STRUCTURE
+//      instead: a correction RESTATES something, so the replacement and the
+//      thing it replaces are the same KIND of phrase. Find that parallel
+//      phrase at the end of the clause the cue interrupts and the joint
+//      resolves; fail to find it and the text ships verbatim. See
+//      `resolveParallelAnchors`.
+//
 // The two tiers are one regex and one sweep, not two passes, because tier (a)
 // has to be able to *veto* tier (b): when both sides of a marker are
 // closed-class items of DIFFERENT classes the correction does not type-check
@@ -73,6 +98,7 @@
 // unchanged; every parity golden that exercises the interjection still holds.
 
 import Foundation
+import WispritKit
 
 // MARK: - Engine
 
@@ -120,9 +146,48 @@ public enum SelfCorrection {
         // sides) is stronger than anything the joint sweep can establish, so
         // it gets first claim on the span. See `possessivePairRx`.
         var text = possessivePairRx.replacingAll(in: text, with: "$2")
+        // Parallel prepositional restatement: "to marketing sorry to finance"
+        // → "to finance". Same evidence shape as the possessive date pair —
+        // the preposition repeats — so the weak connectives are safe here.
+        text = parallelPrepRx.replacingAll(in: text, with: "$1$4")
+        // Same-frame restatement across a pause: "as a gift, as a present"
+        // → "as a present". The pause is required so "as a child as a parent"
+        // (two roles, no correction) stays verbatim.
+        text = sameFrameRx.replacingAll(in: text, with: "$1$3")
+        // Past-day restatement: "yesterday" cannot be listed with a future
+        // day the way "today, tomorrow" can, so a pause between them is a
+        // correction ("meet yesterday, tomorrow" → "meet tomorrow"). A
+        // following "and"/"or"/subject keeps the list or the new clause.
+        text = applyPastDayRestatement(text)
+        // Verb-form restatement across a pause: "it was given, giving me"
+        // → "it was giving me". The be-auxiliary and the -ed/-en vs -ing
+        // pair are the evidence; "the driver, driving" and "we shipped,
+        // shipping tomorrow" stay verbatim.
+        text = applyInflectionRestatement(text)
+        text = applySandwichConnectives(text)
+        // Repeat before pair: "the pet itself not pet pill" is a
+        // restatement of an earlier word, not the adjacent pair
+        // "itself not pet".
+        text = applyNotRestatement(text)
         text = correctJoints(text)
-        // "scratch that" — keep only what follows the last DIRECTIVE occurrence.
+        // Parallel anchor, last of the correction tiers: it runs only on what
+        // the joint sweep DECLINED, so it is an extra attempt at an unresolved
+        // cue and never a second opinion on a resolved one. That ordering is
+        // what keeps every answer the tiers above give byte-identical.
+        text = resolveParallelAnchors(text)
+        // "scratch that" / "forget that" / "never mind" — keep only what
+        // follows the last DIRECTIVE occurrence.
         text = applyScratch(text)
+        text = applyRetract(text, probe: forgetProbeRx, rx: forgetRx, allowOpening: false)
+        text = applyRetract(text, probe: neverMindProbeRx, rx: neverMindRx, allowOpening: false)
+        // Same-utterance term echo: "HackerRank … had the rank" → the
+        // earlier spelling. ASR splits a distinctive term into common
+        // words; the first sighting is the evidence, no marker required.
+        text = applyTermEcho(text)
+        // Software-compound twin: "function for holdback" → "function
+        // for rollback". The recognizer hears the rhyme; coding context
+        // is the evidence, so a financial "holdback" stays.
+        text = applySoftwareTwins(text)
         // Repeat until stable so "to to to" fully collapses.
         while true {
             let collapsed = dupRx.replacingAll(in: text, with: "$1")
@@ -153,27 +218,554 @@ public enum SelfCorrection {
     /// infinitive "to" or a nominative subject to license it, and none of those
     /// can end a retracted clause. See `scratchLiteralLeaders`.
     static func applyScratch(_ text: String) -> String {
-        guard scratchProbeRx.matches(text) else { return text }
+        applyRetract(text, probe: scratchProbeRx, rx: scratchRx, allowOpening: true)
+    }
+
+    /// "meet yesterday, tomorrow" / "meet yesterday umm today" → keep the
+    /// later day. The pause is required; "yesterday tomorrow" as two days
+    /// in a row stays. A list or a new clause after the survivor
+    /// ("yesterday, tomorrow and Friday", "yesterday, tomorrow I'll go")
+    /// is ordinary speech and stays verbatim.
+    static func applyPastDayRestatement(_ text: String) -> String {
+        // Cheap reject: both patterns require "yesterday".
+        guard text.range(of: "yesterday", options: [.caseInsensitive, .literal]) != nil
+        else { return text }
+        func keepSurvivor(_ m: NSTextCheckingResult, _ ns: NSString) -> String? {
+            let y = m.range(at: 1)
+            guard y.location != NSNotFound else { return nil }
+            let survivor = ns.substring(with: y)
+            let end = m.range.location + m.range.length
+            if end < ns.length {
+                let rest = ns.substring(from: end)
+                if let next = firstSpokenWord(rest),
+                   !pastDayPhraseContinuations.contains(next) {
+                    return nil
+                }
+            }
+            return survivor
+        }
+        var text = pastDayForwardRx.replacing(in: text, keepSurvivor)
+        text = pastDayBackRx.replacing(in: text, keepSurvivor)
+        return text
+    }
+
+    /// "Thursday wait Friday" / "three instead five" — connectives that are
+    /// too common as prose to sit in the general joint pattern (a bare
+    /// "wait" would make every partial pay for it). Same-class sides only,
+    /// including the compatible pairs (clock↔number, weekday↔relative day).
+    static func applySandwichConnectives(_ text: String) -> String {
+        guard text.range(of: "wait", options: [.caseInsensitive, .literal]) != nil
+                || text.range(of: "instead", options: [.caseInsensitive, .literal]) != nil
+        else { return text }
+        return sandwichOnlyRx.replacing(in: text) { m, ns in
+            guard let xClass = classIndex(m, sandwichXClassFirst),
+                  let yClass = classIndex(m, sandwichYClassFirst),
+                  classesCompatible(xClass, yClass) else { return nil }
+            let y = m.range(at: sandwichYWhole)
+            guard y.location != NSNotFound else { return nil }
+            return ns.substring(with: y)
+        }
+    }
+
+    /// A follow-up that is only the correction — "not a pet pill",
+    /// "not pet, pill", "not pet but pill". The rejected word has to
+    /// already stand in an earlier utterance; the session applies that
+    /// as a retro-edit so the cue is not inserted as prose.
+    public struct NotRestatement: Equatable, Sendable {
+        public var rejected: String
+        public var replacement: String
+    }
+
+    /// Parse a standalone "not X Y" cue. nil when the utterance is a
+    /// real sentence ("I did not go") or a lone negation ("not a problem").
+    public static func standaloneNotCorrection(_ text: String) -> NotRestatement? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return nil }
+        let ns = trimmed as NSString
+        guard let m = standaloneNotRx.allMatches(trimmed, ns).first,
+              m.range.location == 0, m.range.length == ns.length
+        else { return nil }
+        let xRange = m.range(at: 1)
+        let yRange = m.range(at: 2)
+        guard xRange.location != NSNotFound, yRange.location != NSNotFound else { return nil }
+        let x = comparisonForm(ns.substring(with: xRange))
+        let yRaw = ns.substring(with: yRange)
+        let y = comparisonForm(yRaw)
+        guard isCorrectionContent(x), isCorrectionContent(y), x != y else { return nil }
+        return NotRestatement(rejected: x, replacement: yRaw)
+    }
+
+    /// True when `word` occurs as a whole token in `text`.
+    public static func containsWord(_ word: String, in text: String) -> Bool {
+        let needle = comparisonForm(word)
+        guard !needle.isEmpty else { return false }
+        return lastOccurrence(of: needle, in: text) != nil
+    }
+
+    /// "the pet itself not a pet pill" → keep the replacement. The speaker
+    /// named the wrong word, then negated it and supplied the right one.
+    /// Function-word "not" ("I did not go") stays: both sides have to be
+    /// content words, length ≥ 3.
+    ///
+    /// WITHDRAWN, measured: the bare-pair form "X not Y" → "Y". It read
+    /// "pet not pill" as a correction, which it can be — but the identical
+    /// shape is ordinary English contrastive negation, where the speaker
+    /// ASSERTS X and denies Y. The rule returns the denied word, so it does
+    /// not merely delete, it inverts the sentence's meaning. Measured through
+    /// the shipping pipeline on prose that carries no correction at all:
+    ///
+    ///   "It was luck, not skill."            -> "It was skill."
+    ///   "We need speed, not perfection."     -> "We need perfection."
+    ///   "The problem is culture, not tooling."-> "The problem is tooling."
+    ///   "He wanted coffee not tea."          -> "He wanted tea."
+    ///
+    /// …and on the ls-test-clean rung, two clips of ordinary narration:
+    /// "but he dared not interfere" -> "but he interfere" (the semi-modal
+    /// reading of "not"), and "the farm Olaf not yet I answered" -> "the farm
+    /// yet I answered" (the fixed adverbial "not yet").
+    ///
+    /// The two readings are not separable from the text. "send it to marketing
+    /// not finance" (correction) and "He wanted coffee not tea" (assertion)
+    /// have the same shape, the same punctuation and the same parts of speech;
+    /// only intonation and intent tell them apart, and neither survives
+    /// transcription. Guarding the leader (a semi-modal) and the follower (a
+    /// "not"-idiom adverb) removes the two measured clips but leaves the
+    /// inversion class untouched, so the guards would buy a corpus number
+    /// rather than correctness.
+    ///
+    /// So the pair form is gone and its cases pass through verbatim. The
+    /// REPEAT form below survives because its evidence is real: "not" precedes
+    /// the REJECTED word there ("not a pet pill"), which is the standard
+    /// English contrastive order, AND the rejected word must already stand in
+    /// the clause for the rewrite to have a target.
+    static func applyNotRestatement(_ text: String) -> String {
+        guard text.range(of: " not ", options: [.caseInsensitive, .literal]) != nil
+        else { return text }
+        return applyNotRepeatRestatement(text)
+    }
+
+    /// "the pet itself not a pet pill" → "the pill itself". The rejected
+    /// word has to already stand in the clause; the cue repeats it and
+    /// names the replacement. Only the last earlier occurrence is
+    /// rewritten, so a list of pets is not flattened.
+    private static func applyNotRepeatRestatement(_ text: String) -> String {
+        let ns = text as NSString
+        guard let m = notRepeatRx.firstMatch(text, ns, from: 0) else { return text }
+        let xRange = m.range(at: 1)
+        let yRange = m.range(at: 2)
+        guard xRange.location != NSNotFound, yRange.location != NSNotFound else { return text }
+        let x = comparisonForm(ns.substring(with: xRange))
+        let yRaw = ns.substring(with: yRange)
+        let y = comparisonForm(yRaw)
+        guard isCorrectionContent(x), isCorrectionContent(y), x != y else { return text }
+        // "not yet", "not only", "not once" — "not" plus one of these is a
+        // fixed adverbial, so the word after it is not a rejected NOUN and the
+        // word after that is not its replacement. The pair form died on
+        // exactly this shape ("the farm Olaf not yet I answered"); the repeat
+        // form reaches it far less often, but the veto costs one lookup and
+        // the failure it prevents is a deleted word.
+        guard !notIdiomAdverbs.contains(x) else { return text }
+        // "writing or not writing any code" is a whether-or-not, not
+        // "not a pet pill". The rejected word repeating after "or not"
+        // is the construction; rewriting it deletes the verbs.
+        if let cue = tokenBefore(ns, m.range.location), cue.text == "or",
+           wordBefore(ns, cue.start) == x {
+            return text
+        }
+        let prefix = ns.substring(to: m.range.location)
+        guard let earlier = lastOccurrence(of: x, in: prefix) else { return text }
+        var rebuilt = prefix
+        let start = rebuilt.index(rebuilt.startIndex, offsetBy: earlier.location)
+        let end = rebuilt.index(start, offsetBy: earlier.length)
+        rebuilt.replaceSubrange(start..<end, with: yRaw)
+        rebuilt += ns.substring(from: m.range.location + m.range.length)
+        while rebuilt.contains("  ") {
+            rebuilt = rebuilt.replacingOccurrences(of: "  ", with: " ")
+        }
+        return rebuilt.trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func isCorrectionContent(_ word: String) -> Bool {
+        word.count >= 3 && !correctionFunctionWords.contains(word)
+    }
+
+    /// Last whole-word occurrence of `word` (comparison-form) in `text`.
+    private static func lastOccurrence(of word: String, in text: String) -> NSRange? {
+        let ns = text as NSString
+        var i = ns.length
+        while i > 0 {
+            while i > 0, isWhitespace(ns.character(at: i - 1)) { i -= 1 }
+            guard i > 0 else { return nil }
+            let end = i
+            while i > 0, !isWhitespace(ns.character(at: i - 1)) { i -= 1 }
+            let range = NSRange(location: i, length: end - i)
+            if comparisonForm(ns.substring(with: range)) == word { return range }
+        }
+        return nil
+    }
+
+    /// First non-filler word in `s`, comparison-form, skipping leading
+    /// punctuation. nil when the tail holds no word.
+    private static func firstSpokenWord(_ s: String) -> String? {
+        let ns = s as NSString
+        var i = 0
+        let n = ns.length
+        while i < n {
+            while i < n, isWhitespace(ns.character(at: i))
+                    || isSentenceTerminator(ns.character(at: i)) { i += 1 }
+            guard i < n else { return nil }
+            let start = i
+            while i < n, !isWhitespace(ns.character(at: i)) { i += 1 }
+            let word = comparisonForm(ns.substring(with: NSRange(location: start, length: i - start)))
+            if !word.isEmpty, !fillerSet.contains(word) { return word }
+        }
+        return nil
+    }
+
+    /// "HackerRank … had the rank" / "InsForge … inns forge" → keep the
+    /// earlier spelling. The recognizer often splits a distinctive term
+    /// into common words the second time it hears it. No marker: the
+    /// first sighting is the evidence.
+    ///
+    /// Fenced so "I finished the HackerRank then I had the rank of
+    /// captain" stays verbatim — the later span has to sound like the
+    /// term, share a prefix or suffix, and not be a "rank of …" phrase.
+    static func applyTermEcho(_ text: String) -> String {
+        guard text.contains(where: { $0.isUppercase }) else { return text }
+        let tokens = echoTokens(text)
+        guard tokens.count >= 3, tokens.contains(where: isEchoAnchor) else { return text }
+        var best: (term: String, range: NSRange, score: Double)?
+        for (index, anchor) in tokens.enumerated() where isEchoAnchor(anchor) {
+            var start = index + 1
+            while start < tokens.count {
+                for length in [4, 3, 2] {
+                    let end = start + length
+                    guard end <= tokens.count else { continue }
+                    let window = Array(tokens[start..<end])
+                    if window.contains(where: { $0.lower == anchor.lower }) { continue }
+                    if echoOpenerVeto.contains(window[0].lower) { continue }
+                    if start > 0, echoOpenerVeto.contains(tokens[start - 1].lower) {
+                        continue
+                    }
+                    if window.contains(where: { echoFollowerVeto.contains($0.lower) }) {
+                        continue
+                    }
+                    if echoWindowCarriesInflection(window) { continue }
+                    guard echoAffixOverlaps(anchor.lower, window) else { continue }
+                    if end < tokens.count, echoFollowerVeto.contains(tokens[end].lower) {
+                        continue
+                    }
+                    let score = echoScore(anchor.raw, window)
+                    guard score >= echoFloor else { continue }
+                    if let current = best, score <= current.score { continue }
+                    guard let first = window.first(where: { !echoGlue.contains($0.lower) })
+                    else { continue }
+                    let last = window[window.count - 1].range
+                    let range = NSRange(location: first.range.location,
+                                        length: last.location + last.length - first.range.location)
+                    best = (anchor.raw, range, score)
+                }
+                start += 1
+            }
+        }
+        guard let hit = best else { return text }
+        let ns = text as NSString
+        return ns.substring(to: hit.range.location)
+            + hit.term
+            + ns.substring(from: hit.range.location + hit.range.length)
+    }
+
+    /// "it was given, giving me a 7" → "it was giving me a 7".
+    ///
+    /// ASR often emits the wrong verb form, then the right one after a
+    /// comma. Keep the later form when a be-auxiliary licenses the first
+    /// word as a participle and the two share a stem. A pause is required
+    /// so "was given giving" (no hesitation) stays, and a determiner or a
+    /// following "and"/"or" keeps the participial and the list.
+    static func applyInflectionRestatement(_ text: String) -> String {
+        // Cheap reject: the pair is always a be-auxiliary plus an -ing form.
+        // The live path re-runs this on every partial, so a 200-word
+        // utterance with neither must not tokenize.
+        guard text.range(of: "ing", options: [.caseInsensitive, .literal]) != nil,
+              inflectionAuxiliaryRx.matches(text) else { return text }
+        var text = text
+        while true {
+            let next = applyInflectionRestatementOnce(text)
+            if next == text { return text }
+            text = next
+        }
+    }
+
+    private static func applyInflectionRestatementOnce(_ text: String) -> String {
+        let tokens = echoTokens(text)
+        guard tokens.count >= 3 else { return text }
+        let ns = text as NSString
+        for (index, first) in tokens.enumerated() {
+            guard isCorrectionContent(first.lower),
+                  !closedClassWordRx.matches(first.lower) else { continue }
+            guard let secondIndex = nextContentToken(in: tokens, after: index)
+            else { continue }
+            let second = tokens[secondIndex]
+            guard isCorrectionContent(second.lower),
+                  !closedClassWordRx.matches(second.lower),
+                  isInflectionPair(first.lower, second.lower) else { continue }
+            guard isInflectionPause(tokens, from: index, to: secondIndex, ns: ns)
+            else { continue }
+            if let leader = contentToken(in: tokens, before: index) {
+                if inflectionDeterminers.contains(leader.lower) { continue }
+                guard inflectionAuxiliaries.contains(leader.lower) else { continue }
+            } else {
+                continue
+            }
+            if let follower = nextContentToken(in: tokens, after: secondIndex),
+               inflectionListFollowers.contains(tokens[follower].lower) {
+                continue
+            }
+            let start = first.range.location
+            let end = second.range.location + second.range.length
+            return ns.substring(to: start)
+                + second.raw
+                + ns.substring(from: end)
+        }
+        return text
+    }
+
+    /// "the last function for holdback" → "the last function for rollback".
+    ///
+    /// Whole-word only, and only when the utterance is already about a
+    /// function/method or a HackerRank-style test. "There's a holdback on
+    /// the payment" is ordinary English and stays.
+    static func applySoftwareTwins(_ text: String) -> String {
+        guard text.range(of: "holdback", options: [.caseInsensitive, .literal]) != nil
+        else { return text }
+        let tokens = echoTokens(text)
+        guard !tokens.isEmpty else { return text }
+        let lowers = tokens.map(\.lower)
+        let codingContext = lowers.contains("hackerrank")
+            && (lowers.contains("function") || lowers.contains("functions")
+                || (lowers.contains("test") && lowers.contains("cases")))
+        var edits: [(range: NSRange, replacement: String)] = []
+        for (index, token) in tokens.enumerated() where token.lower == "holdback" {
+            let namedFor = index >= 2
+                && tokens[index - 1].lower == "for"
+                && softwareTwinLeaders.contains(tokens[index - 2].lower)
+            guard namedFor || codingContext else { continue }
+            edits.append((token.range, matchTwinCase(token.raw, "rollback")))
+        }
+        guard !edits.isEmpty else { return text }
+        let ns = text as NSString
+        var out = ""
+        var cursor = 0
+        for edit in edits {
+            if edit.range.location > cursor {
+                out += ns.substring(with: NSRange(location: cursor,
+                                                  length: edit.range.location - cursor))
+            }
+            out += edit.replacement
+            cursor = edit.range.location + edit.range.length
+        }
+        if cursor < ns.length { out += ns.substring(from: cursor) }
+        return out
+    }
+
+    private static func nextContentToken(in tokens: [EchoToken], after index: Int) -> Int? {
+        var i = index + 1
+        while i < tokens.count {
+            if !fillerSet.contains(tokens[i].lower) { return i }
+            i += 1
+        }
+        return nil
+    }
+
+    private static func contentToken(in tokens: [EchoToken], before index: Int) -> EchoToken? {
+        var i = index - 1
+        while i >= 0 {
+            if !fillerSet.contains(tokens[i].lower) { return tokens[i] }
+            i -= 1
+        }
+        return nil
+    }
+
+    private static func isInflectionPause(_ tokens: [EchoToken], from: Int, to: Int,
+                                          ns: NSString) -> Bool {
+        guard to > from else { return false }
+        for i in (from + 1)..<to where !fillerSet.contains(tokens[i].lower) {
+            return false
+        }
+        let start = tokens[from].range.location + tokens[from].range.length
+        let end = tokens[to].range.location
+        guard end >= start else { return false }
+        let gap = ns.substring(with: NSRange(location: start, length: end - start))
+        if gap.contains(where: { ".!?\u{2026}".contains($0) }) { return false }
+        return gap.contains(",") || to > from + 1
+    }
+
+    private static func isInflectionPair(_ a: String, _ b: String) -> Bool {
+        guard a != b else { return false }
+        guard (isPastVerbForm(a) && isIngVerbForm(b))
+                || (isIngVerbForm(a) && isPastVerbForm(b)) else { return false }
+        let left = inflectionStem(a)
+        let right = inflectionStem(b)
+        return left.count >= 3 && left == right
+    }
+
+    private static func isIngVerbForm(_ word: String) -> Bool {
+        word.hasSuffix("ing") && word.count >= 6
+    }
+
+    private static func isPastVerbForm(_ word: String) -> Bool {
+        (word.hasSuffix("ed") && word.count >= 6)
+            || (word.hasSuffix("en") && word.count >= 5)
+    }
+
+    private static func inflectionStem(_ word: String) -> String {
+        var stem = word
+        for suffix in ["ing", "ied", "ies", "ed", "en", "es", "s"]
+        where stem.count > suffix.count + 2 && stem.hasSuffix(suffix) {
+            stem = String(stem.dropLast(suffix.count))
+            if stem.count >= 3, let last = stem.last, stem.dropLast().last == last {
+                stem.removeLast()
+            }
+            return stem
+        }
+        return stem
+    }
+
+    private static func matchTwinCase(_ sample: String, _ replacement: String) -> String {
+        if sample.count > 1, sample == sample.uppercased() {
+            return replacement.uppercased()
+        }
+        if sample.first?.isUppercase == true {
+            return replacement.prefix(1).uppercased() + replacement.dropFirst()
+        }
+        return replacement
+    }
+
+    private static func echoTokens(_ text: String) -> [EchoToken] {
+        let ns = text as NSString
+        var tokens: [EchoToken] = []
+        var i = 0
+        let n = ns.length
+        while i < n {
+            while i < n, !isLetter(ns.character(at: i)) { i += 1 }
+            guard i < n else { break }
+            let start = i
+            while i < n, isLetter(ns.character(at: i)) || ns.character(at: i) == 0x27
+                    || ns.character(at: i) == 0x2019 { i += 1 }
+            let range = NSRange(location: start, length: i - start)
+            let raw = ns.substring(with: range).replacingOccurrences(of: "\u{2019}", with: "'")
+            let lower = comparisonForm(raw)
+            if !lower.isEmpty { tokens.append(EchoToken(range: range, raw: raw, lower: lower)) }
+        }
+        return tokens
+    }
+
+    private static func isLetter(_ c: unichar) -> Bool {
+        guard let scalar = UnicodeScalar(c) else { return false }
+        return CharacterSet.letters.contains(scalar)
+    }
+
+    /// Whether a word is a term the echo tier may snap a later span back to.
+    ///
+    /// An INTERNAL capital, always — never length alone. The tier's whole
+    /// premise is that the recognizer spelled a distinctive term correctly
+    /// once and then split it into common words; "distinctive" has to be a
+    /// property of the SPELLING, because that is the only thing separating a
+    /// term from prose. Internal capitalization is that property, and it is
+    /// one an ordinary English word cannot have.
+    ///
+    /// The `letters.count >= 8` shortcut this replaces admitted any long
+    /// common word as an anchor, and long common words are exactly what
+    /// narration is made of. Measured on the ls-test-clean rung, two clips:
+    ///
+    ///   "…whilst the rest of them detained her family…"
+    ///     -> "…whilst the rest of themselves her family…"   (anchor
+    ///        "themselves", 10 letters, from earlier in the sentence; the
+    ///        merge ate the verb "detained")
+    ///   "…a rare thing in America, a pleasantly toned voice…"
+    ///     -> "…a rare thing in American toned voice…"       (anchor
+    ///        "American", 8 letters, from "a strong American accent")
+    ///
+    /// Both intended cases keep working, because both were always camelCase:
+    /// "HackerRank" and "InsForge" satisfy the internal capital directly and
+    /// never needed the length shortcut.
+    private static func isEchoAnchor(_ token: EchoToken) -> Bool {
+        let letters = token.raw.filter(\.isLetter)
+        guard letters.count >= 6 else { return false }
+        guard !correctionFunctionWords.contains(token.lower),
+              !closedClassWordRx.matches(token.lower) else { return false }
+        return letters.dropFirst().contains(where: \.isUppercase)
+    }
+
+    /// Whether the span the echo tier would swallow contains an inflected
+    /// content word — a verb or an adverb.
+    ///
+    /// The second fence, independent of the anchor rule. A term that the
+    /// recognizer split into common words splits into STEMS ("HackerRank" ->
+    /// "had the rank", "InsForge" -> "inns forge"); it does not split into
+    /// something carrying tense or an adverbial ending, because those endings
+    /// are grammar the surrounding sentence supplied, not sound the term
+    /// contains. So a window holding one is a window holding real syntax, and
+    /// merging it deletes a word the speaker meant — "them detained" ->
+    /// "themselves" eats the clause's verb, "America, a pleasantly" eats its
+    /// adverb.
+    private static func echoWindowCarriesInflection(_ window: [EchoToken]) -> Bool {
+        window.contains { token in
+            let word = token.lower
+            guard word.count >= 5 else { return false }
+            return word.hasSuffix("ed") || word.hasSuffix("ing") || word.hasSuffix("ly")
+        }
+    }
+
+    private static func echoAffixOverlaps(_ term: String, _ window: [EchoToken]) -> Bool {
+        let content = window.map(\.lower).filter { !echoGlue.contains($0) && $0.count >= 3 }
+        guard content.count >= 2, let first = content.first, let last = content.last
+        else { return false }
+        return term.hasSuffix(last) || term.hasPrefix(first)
+    }
+
+    private static func echoScore(_ term: String, _ window: [EchoToken]) -> Double {
+        let joined = window.map(\.raw).joined(separator: " ")
+        let collapsed = window.map(\.lower).joined()
+        let content = window.map(\.lower).filter { !echoGlue.contains($0) }.joined()
+        return max(PhoneticScorer.score(term, joined),
+                   PhoneticScorer.score(term, collapsed),
+                   content.count >= 6 ? PhoneticScorer.score(term, content) : 0)
+    }
+
+    /// Shared cut for "scratch that" / "forget that" / "never mind": delete
+    /// through the last directive occurrence and keep the text after it.
+    /// `allowOpening` is true only for "scratch that" — that phrase is the
+    /// classic utterance-initial imperative. "forget that" / "never mind"
+    /// opening an utterance are ordinary English ("never mind the noise")
+    /// and must stay verbatim.
+    static func applyRetract(_ text: String, probe: Rx, rx: Rx, allowOpening: Bool) -> String {
+        guard probe.matches(text) else { return text }
         let ns = text as NSString
         var cut: Int?
-        for m in scratchRx.allMatches(text, ns)
-        where isScratchDirective(at: m.range.location, ns) {
+        for m in rx.allMatches(text, ns)
+        where isRetractDirective(at: m.range.location, ns, allowOpening: allowOpening) {
             cut = m.range.location + m.range.length
         }
         guard let cut else { return text }
         return ns.substring(from: cut)
     }
 
-    private static func isScratchDirective(at start: Int, _ ns: NSString) -> Bool {
-        // Nothing in front of it (or only fillers/punctuation) is the purest
-        // imperative there is.
-        guard let leader = wordBefore(ns, start) else { return true }
+    private static func isRetractDirective(at start: Int, _ ns: NSString,
+                                           allowOpening: Bool) -> Bool {
+        guard let leader = wordBefore(ns, start) else { return allowOpening }
         return !scratchLiteralLeaders.contains(leader)
     }
 
     /// Comparison form of the last non-filler word before `index`, nil when the
     /// text in front of it holds no word at all.
     private static func wordBefore(_ ns: NSString, _ index: Int) -> String? {
+        tokenBefore(ns, index)?.text
+    }
+
+    /// `wordBefore` with the offset kept: the parallel-preposition rules need
+    /// to compare that word AND, when it matches, delete from where it starts.
+    private static func tokenBefore(_ ns: NSString, _ index: Int) -> (start: Int, text: String)? {
         var i = min(index, ns.length)
         while i > 0 {
             while i > 0, isWhitespace(ns.character(at: i - 1)) { i -= 1 }
@@ -181,7 +773,7 @@ public enum SelfCorrection {
             let end = i
             while i > 0, !isWhitespace(ns.character(at: i - 1)) { i -= 1 }
             let word = comparisonForm(ns.substring(with: NSRange(location: i, length: end - i)))
-            if !word.isEmpty, !fillerSet.contains(word) { return word }
+            if !word.isEmpty, !fillerSet.contains(word) { return (start: i, text: word) }
         }
         return nil
     }
@@ -209,7 +801,7 @@ public enum SelfCorrection {
             let xClass = classIndex(match, xClassFirst)
             let yClass = y.location == NSNotFound ? nil : classIndex(match, yClassFirst)
             let next: Int
-            if let xClass, let yClass, xClass == yClass {
+            if let xClass, let yClass, classesCompatible(xClass, yClass) {
                 // Tier (a). Keep Y, drop X and the joint; resume AT Y so
                 // "Tuesday no Wednesday no Thursday" resolves in this sweep.
                 out += ns.substring(with: NSRange(location: cursor,
@@ -228,13 +820,13 @@ public enum SelfCorrection {
                     out += ns.substring(with: NSRange(location: cursor,
                                                       length: aStart - cursor))
                     next = bStart
-                case .span:
+                case .span(let drop):
                     // Tier (b). The Python span: the single word before the
-                    // marker, the marker, and the joint whitespace. Y — which
-                    // this pattern consumed and the Python one never did — is
-                    // re-emitted verbatim, so the result is identical either
-                    // way.
-                    let drop = lastTokenStart(x, ns)
+                    // marker, the marker, and the joint whitespace — widened to
+                    // the function word in front of X when the replacement
+                    // repeats it (`spanDrop`). Y — which this pattern consumed
+                    // and the Python one never did — is re-emitted verbatim, so
+                    // the result is identical either way.
                     out += ns.substring(with: NSRange(location: cursor,
                                                       length: drop - cursor))
                     if y.location != NSNotFound { out += ns.substring(with: y) }
@@ -295,7 +887,37 @@ public enum SelfCorrection {
             guard let head = b.first, !hedgeLeaders.contains(head.text) else { return nil }
             guard isReplacementFragment(b) else { return nil }
         }
-        return .span
+        return .span(drop: spanDrop(x, ns, bStart: bStart, crossed: crossed))
+    }
+
+    /// Where the tier (b) span starts deleting: the single word before the
+    /// marker (the Python span), or — the parallel-preposition shape — that
+    /// word AND the function word in front of it.
+    ///
+    /// The extension is what makes the escape above USABLE. The span deletes
+    /// only X, so "meet at three no wait at four" would resolve to "meet at at
+    /// four": the replacement brings its own preposition and X's is left
+    /// stranded. `dupRx` used to clean that up, but its "in in"/"on on" entries
+    /// were removed for deleting from correction-free speech ("Please hand it
+    /// in in March.") and must not come back — a collapse rule cannot tell the
+    /// grammatical double from the artifact, because by the time it runs the
+    /// marker that made one an artifact is gone.
+    ///
+    /// So the deletion is made correct at the point where the marker is still
+    /// visible. Marker-scoped, single-sentence, and gated on the SAME equality
+    /// as the escape: the first word after the marker is a function word and it
+    /// repeats the word before X, which is what "restating the phrase" looks
+    /// like. "send it to Bob no wait to Alice" takes this route and lands on
+    /// the byte-identical "send it to Alice" it used to reach through `dupRx`.
+    private static func spanDrop(_ x: NSRange, _ ns: NSString, bStart: Int, crossed: Int) -> Int {
+        let drop = lastTokenStart(x, ns)
+        guard crossed == 0,
+              let after = restartTokens(ns, from: bStart, to: ns.length,
+                                        stopAtSentenceEnd: true, limit: 1).first,
+              parallelFunctionWords.contains(after.text),
+              let before = tokenBefore(ns, x.location), before.text == after.text
+        else { return drop }
+        return before.start
     }
 
     /// Whether the tokens after a cross-terminator marker are a replacement
@@ -325,7 +947,8 @@ public enum SelfCorrection {
 
     private enum Repair {
         case restart(aStart: Int, bStart: Int)
-        case span
+        /// `drop` is where the deletion starts — see `spanDrop`.
+        case span(drop: Int)
     }
 
     /// Whether a general marker may correct at this joint at all. `crossed` is
@@ -342,8 +965,8 @@ public enum SelfCorrection {
         // terminator — Python's comma-only gap could never match one, so
         // refusing there is what parity actually means.
         switch marker {
-        case .iMean: guard crossed == 0 else { return false }
-        case .noWait, .noActually: guard crossed <= 1 else { return false }
+        case .iMean, .iMeant: guard crossed == 0 else { return false }
+        case .noWait, .noActually, .waitNo: guard crossed <= 1 else { return false }
         }
         // "no wait" is the Python marker and its span is a parity contract —
         // but the parity domain is what Python could match, and that never
@@ -364,11 +987,28 @@ public enum SelfCorrection {
         //     follows it is the replacement, never the phrase's own tail.
         // "…to Bob no wait to Alice" and "…three no wait four pm" are untouched
         // by both: "Bob"/"three" are content, and "to"/"four" are not tails.
+        //
+        // Signal two carries an EQUALITY ESCAPE, because the bare prepositions
+        // in its list are ambiguous in a way the noun tails are not: "at" ends
+        // the literal phrase in "no wait AT the DMV" and OPENS the replacement
+        // in "meet at three no wait AT four". What separates them is the word
+        // in front of X. A correction restates a phrase, so the preposition
+        // after the marker repeats the one before X ("meet AT three … AT
+        // four"); the literal noun phrase cannot take that shape, because its
+        // "at" belongs to "wait" and has nothing to parallel ("They promised no
+        // wait at signup" — before-X is "they"). Measured cost of not having
+        // this: "meet at three no wait at four", "meet him on Monday no wait on
+        // Tuesday" and "the deadline is in April no wait in May" all resolved
+        // before the literal-use guards shipped and passed through verbatim
+        // after. The escape restores exactly those and nothing else — the
+        // preposition entries stay in the list, so every literal keep the
+        // guards were added for is still vetoed.
         if marker == .noWait, crossed == 0 {
             if xClass == nil, noWaitLiteralLeaders.contains(leaderWord(x, ns)) { return false }
             if let after = restartTokens(ns, from: bStart, to: ns.length,
                                          stopAtSentenceEnd: true, limit: 1).first,
-               noWaitObjectWords.contains(after.text) { return false }
+               noWaitObjectWords.contains(after.text),
+               after.text != wordBefore(ns, x.location) { return false }
             return true
         }
         // Cross-class veto — tier (a) looked at this joint and refused it.
@@ -509,11 +1149,26 @@ public enum SelfCorrection {
     private static func generalMarker(_ m: NSTextCheckingResult) -> GeneralMarker? {
         if m.range(at: markerNoWait).location != NSNotFound { return .noWait }
         if m.range(at: markerNoActually).location != NSNotFound { return .noActually }
+        if m.range(at: markerWaitNo).location != NSNotFound { return .waitNo }
+        if m.range(at: markerIMeant).location != NSNotFound { return .iMeant }
         if m.range(at: markerIMean).location != NSNotFound { return .iMean }
         return nil
     }
 
-    enum GeneralMarker { case noWait, noActually, iMean }
+    /// Whether two closed-class sides are the same *kind of thing* — exact
+    /// class match, plus the two pairs Wispr Flow treats as interchangeable:
+    /// a bare number correcting a clock time ("5 actually 6 pm") and a
+    /// weekday correcting a relative day ("Friday actually tomorrow").
+    static func classesCompatible(_ a: Int, _ b: Int) -> Bool {
+        if a == b { return true }
+        switch (a, b) {
+        case (0, 1), (1, 0): return true   // clock ↔ number
+        case (2, 4), (4, 2): return true   // weekday ↔ relative day
+        default: return false
+        }
+    }
+
+    enum GeneralMarker { case noWait, noActually, waitNo, iMean, iMeant }
 }
 
 // MARK: - Closed classes
@@ -544,6 +1199,24 @@ private let ordinalWordPattern = "(?:twenty[\\s-]?(?:" + ordinalUnitWords + ")|"
 private let numberPattern = "(?:\\d{1,4}(?:st|nd|rd|th)|" + ordinalWordPattern + "|"
     + cardinalWordPattern + "|\\d{1,4})"
 
+// Spoken hour-minute times — "nine thirty", "ten fifteen". Added because the
+// class list not having them was a WORD DELETION, measured through the shipping
+// pipeline: "Let's do nine thirty. I mean ten fifteen, in the small room." came
+// back "Let's do nine ten fifteen, in the small room." — tier (a) read the
+// TAILS "thirty" and "ten" as two bare numbers, corrected one into the other,
+// and left the hour of the time it deleted standing in the sentence.
+//
+// The hour is 1–12, and that restriction is the whole safety argument: English
+// speaks a compound number tens-first ("twenty five", "thirty one"), so no
+// compound number can open with a value the clock accepts as an hour, and
+// "twenty five" stays the number it is. The minute list is likewise closed —
+// the forms a speaker actually says — so "three items", "nine people" and
+// "ten years" are not times.
+private let minuteWords = "o[h]?[\\s-](?:" + unitWords + ")|fifteen|thirty|"
+    + "forty[\\s-]?five|forty|fifty[\\s-]?five|fifty|twenty[\\s-]?five|twenty|ten"
+private let spokenClockPattern = "(?:1[0-2]|[1-9]|one|two|three|four|five|six|seven|eight|"
+    + "nine|ten|eleven|twelve)[\\s-](?:" + minuteWords + ")"
+
 // Clock times, tried BEFORE bare numbers so "3 o'clock" is one time rather than
 // the number 3 followed by a word.
 private let clockPattern = "(?:" + [
@@ -551,6 +1224,7 @@ private let clockPattern = "(?:" + [
     "\\d{1,2}:\\d{2}(?:\\s*[ap]\\.?m\\.?)?",
     "(?:\\d{1,2}|" + cardinalWordPattern + ")\\s+o['\u{2019}]?\\s?clock",
     "\\d{1,2}\\s*[ap]\\.?m\\.?",
+    spokenClockPattern,
 ].joined(separator: "|") + ")"
 
 /// Longest-first, ties broken alphabetically — the `emojiNamePattern` idiom:
@@ -639,6 +1313,8 @@ private let innerGap = "[,]?\\s+(?:" + filler + "\\s+)*"
 private let markerPhrases: [(pattern: String, captured: Bool)] = [
     ("no" + innerGap + "wait", true),
     ("no" + innerGap + "actually", true),
+    ("wait" + innerGap + "no", true),
+    ("i" + innerGap + "meant", true),
     ("i" + innerGap + "mean", true),
     ("or" + innerGap + "rather", false),
     ("make" + innerGap + "that", false),
@@ -657,7 +1333,10 @@ private let markerAlternation = markerPhrases
 /// next partial arrives.
 private let midCorrectionTail: NSRegularExpression = {
     let bare = markerPhrases.map(\.pattern).joined(separator: "|")
-    let pattern = "\\b(?:" + bare + ")(?:[,.]?\\s+" + filler + ")*[,.…]?\\s*$"
+    let retract = "scratch\\s+that|forget\\s+that|never\\s*mind"
+    let sandwich = "wait|instead"
+    let pattern = "\\b(?:" + bare + "|" + retract + "|" + sandwich
+        + ")(?:[,.]?\\s+" + filler + ")*[,.…]?\\s*$"
     return try! NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
 }()
 
@@ -668,9 +1347,11 @@ private let xClassFirst = 2          // 2…6  — clock, number, weekday, month
 private let xWord = 7
 private let markerNoWait = 8
 private let markerNoActually = 9
-private let markerIMean = 10
-private let yWhole = 11
-private let yClassFirst = 12         // 12…16
+private let markerWaitNo = 10
+private let markerIMeant = 11
+private let markerIMean = 12
+private let yWhole = 13
+private let yClassFirst = 14         // 14…18
 
 // A joint is `<X> <gap> <connective> <gap> <Y?>`, where each side is either a
 // closed-class item or (X only) a single spoken word. The class branch is tried
@@ -681,9 +1362,9 @@ private let yClassFirst = 12         // 12…16
 private let jointPattern = "(?<![\\w'-])"
     + "(?:(" + classAlternation + ")|(?!" + filler + "\\b)([\\w']+))"
     + gap
-    + "(?:" + markerAlternation + ")"
-    + gap
-    + "(?:(" + classAlternation + ")(?![\\w'-]))?"
+        + "(?:" + markerAlternation + ")"
+        + gap
+        + "(?:(?:(?:to|for|from|with|on|at|in)\\s+)?(" + classAlternation + ")(?![\\w'-]))?"
 private let jointRx = Rx(jointPattern)
 
 // MARK: - Possessive date pair
@@ -722,6 +1403,77 @@ private let possessivePairRx = Rx(
 private let scratchRx = Rx(#"\bscratch\s+that\b[,.]?\s*"#,
                            [.caseInsensitive, .dotMatchesLineSeparators])
 private let scratchProbeRx = Rx(#"\bscratch\s+that\b"#)
+private let forgetRx = Rx(#"\bforget\s+that\b[,.]?\s*"#,
+                          [.caseInsensitive, .dotMatchesLineSeparators])
+private let forgetProbeRx = Rx(#"\bforget\s+that\b"#)
+private let neverMindRx = Rx(#"\bnever\s*mind\b[,.]?\s*"#,
+                             [.caseInsensitive, .dotMatchesLineSeparators])
+private let neverMindProbeRx = Rx(#"\bnever\s*mind\b"#)
+
+// "send it to marketing sorry to finance" → "send it to finance".
+// The repeated preposition is the evidence that makes "sorry" / "actually"
+// safe on arbitrary nouns — the same argument as the possessive date pair.
+private let parallelPrepRx = Rx(
+    "(?<![\\w'-])((?:to|for|from|with)\\s+)((?:(?:the|a|an|my|your|our)\\s+)?[\\w']+)"
+        + gap
+        + "(?:" + markerPhrases.map(\.pattern).joined(separator: "|") + ")"
+        + gap
+        + "(\\1)((?:(?:the|a|an|my|your|our)\\s+)?[\\w']+)(?![\\w'-])")
+
+// "as a gift, as a present" / "as a gift umm as a present" → "as a present".
+// A pause (punctuation or filler) is required so two roles listed without
+// hesitation ("as a child as a parent") stay verbatim.
+private let sameFrameRx = Rx(
+    "(?<![\\w'-])((?:as|for)\\s+(?:a|an|the)\\s+)(\\w+)"
+        + "(?:[,.!?…]\\s+|\\s+" + filler + "[,.!?…]?\\s+)"
+        + "\\1(\\w+)(?![\\w'-])")
+
+/// Closed-class sandwich for connectives that are too common as prose
+/// to live in `jointRx`. Group 1 is unused (the X wrapper); classes
+/// start at 2; Y's wrapper is 7; Y's classes start at 8.
+private let sandwichXClassFirst = 2
+private let sandwichYWhole = 7
+private let sandwichYClassFirst = 8
+private let sandwichOnlyRx = Rx(
+    "(?<![\\w'-])(" + classAlternation + ")"
+        + gap
+        + "(?:wait|instead)"
+        + gap
+        + "(" + classAlternation + ")(?![\\w'-])")
+
+/// Pause between a past day and a later one. Same filler-tolerant gap as
+/// `sameFrameRx` — a comma, a terminator, or a spoken hesitation.
+private let pastDayPause = "(?:[,.!?…]\\s+|\\s+" + filler + "[,.!?…]?\\s+)"
+private let pastDayForwardRx = Rx(
+    "(?<![\\w'-])yesterday" + pastDayPause + "(today|tonight|tomorrow)(?![\\w'-])")
+private let pastDayBackRx = Rx(
+    "(?<![\\w'-])(?:today|tonight|tomorrow)" + pastDayPause + "(yesterday)(?![\\w'-])")
+
+/// Adverbs that make "not X" a fixed adverbial rather than a rejected noun.
+/// English pairs "not" with these so often that the sequence carries no
+/// contrast at all — "not yet", "not only", "not once".
+private let notIdiomAdverbs: Set<String> = [
+    "yet", "only", "even", "just", "quite", "once", "again", "always",
+    "necessarily", "merely", "simply", "entirely", "exactly", "really",
+    "nearly", "altogether", "wholly", "totally", "particularly", "especially",
+    "longer", "anymore", "unless", "until", "till",
+]
+
+/// "not a pet pill" / "not pet, pill" / "not pet but pill".
+private let notRepeatRx = Rx(
+    "\\bnot\\s+(?:(?:a|an|the)\\s+)?([\\w']+)[,.]?\\s+(?:but\\s+)?([\\w']+)\\b")
+/// A follow-up that is the cue and nothing else.
+private let standaloneNotRx = Rx(
+    "(?:(?:um+|uh+|erm+|uhh+|umm+)\\s+)*not\\s+(?:(?:a|an|the)\\s+)?"
+        + "([\\w']+)[,.]?\\s+(?:but\\s+)?([\\w']+)\\s*[.!?…]*")
+
+/// After the surviving day, only a phrase tail (a preposition) is still
+/// the same correction. Anything else — "and", a subject, a verb — is a
+/// list or a new clause and stays verbatim.
+private let pastDayPhraseContinuations: Set<String> = [
+    "at", "on", "in", "for", "with", "to", "after", "before",
+    "around", "about", "until", "by", "from",
+]
 
 /// Words that make "scratch" the transitive verb and "that" its determiner:
 /// negations, modals, the infinitive "to" and nominative subjects. Each one
@@ -734,6 +1486,8 @@ private let scratchLiteralLeaders: Set<String> = [
     "shouldn't", "shouldnt", "couldn't", "couldnt",
     "to", "must", "should", "would", "could", "might", "may", "can", "will", "shall",
     "i", "you", "we", "they", "he", "she",
+    "i'll", "you'll", "he'll", "she'll", "we'll", "they'll",
+    "i'm", "you're", "we're", "they're",
 ]
 
 // Collapse an immediate duplicate of a function word, which self-correction can
@@ -760,6 +1514,24 @@ private let scratchLiteralLeaders: Set<String> = [
 // long" and the corpus's "just just ship it" are all real speech, and the
 // stutter-repair they want belongs to WispritRefine, which already owns it.
 private let dupRx = Rx(#"\b(to|the|a|an|and|or|but|of|for|with)\s+\1\b"#)
+
+/// Function words a correction may restate along with the phrase they head, and
+/// the entire vocabulary of the parallel-preposition rules: the equality escape
+/// in `isCorrection` and the span extension in `spanDrop`.
+///
+/// Prepositions only, and deliberately not the determiners. A repeated
+/// preposition is a restatement of the SAME slot ("at three … at four"); a
+/// repeated "the" is just English, and widening this to determiners would let
+/// the span eat one out of ordinary speech.
+///
+/// This is not `dupRx`'s list and must not become it. `dupRx` runs at the end
+/// of the sweep, where the marker that made a double an artifact is already
+/// gone, which is why "in in"/"on on" had to be removed from it ("Please hand
+/// it in in March." lost a word). These rules run while the marker is still in
+/// front of the engine, so they can tell the artifact from the grammar.
+private let parallelFunctionWords: Set<String> = [
+    "to", "for", "on", "in", "at", "from", "with", "of",
+]
 
 /// The literal "no wait" (a queue with no waiting), signal one: the word the
 /// span would delete. A copula, a possession verb or a preposition is never
@@ -831,8 +1603,480 @@ private let restartFunctionWords: Set<String> = hedgeLeaders.union([
     "me", "him", "us", "them", "when", "where", "why", "how",
 ])
 
+/// Words that can never be the X or Y of a "not" restatement.
+private let correctionFunctionWords: Set<String> = restartFunctionWords.union([
+    "no", "never", "don't", "dont", "isn't", "isnt", "wasn't", "wasnt",
+    "aren't", "arent", "won't", "wont", "can't", "cant", "didn't", "didnt",
+    "wait", "instead", "actually", "sorry", "well", "like", "just", "really",
+    "very", "meant", "mean", "say", "said",
+    "any", "some", "all", "every", "each", "both", "few", "many", "more", "most",
+    "another", "other",
+])
+
 /// The closed-class vocabulary as an anchored probe — the rest of the engine's
 /// "lexicon". A weekday or number shared by accident is not the restart
 /// evidence a name is; those corrections belong to tier (a) and its classes.
 private let closedClassWordRx = Rx("^(?:" + clockPattern + "|" + numberPattern + "|"
     + weekdayPattern + "|" + monthPattern + "|" + relativeDayPattern + ")$")
+
+// MARK: - The parallel-anchor tier
+
+// The user-reported failure, and the shape both tiers above are structurally
+// unable to reach:
+//
+//     "I want to go tomorrow. I mean, day after to the hackathon."
+//
+// Tier (a) wants a closed-class item on BOTH sides and "day after" is not one.
+// Tier (b)'s cross-terminator span wants a bare replacement fragment, and this
+// is a fragment plus a continuation — the span would have to reach back into
+// the previous sentence and then leave the continuation dangling, which is
+// exactly the measured "I finished the Jane finished it." damage the fragment
+// rule was added to stop. So the utterance shipped with the mistake in it, and
+// the AI layer does not rescue it either: the refine battery's
+// `self-correction-weak-cue` case scores 0.00. The deterministic layer is the
+// only guarantee this failure class has.
+//
+// The parallel-anchor tier replaces the evidence tier (b) cannot get ("is what follows the cue
+// a replacement, or a new sentence?") with PARALLEL STRUCTURE. A correction
+// restates something, so the replacement and the thing it replaces are the same
+// KIND of phrase — that is what a restatement IS. The rule is therefore a
+// type-check, the same one tier (a) performs, lifted off the closed-class
+// lexicon and onto phrases:
+//
+//   R = the leading phrase after the cue, classified longest-first.
+//   X = the TRAILING phrase of the clause the cue interrupts, classified the
+//       same way.
+//   Resolve iff both classify, and to the same class.
+//
+// Output is `<text before X> + <the WHOLE post-cue text>`: X, the punctuation
+// and the cue go, R keeps its continuation and its own punctuation. Which is
+// why X has to be the clause's TRAILING phrase and nothing weaker — the span
+// this deletes runs from X to the cue, so an anchor found further back would
+// take real words with it, and "deleting a correct word" is the one failure a
+// dictation app can never take back. An anchor that is not clause-final does
+// not resolve; the text ships verbatim, unchanged and honest.
+//
+// Two more classes carry the same weight as the semantic ones and are listed
+// with them below: a shared PREPOSITION head ("to marketing" ↔ "to finance"),
+// where the repeated preposition is the parallelism, and PHONETIC proximity
+// for the mishear-restatement channel ("…to Viveque. I mean Vivek."), which is
+// the riskiest branch here and is fenced accordingly.
+
+extension SelfCorrection {
+    /// Resolve the first cue in `text` that has a parallel anchor behind it.
+    ///
+    /// One rewrite per call: `apply`'s fixpoint loop re-enters the sweep, so a
+    /// second cue in the same utterance gets its own pass with the first one
+    /// already resolved. That is the same mechanism `possessivePairRx` chains
+    /// through, and it keeps this function a single left-to-right scan.
+    static func resolveParallelAnchors(_ text: String) -> String {
+        // No cue word, no work — the common case costs one scan and no
+        // allocation, which is what the <1 ms live budget is made of.
+        guard anchorCueProbeRx.matches(text) else { return text }
+        let ns = text as NSString
+        for cue in anchorCueRx.allMatches(text, ns) {
+            guard let anchorStart = anchorStart(forCue: cue.range, ns) else { continue }
+            return splice(ns, anchorStart: anchorStart,
+                          postCueStart: cue.range.location + cue.range.length)
+        }
+        return text
+    }
+
+    /// Where the replaced phrase starts, or nil when this cue has no parallel
+    /// anchor behind it and the text must ship verbatim.
+    private static func anchorStart(forCue cue: NSRange, _ ns: NSString) -> Int? {
+        let postCueStart = cue.location + cue.length
+        // A partial that ends ON the cue has no replacement yet. The cue
+        // pattern's trailing `\s+` already refuses that frame; this is the
+        // same refusal for the trailing-whitespace case, and it is why this tier
+        // needs no `endsMidCorrection` entry of its own.
+        guard postCueStart < ns.length else { return nil }
+        let r = anchorTokens(ns, from: postCueStart, to: ns.length,
+                             stopAtSentenceEnd: true, limit: anchorWindow + 1)
+        // The tier (b) hedge veto, re-used verbatim: a marker followed by a
+        // function word or an interjection is the user talking, not correcting.
+        guard let head = r.first, !hedgeLeaders.contains(head.lower) else { return nil }
+        guard !opensWithDiscourseMarker(r) else { return nil }
+        let x = precedingClauseTokens(ns, before: cue.location)
+        guard !x.isEmpty else { return nil }
+        if let kind = leadingClass(r), let index = trailingIndex(x, of: kind) {
+            return x[index].range.location
+        }
+        return phoneticAnchor(r, x)
+    }
+
+    /// Where X's trailing phrase of class `kind` starts, or nil when it has
+    /// none.
+    ///
+    /// X is classified INDEPENDENTLY and only then compared, which is what
+    /// makes this a type-check rather than a search for something that will
+    /// agree: "Let's do nine thirty." classifies as a clock time, so a bare
+    /// number after the cue finds no anchor and the text ships verbatim instead
+    /// of swapping the minutes out of a time.
+    ///
+    /// The one relaxation — retried, never widened — is a prepositional R. A
+    /// prepositional phrase WRAPS a phrase rather than competing with it ("for
+    /// Monday" is a preposition whose object happens to be a weekday), so a
+    /// semantic hit on the object does not rule the wrapper out and the
+    /// independent pass can legitimately have seen the wrong layer. Only ever
+    /// re-classified as the class R already is, so two SEMANTIC classes still
+    /// have to agree on the first look, and "nine thirty" ↔ "four" still bails.
+    private static func trailingIndex(_ x: [AnchorToken], of kind: AnchorClass) -> Int? {
+        if let trailing = trailingClass(x), trailing.kind == kind { return trailing.index }
+        guard case .preposition = kind else { return nil }
+        let n = min(x.count, anchorWindow)
+        for length in stride(from: n, through: 2, by: -1) {
+            let start = x.count - length
+            if prepositionalClass(Array(x[start...])) == kind { return start }
+        }
+        return nil
+    }
+
+    /// `<text before X>` + `<the whole post-cue text>`.
+    private static func splice(_ ns: NSString, anchorStart: Int, postCueStart: Int) -> String {
+        let head = ns.substring(to: anchorStart)
+        let tail = ns.substring(from: postCueStart)
+        // The replacement keeps its own casing — the contract tier (a) already
+        // gives Y — with one exception the splice creates rather than
+        // inherits: when X opened the sentence, the capital the recognizer put
+        // on X is the one the sentence still needs.
+        guard opensSentence(head), let first = tail.first, first.isLowercase else {
+            return head + tail
+        }
+        return head + first.uppercased() + tail.dropFirst()
+    }
+
+    private static func opensSentence(_ head: String) -> Bool {
+        guard let last = head.trimmingCharacters(in: .whitespacesAndNewlines).last else {
+            return true
+        }
+        return ".!?\u{2026}".contains(last)
+    }
+
+    // MARK: classification
+
+    /// The class of the phrase R OPENS, longest-first so "ten fifteen" is one
+    /// clock time rather than the number ten.
+    ///
+    /// Both passes are longest-first, but the SEMANTIC pass runs to completion
+    /// before the prepositional one gets a look. Order, not length, is what
+    /// stops "to go tomorrow" from reading as a prepositional phrase headed by
+    /// "to" and shadowing the relative day that is the actual anchor.
+    private static func leadingClass(_ tokens: [AnchorToken]) -> AnchorClass? {
+        let n = min(tokens.count, anchorWindow)
+        guard n > 0 else { return nil }
+        for length in stride(from: n, through: 1, by: -1) {
+            if let kind = semanticClass(Array(tokens[0..<length])) { return kind }
+        }
+        for length in stride(from: n, through: 2, by: -1) {
+            if let kind = prepositionalClass(Array(tokens[0..<length])) { return kind }
+        }
+        return nil
+    }
+
+    /// The class of the phrase X CLOSES, and where that phrase starts.
+    private static func trailingClass(_ tokens: [AnchorToken]) -> (kind: AnchorClass, index: Int)? {
+        let n = min(tokens.count, anchorWindow)
+        guard n > 0 else { return nil }
+        for length in stride(from: n, through: 1, by: -1) {
+            let start = tokens.count - length
+            if let kind = semanticClass(Array(tokens[start...])) { return (kind, start) }
+        }
+        for length in stride(from: n, through: 2, by: -1) {
+            let start = tokens.count - length
+            if let kind = prepositionalClass(Array(tokens[start...])) { return (kind, start) }
+        }
+        return nil
+    }
+
+    /// The closed semantic classes, probed on the phrase's RAW text: the month
+    /// class reads capitalization as its month-sense evidence ("He may actually
+    /// march in the parade."), so a lowercased phrase would silently disarm it.
+    private static func semanticClass(_ phrase: [AnchorToken]) -> AnchorClass? {
+        let text = phrase.map(\.raw).joined(separator: " ")
+        if anchorClockRx.matches(text) { return .clock }
+        if anchorWeekdayRx.matches(text) { return .weekday }
+        if anchorMonthRx.matches(text) { return .month }
+        if anchorRelativeRx.matches(text) { return .relative }
+        if anchorNumberRx.matches(text) { return .number }
+        return nil
+    }
+
+    /// A phrase whose parallelism is its PREPOSITION: "to marketing" ↔ "to
+    /// finance". The head has to repeat exactly (a "to" does not correct a
+    /// "by"), and the tail may not contain a second preposition — "to marketing
+    /// by Friday" is two phrases, and treating it as one would delete the
+    /// Friday along with the marketing.
+    private static func prepositionalClass(_ phrase: [AnchorToken]) -> AnchorClass? {
+        guard phrase.count >= 2, let head = phrase.first?.lower,
+              anchorPrepositions.contains(head),
+              !phrase.dropFirst().contains(where: { anchorPrepositions.contains($0.lower) })
+        else { return nil }
+        return .preposition(head)
+    }
+
+    /// The mishear-restatement channel: one token after the cue, one token
+    /// before it, and the two are the same word misheard twice.
+    ///
+    /// The riskiest branch in the file, so it is the most fenced: R has to be
+    /// the WHOLE post-cue clause (the bare-fragment shape tier (b) already
+    /// trusts), both words have to be content words outside the engine's own
+    /// lexicon, they have to start with the same letter, and they have to be
+    /// within `phoneticFloor` of each other. "…is fine. I mean it." — the
+    /// regression that made "I mean" refuse terminators in the first place —
+    /// fails four of the five: "it" is short, a function word, and shares
+    /// neither a letter nor a shape with "fine".
+    private static func phoneticAnchor(_ r: [AnchorToken], _ x: [AnchorToken]) -> Int? {
+        guard r.count == 1, let replacement = r.first, let replaced = x.last,
+              isPhoneticallyClose(replaced.lower, replacement.lower) else { return nil }
+        return replaced.range.location
+    }
+
+    /// Normalized edit distance over the lowercased forms, with a shared first
+    /// letter required.
+    ///
+    /// Orthographic distance and NOT `PhoneticScorer`, deliberately, now that
+    /// `WispritKit` carries the metaphone and this module may import it. The
+    /// two are not interchangeable here: the scorer is tuned for the antecedent
+    /// matcher, where a candidate has already been proposed and the question is
+    /// which of several it is. This branch has no candidate list — it is
+    /// deciding whether to DELETE a word on the strength of one resemblance —
+    /// so it wants the metric that is hardest to satisfy by accident, and edit
+    /// distance behind a shared first letter is that metric.
+    ///
+    /// The cost is visible and accepted: "Shreek"/"Sharique" scores 0.375 here
+    /// and does NOT resolve, where the scorer would. Leaving that one verbatim
+    /// is the correct answer under this engine's dogma — a missed correction is
+    /// a typo the user can see and fix, a wrong one is a word they never knew
+    /// they lost. Moving this branch onto the scorer is a real option, but it
+    /// needs its own measurement against the mishear corpus, not a swap.
+    static func isPhoneticallyClose(_ a: String, _ b: String) -> Bool {
+        guard a.count >= phoneticFloorLength, b.count >= phoneticFloorLength,
+              a.first == b.first,
+              a.allSatisfy({ $0.isLetter || $0 == "'" }),
+              b.allSatisfy({ $0.isLetter || $0 == "'" }),
+              !restartFunctionWords.contains(a), !restartFunctionWords.contains(b),
+              !closedClassWordRx.matches(a), !closedClassWordRx.matches(b) else { return false }
+        return 1 - StringMetrics.normalizedLevenshtein(a, b) >= phoneticFloor
+    }
+
+    private static func opensWithDiscourseMarker(_ r: [AnchorToken]) -> Bool {
+        guard r.count >= 2 else { return false }
+        for length in 2...min(anchorWindow, r.count)
+        where anchorDiscourseOpeners.contains(r.prefix(length).map(\.lower)
+            .joined(separator: " ")) {
+            return true
+        }
+        return false
+    }
+
+    // MARK: tokens
+
+    /// Words of `ns` in `from..<to`, fillers skipped, each carrying its range,
+    /// its comparison form and its RAW form (punctuation trimmed, case kept —
+    /// the month class needs the capital). `stopAtSentenceEnd` cuts the list at
+    /// the first word that closes a sentence, so R never reads past its own.
+    private static func anchorTokens(_ ns: NSString, from: Int, to: Int,
+                                     stopAtSentenceEnd: Bool, limit: Int) -> [AnchorToken] {
+        var tokens: [AnchorToken] = []
+        var i = from
+        while i < to, tokens.count < limit {
+            while i < to, isWhitespace(ns.character(at: i)) { i += 1 }
+            guard i < to else { break }
+            let start = i
+            var closesSentence = false
+            while i < to, !isWhitespace(ns.character(at: i)) {
+                if isSentenceTerminator(ns.character(at: i)) { closesSentence = true }
+                i += 1
+            }
+            let range = NSRange(location: start, length: i - start)
+            let word = ns.substring(with: range).replacingOccurrences(of: "\u{2019}", with: "'")
+            let raw = word.trimmingCharacters(in: comparisonTrim)
+            let lower = raw.lowercased()
+            if !lower.isEmpty, !fillerSet.contains(lower) {
+                tokens.append(AnchorToken(range: range, raw: raw, lower: lower,
+                                          closesSentence: closesSentence))
+            }
+            if stopAtSentenceEnd, closesSentence { break }
+        }
+        return tokens
+    }
+
+    /// The trailing words of the clause the cue interrupts — never across a
+    /// sentence boundary, because a phrase in the sentence BEFORE the one being
+    /// corrected is not the thing being restated. Bounded both ways (a fixed
+    /// character lookback, then the last `anchorWindow` words) so the scan
+    /// costs the same on a one-line partial and on a paragraph.
+    private static func precedingClauseTokens(_ ns: NSString, before cueStart: Int)
+        -> [AnchorToken] {
+        let floor = max(0, cueStart - anchorLookback)
+        let all = anchorTokens(ns, from: floor, to: cueStart,
+                               stopAtSentenceEnd: false, limit: Int.max)
+        var clause = 0
+        for (i, token) in all.enumerated() where token.closesSentence { clause = i + 1 }
+        return Array(all[clause...].suffix(anchorWindow))
+    }
+}
+
+/// A word as the term-echo tier compares them — fillers stay, because
+/// "had the rank" is the shape the recognizer emits.
+private struct EchoToken {
+    let range: NSRange
+    let raw: String
+    let lower: String
+}
+
+/// Glue the recognizer inserts when it splits a compound ("had a rank").
+private let echoGlue: Set<String> = ["a", "an", "the"]
+/// "had the rank of captain" is a real phrase, not a split of HackerRank.
+private let echoFollowerVeto: Set<String> = ["of", "as"]
+/// A new clause ("I had the rank") is not a split of an earlier term.
+private let echoOpenerVeto: Set<String> = ["i", "we", "they", "he", "she", "you"]
+/// Same cut the antecedent matcher uses; the affix + follower gates do
+/// the rest of the safety work.
+private let echoFloor = 0.62
+
+/// Be-verbs that license a participle, so "it was given, giving" is a
+/// restatement and "we shipped, shipping tomorrow" is not.
+private let inflectionAuxiliaryRx = Rx(#"\b(?:is|are|was|were|am|be|been|being)\b"#)
+private let inflectionAuxiliaries: Set<String> = [
+    "is", "are", "was", "were", "am", "be", "been", "being",
+]
+/// A determiner before X is a noun phrase ("the driver, driving"), not
+/// a verb-form correction.
+private let inflectionDeterminers: Set<String> = [
+    "a", "an", "the", "my", "your", "our", "their", "his", "her", "its",
+    "this", "that", "these", "those",
+]
+private let inflectionListFollowers: Set<String> = ["and", "or"]
+/// The noun that makes "for holdback" a function name, not a reason.
+private let softwareTwinLeaders: Set<String> = [
+    "function", "functions", "method", "methods",
+]
+
+/// A word as the parallel-anchor tier compares them.
+private struct AnchorToken {
+    let range: NSRange
+    /// Punctuation trimmed, curly apostrophe normalized, CASE PRESERVED.
+    let raw: String
+    let lower: String
+    let closesSentence: Bool
+}
+
+/// The parallel classes, in probe order. A phrase belongs to exactly one, and
+/// two phrases anchor each other only when it is the SAME one — the type-check
+/// tier (a) performs on its closed classes, performed here on phrases.
+private enum AnchorClass: Equatable {
+    case clock, weekday, month, relative, number
+    case preposition(String)
+}
+
+/// Words an anchor phrase may span on either side of the cue. Four covers
+/// every shape measured ("the day after tomorrow", "quarter past ten", "next
+/// Monday morning") and bounds the deletion at the same time: the span this
+/// tier removes is the anchor itself, so the window IS the blast radius.
+private let anchorWindow = 4
+
+/// How far back the pre-cue clause scan may look, in characters. Four words
+/// cannot span more than this in dictated English, so a longer look could not
+/// change the answer — it could only make a long paragraph quadratic.
+private let anchorLookback = 200
+
+/// Floor on the normalized edit distance for the phonetic branch, and the
+/// shortest word it will look at. Both are deliberately high: see
+/// `isPhoneticallyClose`.
+private let phoneticFloor = 0.5
+private let phoneticFloorLength = 3
+
+// The cue vocabulary, which is the joint pattern's marker list plus the three
+// cues that were missing from it — "I meant", a bare "rather" (the joint
+// pattern only knows "or rather"), and the "No, rather" the recognizer actually
+// writes. They are added HERE and not to `markerPhrases` on purpose: the joint
+// pattern's list is what tiers (a) and (b) fire on, and widening it would move
+// answers those tiers already give.
+//
+// Two conditions, always, and neither is sufficient alone:
+//
+//   * a clause terminator or a comma immediately in front of the cue. This is
+//     the whole false-positive defence for the weak cues, and it is what makes
+//     "I know what you mean about the deadline.", "That is exactly what I mean
+//     when I say fragile.", "I would rather go on Friday." and "I am sorry
+//     about Thursday." untouchable — in every one of them the cue word is
+//     preceded by a word, so it is being USED, not spoken as a cue;
+//   * a parallel anchor. Enforced by `anchorStart`, and the reason a bare "no"
+//     is absent from this list entirely: "Did we win? No. We lost by two
+//     votes." satisfies the punctuation condition perfectly and is not a
+//     correction at all.
+private let anchorCuePhrases = [
+    "i" + innerGap + "meant",
+    "i" + innerGap + "mean",
+    "no" + innerGap + "actually",
+    "no" + innerGap + "wait",
+    "no" + innerGap + "rather",
+    "or" + innerGap + "rather",
+    "make" + innerGap + "that",
+    "rather",
+    "sorry",
+]
+
+/// Cheap gate: no cue word anywhere in the text, no parallel-anchor work at all.
+private let anchorCueProbeRx = Rx("\\b(?:mean|meant|sorry|rather|actually|wait|make)\\b")
+
+/// `<terminator-or-comma> <fillers?> <cue> <punctuation?> <whitespace>`. The
+/// trailing `\s+` is load-bearing twice over: it proves the replacement has
+/// actually been spoken, and it puts the match's end exactly on the first
+/// character this tier keeps.
+private let anchorCueRx = Rx(
+    "[,.!?\u{2026}]+\\s*(?:" + filler + "[,.!?\u{2026}]*\\s+)*"
+        + "(?:" + anchorCuePhrases.joined(separator: "|") + ")"
+        + "(?![\\w'-])[,.!?\u{2026}]*\\s+")
+
+// The semantic class probes. Anchored, and built from the SAME sub-patterns
+// tier (a) uses, so the two tiers can never disagree about what a weekday is.
+
+private let anchorClockRx = Rx("^(?:" + clockPattern + ")$")
+
+/// A weekday, with the modifiers that still leave it a weekday: "next Monday"
+/// is a Monday, and so is "Friday morning". The daypart matters because it is
+/// what a chained correction leaves BEHIND — "Ship it Thursday. No, rather
+/// Friday morning. Sorry, Saturday morning." can only resolve its second cue if
+/// the first one's own output still classifies.
+private let anchorWeekdayRx = Rx("^(?:(?:next|last|this|coming)\\s+)?(?:" + weekdayPattern
+    + ")(?:\\s+(?:morning|afternoon|evening|night))?$")
+
+private let anchorMonthRx = Rx("^(?:" + monthPattern + ")(?:\\s+\\d{1,2}(?:st|nd|rd|th)?)?$")
+
+/// Cardinals and ordinals, with the determiner a spoken day-of-month carries:
+/// "Move it to the 5th. I mean the 6th, before the freeze." is a number
+/// correcting a number, and the "the" is part of how English says it.
+private let anchorNumberRx = Rx("^(?:the\\s+)?(?:" + numberPattern + ")$")
+
+/// Relative time: tier (a)'s four bare words, plus the phrase forms speech
+/// actually uses for the same thing. "day after" is the one the user's
+/// sentence turns on — it is a relative day exactly as "tomorrow" is, and the
+/// only reason tier (a) cannot see it is that it is two words.
+private let anchorRelativeRx = Rx("^(?:" + relativeDayPattern
+    + "|(?:the\\s+)?day\\s+(?:after|before)(?:\\s+(?:tomorrow|yesterday))?"
+    + "|(?:next|last|this|the\\s+following)\\s+(?:week|month|year|weekend)"
+    + "|this\\s+(?:morning|afternoon|evening))$")
+
+/// Prepositions that can head a parallel phrase. Closed and small: each one is
+/// a preposition that takes a plain noun-phrase object in dictation, which is
+/// what makes "P Y" ↔ "P Z" a restatement rather than a coincidence.
+private let anchorPrepositions: Set<String> = [
+    "to", "for", "from", "with", "at", "on", "in", "by", "about",
+    "into", "onto", "toward", "towards", "under", "over", "against",
+]
+
+/// Prepositional phrases that are DISCOURSE markers rather than replacements.
+/// Without this, "Put it on the shelf. I mean, on second thought, leave it."
+/// reads "on the shelf" ↔ "on second thought" as a parallel pair and deletes
+/// the shelf. Every entry opens with a preposition and none of them is ever the
+/// object of a correction.
+private let anchorDiscourseOpeners: Set<String> = [
+    "on second thought", "on the other hand", "on balance",
+    "in other words", "in any case", "in fact", "in short", "in general",
+    "by the way", "at least", "at any rate", "at the same time",
+    "to be clear", "to be honest", "to be fair", "to that end",
+    "for what it's worth", "for now", "for once", "for that matter",
+]
