@@ -40,25 +40,91 @@ final class GoldenParityTests: XCTestCase {
         XCTAssertEqual(store.terms().count, 137)
     }
 
-    /// The generated ICU pattern text must equal Python's `re.escape` output
-    /// with `\ ` relaxed to `\s+`, and the longest-first ordering must be the
-    /// same *stable* ordering Python's `sort(key=len, reverse=True)` produces.
+    /// The generated ICU pattern BODY must equal Python's `re.escape` output with
+    /// `\ ` relaxed to `\s+`, and the longest-first ordering must be the same
+    /// *stable* ordering Python's `sort(key=len, reverse=True)` produces.
+    ///
+    /// The EDGES deliberately diverge. Python wraps each pattern in `\b…\b`; a
+    /// hyphen is a non-word character, so `\b` reports a boundary inside every
+    /// hyphenated compound and the phrase swallows the half in front of it —
+    /// measured: "The well x-ray results are in." → "The WellX-ray results are
+    /// in.". `(?<![\w-])…(?![\w-])` is `\b` plus "and the neighbour is not a
+    /// hyphen". The body is still the parity surface, so it is compared against
+    /// the golden with only the edges swapped.
     func testCompiledCorrectionsMatchPythonPatternsAndOrder() {
         let compiled = store.corrections()
         XCTAssertEqual(compiled.count, golden.correctionPairs.count)
         XCTAssertEqual(compiled.count, 521)
         for (index, expected) in golden.correctionPairs.enumerated() {
-            XCTAssertEqual(compiled[index].pattern.pattern, expected[0],
+            let python = expected[0]
+            XCTAssertTrue(python.hasPrefix(#"\b"#) && python.hasSuffix(#"\b"#),
+                          "golden pattern #\(index) is not \\b-wrapped: \(python)")
+            let body = String(python.dropFirst(2).dropLast(2))
+            XCTAssertEqual(compiled[index].pattern.pattern, #"(?<![\w-])"# + body + #"(?![\w-])"#,
                            "pattern #\(index) diverged from Python")
             XCTAssertEqual(compiled[index].replacement, expected[1],
                            "replacement #\(index) diverged from Python")
         }
     }
 
+    /// The golden cases were produced by Python's cascading loop, which re-runs
+    /// every pattern over the previous pattern's OUTPUT. That cascade is the
+    /// corruption this engine was fixed to stop (it turned "We flew to Amman
+    /// last night." into "…Aman UAE UAE…"), so one golden expectation moved with
+    /// it — see `deviations` and the test below it.
+    private static let deviations: [String: String] = [
+        "we ran mlx whisper then faster whisper": "we ran mlx-whisper then faster-whisper",
+    ]
+
+    private func expectation(for testCase: Goldens.Case) -> String {
+        Self.deviations[testCase.input] ?? testCase.expected
+    }
+
     func testApplyCorrectionsMatchesPython() {
         for testCase in golden.cases {
-            XCTAssertEqual(store.applyCorrections(to: testCase.input), testCase.expected,
+            XCTAssertEqual(store.applyCorrections(to: testCase.input), expectation(for: testCase),
                            "input: \(testCase.input.debugDescription)")
+        }
+    }
+
+    /// The one golden that moved, stated on its own so the reason is on the
+    /// record rather than buried in a dictionary literal.
+    ///
+    /// Python reached "MLX-whisper" in two hops: "mlx whisper" → "mlx-whisper"
+    /// (the term), then the 3-character "MLX" self-pattern re-matched the "mlx"
+    /// of the text it had just written — legal only because `\b` sits at the
+    /// hyphen — and up-cased it. Both hops are the defects: a replaced span
+    /// being re-examined, and a match ending against a hyphen. Note where that
+    /// left the output: "MLX-whisper" is not a term in this dictionary. The
+    /// canonical spelling on file is `mlx-whisper`, which is also the real
+    /// package name, so the single-pass result is the more faithful one.
+    func testTheMLXCascadeNoLongerReCasesTheTermItJustWrote() {
+        XCTAssertTrue(store.terms().contains("mlx-whisper"))
+        XCTAssertFalse(store.terms().contains("MLX-whisper"))
+        XCTAssertEqual(store.applyCorrections(to: "we ran mlx whisper then faster whisper"),
+                       "we ran mlx-whisper then faster-whisper")
+        // The standalone acronym still self-cases; only the compound is spared.
+        XCTAssertEqual(store.applyCorrections(to: "we ran it on mlx today"),
+                       "we ran it on MLX today")
+    }
+
+    /// The measured cascade, on the shipping dictionary rather than a fixture:
+    /// "Aman UAE" lists both "amman" and "aman", and the old engine expanded the
+    /// term it had just written a second time.
+    func testTheAmanCascadeIsGoneOnTheRealDictionary() {
+        XCTAssertEqual(store.applyCorrections(to: "We flew to Amman last night."),
+                       "We flew to Aman UAE last night.")
+        XCTAssertEqual(store.applyCorrections(to: "Aman UAE signed the contract."),
+                       "Aman UAE signed the contract.")
+    }
+
+    /// Idempotence over the whole golden corpus at real scale: 137 terms, 521
+    /// patterns, every generated case.
+    func testEveryGoldenCaseIsIdempotent() {
+        for testCase in golden.cases {
+            let once = store.applyCorrections(to: testCase.input)
+            XCTAssertEqual(store.applyCorrections(to: once), once,
+                           "not idempotent for \(testCase.input.debugDescription)")
         }
     }
 
@@ -109,7 +175,7 @@ final class GoldenParityTests: XCTestCase {
         XCTAssertFalse(store.isKnownTerm("Sharifue"))
         XCTAssertFalse(store.vocabularyTerms().contains("Sharifue"))
         for testCase in golden.cases {
-            XCTAssertEqual(store.applyCorrections(to: testCase.input), testCase.expected,
+            XCTAssertEqual(store.applyCorrections(to: testCase.input), expectation(for: testCase),
                            "a pending entry changed a golden correction")
         }
 

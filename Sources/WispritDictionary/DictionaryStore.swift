@@ -14,7 +14,10 @@ import os
 ///    caps the list keeps the terms most likely to matter.
 /// 2. `applyCorrections(to:)` — compiled, whole-word, case-insensitive
 ///    substitutions applied after recognition. This is the real vocabulary net,
-///    and the parity surface with Python.
+///    and the parity surface with Python — everywhere except the apply loop
+///    itself, which is deliberately one masked pass rather than Python's
+///    cascade of re-substitutions (see `applyCorrections` for the measured
+///    corruption that bought the deviation).
 ///
 /// File format (unchanged from Python; extension fields are additive):
 /// ```json
@@ -144,27 +147,88 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
 
     // MARK: - CorrectionApplying
 
-    /// Sequential application in longest-first order, exactly as
-    /// `postprocess._apply_dictionary` does it — later patterns see earlier
-    /// substitutions, and that cascade is part of the golden behaviour
-    /// ("mlx whisper" → "mlx-whisper" → "MLX-whisper").
+    /// ONE logical pass over the input: every pattern is matched against the
+    /// ORIGINAL text, and a span claimed by one rule is never re-examined by any
+    /// other. Rules are tried longest-source-first (the compile-time sort), so
+    /// the first rule to reach a position wins it — longest-match-wins.
+    ///
+    /// CONTRACT-DEVIATION, and the reason this is not Python's loop any more.
+    /// `postprocess._apply_dictionary` re-runs each pattern over the *output* of
+    /// the previous one, so a short `hear` phrase re-matches inside the text a
+    /// long rule just wrote. Measured on the real dictionary, where "Aman UAE"
+    /// lists both "amman" and "aman":
+    ///
+    ///     "We flew to Amman last night."  →  "We flew to Aman UAE UAE last night."
+    ///
+    /// "amman" writes "Aman UAE", then the shorter "aman" rule matches the "Aman"
+    /// it just wrote (a `\b` sits at the space) and expands it a second time. The
+    /// same cascade makes the function non-idempotent on text that is ALREADY
+    /// canonical — "Aman UAE signed the contract." → "Aman UAE UAE signed the
+    /// contract." — which is the corruption that actually bites: dictation text
+    /// goes through here on every utterance, and users re-dictate text they have
+    /// already had corrected, so the damage compounds run over run.
+    ///
+    /// Matching the original text is what kills the cascade; the claim mask is
+    /// what makes it idempotent. Every term compiles a self-pattern (`term` →
+    /// `term`) that is at least as long as any of its `hear` phrases and so is
+    /// tried first: on canonical input it claims the whole canonical span as a
+    /// no-op, and the shorter `hear` phrase that would have chewed into it is
+    /// then out of bounds. `applyCorrections(applyCorrections(x)) ==
+    /// applyCorrections(x)` falls out of that, and is pinned by a test.
+    ///
+    /// A mask (rather than one combined alternation with per-match term
+    /// resolution) keeps the compiled list, its Python-parity longest-first
+    /// ordering, and the per-pattern diagnostics exactly as they were — the
+    /// ordering IS the priority function, so it stays the visible thing.
     public func applyCorrections(to text: String) -> String {
         guard !text.isEmpty else { return text }
         let compiled = corrections()
-        var out = text
+        guard !compiled.isEmpty else { return text }
+
+        let subject = text as NSString
+        let whole = NSRange(location: 0, length: subject.length)
+        guard whole.length > 0 else { return text }
+
+        // UTF-16-indexed claim mask: true = some earlier (longer) rule owns this
+        // offset. Utterance-sized input, so the linear overlap check is free.
+        var claimed = [Bool](repeating: false, count: whole.length)
+        var edits: [(range: NSRange, replacement: String)] = []
+
         for correction in compiled {
-            guard !out.isEmpty else { break }
-            let range = NSRange(out.startIndex..<out.endIndex, in: out)
-            // CONTRACT-DEVIATION: the replacement is run through
-            // `escapedTemplate`, so `$` and `\` inside a canonical term stay
-            // literal. Python's `sub` would interpret `\1` in a term as a group
-            // reference (and raise on a bad one); no seeded or mined term
-            // contains either character, so behaviour is identical on real data
-            // and strictly safer on hostile input.
-            out = correction.pattern.stringByReplacingMatches(
-                in: out, options: [], range: range,
-                withTemplate: NSRegularExpression.escapedTemplate(for: correction.replacement))
+            for match in correction.pattern.matches(in: text, options: [], range: whole) {
+                let range = match.range
+                guard range.length > 0,
+                      claimed[range.location..<NSMaxRange(range)].allSatisfy({ !$0 })
+                else { continue }
+                for index in range.location..<NSMaxRange(range) { claimed[index] = true }
+                // Claim first, THEN skip: a match that is already spelled exactly
+                // like the canonical term needs no edit, but it must still fence
+                // the span off from the shorter rules behind it.
+                guard subject.substring(with: range) != correction.replacement else { continue }
+                edits.append((range, correction.replacement))
+            }
         }
+
+        guard !edits.isEmpty else { return text }
+        // Claims never overlap, so a single left-to-right splice is enough. The
+        // replacement goes in verbatim — no template expansion, so `$` and `\`
+        // inside a canonical term stay literal. Python's `sub` would read `\1` in
+        // a term as a group reference (and raise on a bad one); no seeded or
+        // mined term contains either character, so this is identical on real data
+        // and strictly safer on hostile input.
+        edits.sort { $0.range.location < $1.range.location }
+        var out = ""
+        out.reserveCapacity(text.utf16.count)
+        var cursor = 0
+        for edit in edits {
+            if edit.range.location > cursor {
+                out += subject.substring(with: NSRange(location: cursor,
+                                                       length: edit.range.location - cursor))
+            }
+            out += edit.replacement
+            cursor = NSMaxRange(edit.range)
+        }
+        if cursor < subject.length { out += subject.substring(from: cursor) }
         return out
     }
 
@@ -419,7 +483,7 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
         compiled.reserveCapacity(ordered.count)
         for item in ordered {
             let body = Self.relaxedEscape(item.element.source)
-            guard let regex = try? NSRegularExpression(pattern: "\\b" + body + "\\b",
+            guard let regex = try? NSRegularExpression(pattern: Self.leftEdge + body + Self.rightEdge,
                                                        options: [.caseInsensitive]) else {
                 log.warning("could not compile correction for \(item.element.source, privacy: .public)")
                 continue
@@ -446,6 +510,24 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
         set.formUnion(["\t", "\n", "\r", "\u{0B}", "\u{0C}"])
         return set
     }()
+
+    // CONTRACT-DEVIATION: Python wraps each pattern in `\b…\b`. A hyphen is a
+    // non-word character, so `\b` reports a boundary in the MIDDLE of every
+    // hyphenated compound, and the phrase then eats one half of it. Measured on
+    // the shipping dictionary: "The well x-ray results are in." → "The WellX-ray
+    // results are in." (WellX hears "well x"), and "It ships flat for hands-free
+    // use." → "It ships flat Four Hands-free use." (Four Hands hears "for
+    // hands"). Both are ordinary English the dictionary had no business
+    // touching, and both are one hyphen away from any term the user typed.
+    //
+    // The replacement edges are `\b` plus "and the neighbour is not a hyphen":
+    // a match may not begin or end against `[\w-]`. Word-internal behaviour is
+    // unchanged ("reinforged" still does not contain the phrase "in forge"),
+    // punctuation still bounds a match ("insforge," / "(clod)"), and a
+    // standalone "well x" still corrects — only the half-of-a-compound case
+    // stops matching. Fixed-width lookaround, so ICU takes it as-is.
+    private static let leftEdge = "(?<![\\w-])"
+    private static let rightEdge = "(?![\\w-])"
 
     /// `re.escape(src).replace("\\ ", "\\s+")` — escaped spaces become `\s+` so
     /// a multi-word misrecognition matches however the recogniser spaced it.
