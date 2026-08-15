@@ -354,7 +354,16 @@ public final class AsrManager: @unchecked Sendable {
     /// dropped it as a hallucination), the streaming text stands: the rescue is
     /// allowed to add words, never to lose them.
     private func rescue(_ streaming: UtteranceResult, pcm: Data) async -> UtteranceResult {
-        guard let batch = await runBatch(pcm) else { return streaming }
+        let gain = Self.rescueGain(peakLevel: streaming.peakLevel, pcm: pcm)
+        let audio = gain > 1 ? PcmFormat.scaled(pcm, by: gain) : pcm
+        // Carried on BOTH outcomes below, so a declined rescue still says the
+        // audio needed amplifying — see `UtteranceResult.rescueGainDb`.
+        var streaming = streaming
+        streaming.rescueGainDb = gain > 1 ? Double(20 * log10(gain)) : nil
+        if gain > 1 {
+            log.info("rescue audio normalized by \(20 * log10(gain), format: .fixed(precision: 1)) dB before the batch pass")
+        }
+        guard let batch = await runBatch(audio) else { return streaming }
         if !streaming.text.isEmpty,
            Self.wordCount(batch.text) <= Self.wordCount(streaming.text) {
             log.info("batch rescue declined: streaming kept \(Self.wordCount(streaming.text)) words vs batch \(Self.wordCount(batch.text))")
@@ -372,7 +381,36 @@ public final class AsrManager: @unchecked Sendable {
                                starvedInput: streaming.starvedInput,
                                peakLevel: streaming.peakLevel,
                                producedNothing: streaming.producedNothing,
-                               rescued: true)
+                               rescued: true,
+                               rescueGainDb: streaming.rescueGainDb)
+    }
+
+    /// Above this metered peak the engine is measurably level-invariant, so
+    /// scaling the audio is pure risk for no measured return: the control corpus
+    /// (peaks 0.42–1.0) scored 1.72 % WER against 1.63 % for quiet audio
+    /// normalized to 0.5 — inside the ±0.09 pt one clip is worth.
+    static let rescueNormalizationCeiling: Float = 0.25
+
+    /// Should the batch pass read a peak-normalized copy of the audio, and by
+    /// how much? 1 means "hand it the retained bytes unchanged".
+    ///
+    /// The window is `[voicedPeakThreshold, rescueNormalizationCeiling)` on the
+    /// STREAMING engine's own metered peak — the same statistic
+    /// `PcmFormat.peakLevel` computes offline, so the two ends of this
+    /// comparison mean the same thing. Below the voiced threshold there is
+    /// nothing to amplify but room tone, and a rescue that reaches here on the
+    /// volatile witness (an analyzer that transcribed audio the meter never saw)
+    /// must not have its silence turned into invented words —
+    /// `PcmFormat.normalizationGain` then refuses it a second time, from the
+    /// retained audio's own peak.
+    ///
+    /// Rescue-only by construction: the vocabulary channel and the batch-only
+    /// finalize path never come through here, and their transcripts feed the
+    /// learn loop, which is not a place to introduce a nonlinear stage.
+    static func rescueGain(peakLevel: Float, pcm: Data) -> Float {
+        guard peakLevel >= SpeechAnalyzerEngine.voicedPeakThreshold,
+              peakLevel < rescueNormalizationCeiling else { return 1 }
+        return PcmFormat.normalizationGain(of: pcm)
     }
 
     /// Words after lowercasing and stripping punctuation, so "more words" is a

@@ -112,6 +112,51 @@ public final class NarrowbandWarner: @unchecked Sendable {
     }
 }
 
+/// One input-volume advisory per device appearance, never per utterance.
+///
+/// The other half of the quiet-speech story, and the only half the user can act
+/// on from the Mac rather than from their chair: this machine's default input
+/// sat at 51/100 while the mangled dictations were recorded. Raising it does not
+/// buy SNR on a built-in microphone — the slider is digital gain, and the
+/// measured level axis is nearly free (0.17 pt of WER from peak 1.0 down to
+/// 0.06) — but it does move the meter, and it moves quiet speech out of the
+/// band where `produced_nothing` is decided by a threshold.
+///
+/// **Read-only, permanently.** Nothing here ever writes
+/// `kAudioDevicePropertyVolumeScalar`: an app that silently turns up the user's
+/// microphone is an app that changed a system setting behind their back, and
+/// the one-time notice is the entire remedy we are entitled to.
+public final class InputVolumeAdvisor: @unchecked Sendable {
+    /// Below this the slider is worth a mention. 0.7 rather than "anything under
+    /// 1.0" because most Macs ship well short of full and a notice that fires
+    /// for everyone is a notice nobody reads.
+    public static let lowVolumeCeiling: Float = 0.7
+
+    private let probe: @Sendable () -> (device: AudioDeviceID, volume: Float)?
+    private let isEnabled: @Sendable () -> Bool
+    private let lock = UnfairLock()
+    private var lastAdvisedDeviceID: AudioDeviceID?
+
+    public init(isEnabled: @escaping @Sendable () -> Bool = { true },
+                probe: @escaping @Sendable () -> (device: AudioDeviceID, volume: Float)? = {
+                    InputDeviceProbe.defaultInputVolume()
+                }) {
+        self.isEnabled = isEnabled
+        self.probe = probe
+    }
+
+    /// The input volume as a percentage, once per device — or nil, which is the
+    /// answer for a correctly-set slider and for every utterance after the
+    /// first. The caller owns the words; this owns the fact and the once.
+    public func lowVolumePercent() -> Int? {
+        guard isEnabled(), let read = probe(), read.volume < Self.lowVolumeCeiling else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        guard lastAdvisedDeviceID != read.device else { return nil }
+        lastAdvisedDeviceID = read.device
+        return Int((read.volume * 100).rounded())
+    }
+}
+
 /// The Core Audio adapter. Thin and untested by design (SessionPorts' rule):
 /// every judgement it feeds lives in `InputDevicePolicy`.
 public enum InputDeviceProbe {
@@ -122,6 +167,16 @@ public enum InputDeviceProbe {
                                name: name(of: id) ?? "(unknown)",
                                transport: transport(of: id) ?? kAudioDeviceTransportTypeUnknown,
                                nominalSampleRate: nominalSampleRate(of: id) ?? 0)
+    }
+
+    /// The default input's volume slider, 0…1, as System Settings shows it.
+    ///
+    /// nil when the device has no software volume control at all — several USB
+    /// interfaces and aggregate devices do not, and on those the slider the
+    /// advisory would point at does not exist.
+    public static func defaultInputVolume() -> (device: AudioDeviceID, volume: Float)? {
+        guard let id = defaultInputDeviceID(), let volume = inputVolume(of: id) else { return nil }
+        return (id, volume)
     }
 
     /// The built-in microphone, for `input_device_policy = prefer_builtin`.
@@ -200,6 +255,24 @@ public enum InputDeviceProbe {
         guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &transport) == noErr
         else { return nil }
         return transport
+    }
+
+    /// `kAudioDevicePropertyVolumeScalar`, input scope, main element. READ ONLY
+    /// — see `InputVolumeAdvisor`. `AudioObjectHasProperty` first because a
+    /// device without a volume control answers the read with an error and a
+    /// garbage scalar, which would advise the user about a slider they cannot
+    /// see.
+    private static func inputVolume(of device: AudioDeviceID) -> Float? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyVolumeScalar,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain)
+        guard AudioObjectHasProperty(device, &address) else { return nil }
+        var volume: Float32 = 0
+        var size = UInt32(MemoryLayout<Float32>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &volume) == noErr
+        else { return nil }
+        return Float(volume)
     }
 
     private static func nominalSampleRate(of device: AudioDeviceID) -> Double? {

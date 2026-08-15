@@ -205,4 +205,103 @@ final class PcmFormatTests: XCTestCase {
         let expected = min(1.0, Float(256.0 / 32768.0) * 4.0)
         XCTAssertEqual(PcmFormat.level(of: data), expected, accuracy: 1e-6)
     }
+
+    // MARK: - rescue-path normalization (2026-08-15)
+
+    /// A constant-amplitude buffer at a chosen METER level, so a test can name
+    /// the number the rescue gate actually compares against (RMS × 4, clamped)
+    /// instead of an amplitude nobody reads.
+    private func tone(atLevel level: Float, seconds: Double = 1.0) -> Data {
+        let amplitude = Double(level) / 4.0
+        let count = Int(seconds * PcmFormat.sampleRate)
+        let samples = [Int16](repeating: Int16((amplitude * 32768).rounded()), count: count)
+        return samples.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
+    /// The b0a763f silence rule, at the sample level: a hold nobody spoke into
+    /// must come out of the rescue exactly as it went in. Amplifying room tone
+    /// by 30 dB is precisely how a silent push-to-talk starts inserting words.
+    func testNormalizationLeavesSilenceExactlyAsItFoundIt() {
+        let silence = Data(count: 32_000)
+        XCTAssertEqual(PcmFormat.normalizationGain(of: silence), 1)
+        XCTAssertEqual(PcmFormat.normalized(silence), silence)
+
+        // Room tone below the voiced threshold is the same refusal.
+        let roomTone = tone(atLevel: SpeechAnalyzerEngine.voicedPeakThreshold - 0.002)
+        XCTAssertEqual(PcmFormat.normalizationGain(of: roomTone), 1)
+        XCTAssertEqual(PcmFormat.normalized(roomTone), roomTone)
+
+        XCTAssertEqual(PcmFormat.normalized(Data()), Data(), "and empty audio is not a special case")
+    }
+
+    /// The production band: peak 0.06 over a 0.5 target is 18.4 dB, applied.
+    func testAQuietUtteranceLandsOnTheTarget() {
+        let quiet = tone(atLevel: 0.06)
+        let gain = PcmFormat.normalizationGain(of: quiet)
+        XCTAssertEqual(gain, 0.5 / 0.06, accuracy: 0.01)
+        XCTAssertEqual(PcmFormat.peakLevel(of: PcmFormat.normalized(quiet)),
+                       PcmFormat.normalizationTargetPeak, accuracy: 0.005)
+    }
+
+    /// 30 dB and not a decibel more: below ~0.0158 the target is unreachable,
+    /// and what is left down there is room, not speech.
+    func testTheGainIsCappedAtThirtyDecibels() {
+        let barelyVoiced = tone(atLevel: 0.012)
+        XCTAssertEqual(PcmFormat.normalizationGain(of: barelyVoiced),
+                       PcmFormat.maximumNormalizationGain, accuracy: 1e-4)
+        let out = PcmFormat.normalized(barelyVoiced)
+        XCTAssertLessThan(PcmFormat.peakLevel(of: out), PcmFormat.normalizationTargetPeak,
+                          "the cap is a cap — it does not get to reach the target")
+        XCTAssertEqual(PcmFormat.peakLevel(of: out),
+                       0.012 * PcmFormat.maximumNormalizationGain, accuracy: 0.005)
+    }
+
+    /// Audio already at or above the target is not touched at all, and neither
+    /// is audio a hair under it — a 0.4 dB nudge cannot change a transcript and
+    /// would cost the operation its idempotence.
+    func testAudioAtOrNearTheTargetIsUntouched() {
+        for level: Float in [0.5, 0.8, 0.48] {
+            let loud = tone(atLevel: level)
+            XCTAssertEqual(PcmFormat.normalizationGain(of: loud), 1, "level \(level)")
+            XCTAssertEqual(PcmFormat.normalized(loud), loud, "level \(level)")
+        }
+    }
+
+    func testNormalizingAnAlreadyNormalizedBufferIsAByteForByteNoOp() {
+        let once = PcmFormat.normalized(tone(atLevel: 0.06))
+        XCTAssertEqual(PcmFormat.normalized(once), once)
+    }
+
+    /// A high-crest chunk reaches full scale before its METERED level does —
+    /// the meter is RMS × 4 — so the per-sample clamp is load-bearing. What it
+    /// must never do is wrap: an Int16 overflow turns a loud syllable into a
+    /// click, which is a worse thing to hand a recognizer than a quiet one.
+    func testLoudTransientsSaturateAndNeverWrap() {
+        var samples = [Int16](repeating: 100, count: 1_600)
+        for i in stride(from: 0, to: 1_600, by: 320) { samples[i] = 32_000 }
+        let spiky = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+        XCTAssertGreaterThan(PcmFormat.normalizationGain(of: spiky), 1, "precondition: it is quiet")
+
+        let out = PcmFormat.normalized(spiky)
+        XCTAssertEqual(out.count, spiky.count)
+        out.withUnsafeBytes { raw in
+            let p = raw.bindMemory(to: Int16.self)
+            for i in 0..<(out.count / 2) {
+                let v = Int16(littleEndian: p[i])
+                XCTAssertGreaterThan(v, 0, "sample \(i) changed sign — that is a wrap, not a clamp")
+                XCTAssertLessThanOrEqual(v, 32_767)
+            }
+        }
+    }
+
+    /// `peakLevel(of:)` has to be the SAME statistic the engine meters live, or
+    /// the rescue gate is comparing two different numbers.
+    func testPeakLevelIsTheLoudestChunkNotTheWholeBufferAverage() {
+        let quiet = tone(atLevel: 0.02, seconds: 1.0)
+        let loudChunk = tone(atLevel: 0.6, seconds: 0.1)
+        let mixed = quiet + loudChunk
+        XCTAssertEqual(PcmFormat.peakLevel(of: mixed), 0.6, accuracy: 0.01)
+        XCTAssertLessThan(PcmFormat.level(of: mixed), 0.3,
+                          "the whole-buffer mean would have missed the speech entirely")
+    }
 }

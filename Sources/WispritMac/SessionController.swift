@@ -154,6 +154,12 @@ public final class SessionController: @unchecked Sendable {
         /// appearance, never per utterance. nil by default, so no wiring that
         /// omits it ever says anything.
         public var inputWarning: @Sendable () -> String?
+        /// The system input volume as a percentage, ONCE per device, and only
+        /// when it is low enough to be worth saying (2026-08-15). Consulted
+        /// solely on a marginal-audio miss — the one moment the number explains
+        /// something — and read-only: nothing in Wisprit sets the slider.
+        /// nil by default, exactly like `inputWarning`.
+        public var inputVolumeAdvisory: @Sendable () -> Int?
 
         public init(holdDebounceMs: @escaping @Sendable () -> Double = { 150 },
                     isEnabled: @escaping @Sendable () -> Bool = { true },
@@ -164,7 +170,8 @@ public final class SessionController: @unchecked Sendable {
                     pollTimeout: TimeInterval = 0.25,
                     expandSnippets: @escaping @Sendable (String) -> String = { $0 },
                     releaseGrace: TimeInterval = 0,
-                    inputWarning: @escaping @Sendable () -> String? = { nil }) {
+                    inputWarning: @escaping @Sendable () -> String? = { nil },
+                    inputVolumeAdvisory: @escaping @Sendable () -> Int? = { nil }) {
             self.holdDebounceMs = holdDebounceMs
             self.isEnabled = isEnabled
             self.postProcessOptions = postProcessOptions
@@ -175,6 +182,7 @@ public final class SessionController: @unchecked Sendable {
             self.expandSnippets = expandSnippets
             self.releaseGrace = releaseGrace
             self.inputWarning = inputWarning
+            self.inputVolumeAdvisory = inputVolumeAdvisory
         }
     }
 
@@ -684,7 +692,7 @@ public final class SessionController: @unchecked Sendable {
             // that delivered nothing and a hold nobody spoke into are not the
             // same problem, and only one of them is ours.
             let reason = EmptyReason.classify(result: result, heldMs: heldMs)
-            flashEmpty(reason)
+            flashEmpty(reason, peakLevel: result.peakLevel, noiseFloor: noiseFloor)
             writeMetrics(heldMs: heldMs, result: result, postMs: 0, insertMs: 0,
                          outcome: "empty", releaseToTextMs: nil,
                          aiMs: (tAi - tAsr) * 1000.0, ai: aiOutcome.rawValue,
@@ -1214,17 +1222,54 @@ public final class SessionController: @unchecked Sendable {
         pill?.flashError(message)
     }
 
+    /// Copy for the utterance whose audio the room nearly swallowed, and the
+    /// one honest thing this app can say about it.
+    ///
+    /// "Didn't catch that" is true of a silent hold and a lie here: the engine
+    /// DID hear the user, the speech was 6–16 dB over the room, and no amount of
+    /// gain — live, retroactive, or in the batch rescue — puts back what the
+    /// microphone never separated (measured: normalizing the 14 dB rung recovers
+    /// 0.26 pt of a 3.9 pt WER loss). Speaking up or moving closer is the whole
+    /// remedy, and the copy names the one of the two that fits: the pill's
+    /// alarm-state budget is 40 characters (`PillGeometry.errorMessageCharacters`
+    /// — 2 × 12 pt inset + 40 × 6.5 pt of advance is the 288 pt cap), and a line
+    /// the frame cuts in half would lose the remedy rather than the diagnosis.
+    static let tooQuietMessage = "Heard you, but too faint — speak up"
+
+    /// The same miss when the system input slider is the readiest lever. Names
+    /// the number because that is what makes it findable in System Settings —
+    /// and REPLACES the line above rather than extending it, for the same
+    /// 40-character reason. Raising the slider buys level, not SNR, on a
+    /// built-in mic; what it buys that matters is classification margin, and a
+    /// meter that finally moves when the user speaks.
+    static func tooQuietMessage(inputVolumePercent percent: Int) -> String {
+        "Too faint — input volume is \(percent)%"
+    }
+
     /// Pill copy for an utterance that produced nothing.
     ///
     /// Silence and a clean miss are not faults — Flow fades; we name them
     /// quietly and leave. A starved mic, a crash or a timeout still alarm,
     /// because those are ours.
-    private func flashEmpty(_ reason: EmptyReason?) {
+    private func flashEmpty(_ reason: EmptyReason?, peakLevel: Float, noiseFloor: Double?) {
         switch reason {
         case .starved:
             flashError("Microphone delivered no audio")
         case .deviceChanged:
             flashError("Microphone changed — try again")
+        // Gated to `produced_nothing` deliberately, which is where the class
+        // lands anyway: `silent`/`short_hold` sit below the voiced threshold and
+        // can never be marginal, and the fault reasons have copy of their own
+        // that names something we did. A voiced empty with a healthy floor stays
+        // on the generic line — it was not faint, and saying it was would be the
+        // same untruth in the other direction.
+        case .producedNothing where MarginalAudio.isMarginal(peakLevel: peakLevel,
+                                                            noiseFloor: noiseFloor):
+            if let percent = config.inputVolumeAdvisory() {
+                pill?.flashTooQuiet(Self.tooQuietMessage(inputVolumePercent: percent))
+            } else {
+                pill?.flashTooQuiet(Self.tooQuietMessage)
+            }
         case .silent, .producedNothing, .none:
             pill?.flashMissed("Didn't catch that")
         case .shortHold:
@@ -1342,7 +1387,20 @@ public final class SessionController: @unchecked Sendable {
             // of all, which is the shape the 2026-08-05 log could not express.
             // Omitted when false: the append-only stream never grows a byte on
             // the overwhelming majority of rows.
-            configChanged: result.sawConfigurationChange ? true : nil))
+            configChanged: result.sawConfigurationChange ? true : nil,
+            // Every utterance row, not just the empty ones — and deliberately
+            // wider than the pill copy, which only fires on `produced_nothing`.
+            // The interesting number is how often marginal audio still SUCCEEDS:
+            // that ratio is what says whether the 0.12/5 thresholds describe the
+            // failure class or merely a quiet room.
+            marginalAudio: MarginalAudio.isMarginal(peakLevel: result.peakLevel,
+                                                    noiseFloor: noiseFloor) ? true : nil,
+            // The rescue's own pair. `rescue_normalized` appears on declined
+            // rescues too (see `UtteranceResult.rescueGainDb`), so the rate of
+            // amplification stays readable independently of whether the batch
+            // reading won.
+            rescueNormalized: result.rescueGainDb != nil ? true : nil,
+            appliedGainDb: result.rescueGainDb))
     }
 
     // MARK: - level ticker

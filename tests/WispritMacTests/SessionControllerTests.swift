@@ -54,6 +54,7 @@ final class SessionControllerTests: XCTestCase {
              // per install.
              releaseGrace: TimeInterval = 0,
              inputWarning: @escaping @Sendable () -> String? = { nil },
+             inputVolumeAdvisory: @escaping @Sendable () -> Int? = { nil },
              // Swap in a different pill for the tests whose subject is what the
              // bubble renders rather than which calls it received.
              pillPort: (any PillPort)? = nil) {
@@ -86,7 +87,8 @@ final class SessionControllerTests: XCTestCase {
                     vocabularyRetro: { vocabularyRetro },
                     expandSnippets: expandSnippets,
                     releaseGrace: releaseGrace,
-                    inputWarning: inputWarning))
+                    inputWarning: inputWarning,
+                    inputVolumeAdvisory: inputVolumeAdvisory))
             inserter.deferredLabel = { [weak session] in session?.deferredLabel }
         }
 
@@ -437,6 +439,111 @@ final class SessionControllerTests: XCTestCase {
             XCTAssertEqual(h.pill.errors, c.error.map { [$0] } ?? [], "\(c.reason)")
             XCTAssertEqual(h.pill.notices, c.notice.map { [$0] } ?? [], "\(c.reason)")
         }
+    }
+
+    // MARK: - marginal audio (2026-08-15)
+
+    /// The production failure class, end to end: peak 0.04 over a 0.0146 floor
+    /// is ~9 dB of SNR, the band where measured WER triples — and "Didn't catch
+    /// that" is a lie about it. The engine DID catch it; the room was louder.
+    func testAMarginalAudioMissSaysWhatIsActuallyWrong() {
+        let h = Harness()
+        h.audio.noiseFloorValue = 0.0146
+        h.asr.result = UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40,
+                                       peakLevel: 0.0398, producedNothing: true)
+
+        h.utterance(heldSeconds: 2.0)
+
+        XCTAssertEqual(h.pill.notices, [SessionController.tooQuietMessage])
+        XCTAssertTrue(h.pill.snapshot().contains("flashTooQuiet"),
+                      "its own pill state: the copy is an instruction, not a label")
+        XCTAssertEqual(h.pill.errors, [], "a quiet room is not a fault of ours")
+        XCTAssertEqual(h.metrics.last?.emptyReason, EmptyReason.producedNothing.rawValue,
+                       "the reason vocabulary is unchanged — this is a second fact, not a new case")
+        XCTAssertEqual(h.metrics.last?.marginalAudio, true)
+    }
+
+    /// One line per device, and only when the slider is the readiest lever.
+    /// After that the base copy stands: the number is a fact about the setup,
+    /// not a thing to repeat at someone every time they speak softly.
+    func testTheInputVolumeAdvisoryIsSaidOnceAndThenTheBaseCopyStands() {
+        // The one-shot discipline lives in `InputVolumeAdvisor` and is tested
+        // there; here the port stands in for it, so this test is about the copy
+        // the session chooses on each of the two answers.
+        let advisories = Recorder<Int>()
+        let h = Harness(inputVolumeAdvisory: {
+            guard advisories.values.isEmpty else { return nil }
+            advisories.append(51)
+            return 51
+        })
+        h.audio.noiseFloorValue = 0.012
+        h.asr.result = UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40,
+                                       peakLevel: 0.05, producedNothing: true)
+
+        h.utterance(heldSeconds: 2.0)
+        h.utterance(heldSeconds: 2.0)
+
+        XCTAssertEqual(h.pill.notices,
+                       [SessionController.tooQuietMessage(inputVolumePercent: 51),
+                        SessionController.tooQuietMessage])
+        XCTAssertLessThanOrEqual(SessionController.tooQuietMessage(inputVolumePercent: 51).count, 40,
+                                 "the pill's alarm-state budget — copy the frame cuts is copy nobody reads")
+        XCTAssertLessThanOrEqual(SessionController.tooQuietMessage.count, 40)
+    }
+
+    /// A voiced empty well clear of the room floor is NOT faint, and saying so
+    /// would be the same untruth in the other direction. Same for an utterance
+    /// too short to have a floor at all — `MicCapture` needs three chunks, and a
+    /// fumbled tap must not be diagnosed from a floor nobody measured.
+    func testAHealthyFloorOrNoFloorKeepsTheGenericCopy() {
+        for floor: Double? in [0.002, nil] {
+            let h = Harness()
+            h.audio.noiseFloorValue = floor
+            h.asr.result = UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40,
+                                           peakLevel: 0.05, producedNothing: true)
+
+            h.utterance(heldSeconds: 2.0)
+
+            XCTAssertEqual(h.pill.notices, ["Didn't catch that"], "floor \(String(describing: floor))")
+            XCTAssertNil(h.metrics.last?.marginalAudio, "omitted, not false")
+        }
+    }
+
+    /// The telemetry is deliberately wider than the copy: a marginal utterance
+    /// that SUCCEEDS is the row that says whether these thresholds describe the
+    /// failure class or merely a quiet room.
+    func testMarginalAudioIsFlaggedOnDeliveredRowsToo() {
+        let h = Harness()
+        h.audio.noiseFloorValue = 0.012
+        h.asr.result = UtteranceResult(text: "it got through anyway", engine: "apple_live",
+                                       finalizeMs: 90, peakLevel: 0.05)
+
+        h.utterance(heldSeconds: 2.0)
+
+        XCTAssertEqual(h.inserter.inserted, ["it got through anyway"])
+        XCTAssertEqual(h.metrics.last?.marginalAudio, true)
+        XCTAssertEqual(h.pill.notices, [], "nothing to say — the user got their words")
+    }
+
+    /// The rescue's own pair reaches the row, rounded like every other number.
+    func testTheRescueNormalizationReachesTheMetricsRow() {
+        let h = Harness()
+        h.asr.result = UtteranceResult(text: "recovered words", engine: "apple_batch",
+                                       finalizeMs: 900, peakLevel: 0.06,
+                                       producedNothing: true, rescued: true,
+                                       rescueGainDb: 18.416)
+
+        h.utterance()
+
+        XCTAssertEqual(h.metrics.last?.rescueNormalized, true)
+        XCTAssertEqual(h.metrics.last?.appliedGainDb ?? 0, 18.416, accuracy: 1e-6)
+
+        let plain = Harness()
+        plain.asr.result = UtteranceResult(text: "ordinary", engine: "apple_live",
+                                           finalizeMs: 80, peakLevel: 0.5)
+        plain.utterance()
+        XCTAssertNil(plain.metrics.last?.rescueNormalized, "omitted, not false")
+        XCTAssertNil(plain.metrics.last?.appliedGainDb)
     }
 
     func testTextThatSurvivesAsrButNotTheCleanupHasNoEmptyReason() {

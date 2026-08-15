@@ -400,6 +400,13 @@ final class FakePill: PillPort, @unchecked Sendable {
     func flashMissed(_ message: String) {
         lock.lock(); notices.append(message); calls.append("flashMissed"); lock.unlock()
     }
+    /// Recorded as its own call, like `blockedSecure`: the marginal-audio miss
+    /// has its own copy, width and dwell, and a test that could not tell it from
+    /// a generic miss would be asserting the wrong half of the contract. The
+    /// copy still lands in `notices`, where every non-alarm line lives.
+    func flashTooQuiet(_ message: String) {
+        lock.lock(); notices.append(message); calls.append("flashTooQuiet"); lock.unlock()
+    }
     func hide() { record("hide") }
     func showIdle() { record("showIdle") }
 

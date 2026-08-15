@@ -70,9 +70,7 @@ final class AsrEngineProtocolTests: XCTestCase {
         let engine = FakeAsrEngine(script: .init(partials: ["Hi", "Hi there"]))
         let box = Collected()
         _ = await engine.begin { box.addSync($0) }
-        try? await Task.sleep(nanoseconds: 30_000_000)
-        let seen = await box.all()
-        XCTAssertEqual(seen, ["Hi", "Hi there"])
+        XCTAssertEqual(box.all(), ["Hi", "Hi there"])
     }
 
     func testFinalizeTextConvenienceMirrorsResultText() async {
@@ -418,9 +416,12 @@ struct StubVocabulary: VocabularySource {
     }
 }
 
-actor Collected {
+/// Records callback invocations in arrival order. Lock-based, not an actor:
+/// hopping each value onto an actor with a detached Task records hop-completion
+/// order, which is neither the arrival order nor bounded by any fixed sleep.
+final class Collected: @unchecked Sendable {
+    private let lock = UnfairLock()
     private var items: [String] = []
-    nonisolated func addSync(_ s: String) { Task { await self.add(s) } }
-    func add(_ s: String) { items.append(s) }
-    func all() -> [String] { items }
+    func addSync(_ s: String) { lock.withLock { items.append(s) } }
+    func all() -> [String] { lock.withLock { items } }
 }

@@ -116,6 +116,95 @@ public enum PcmFormat {
         min(1.0, Float(meanSquare.squareRoot()) * 4.0)
     }
 
+    /// Loudest 100 ms chunk of a whole utterance, on the meter's scale — the
+    /// same statistic `UtteranceResult.peakLevel` and the `peak_level` metrics
+    /// field carry, computed offline over retained PCM instead of live over the
+    /// tap. It has to be the same one: the rescue gate below compares against
+    /// the engine's live number, and two different definitions of "peak" would
+    /// make that comparison meaningless.
+    public static func peakLevel(of pcm: Data) -> Float {
+        split(pcm).reduce(0) { max($0, level(of: $1)) }
+    }
+
+    // MARK: - rescue-path normalization
+
+    /// What `normalized(_:)` aims the loudest chunk at. 0.5 rather than 1.0:
+    /// measured, the re-normalized quiet corpora (peak 0.06/0.03/0.015 → 0.5)
+    /// scored 1.63 / 1.46 / 1.55 % WER against a 1.72 % control, and leaving
+    /// 6 dB of headroom is what keeps the per-sample clamp below from having
+    /// anything to do on ordinary speech.
+    public static let normalizationTargetPeak: Float = 0.5
+
+    /// 30 dB. Above this the "signal" being amplified is room tone: the level
+    /// experiment's deepest rung (peak 0.015, 1.5× the voiced threshold) needs
+    /// 30.5 dB to reach 0.5, and everything quieter than that is noise wearing
+    /// speech's shape.
+    public static let maximumNormalizationGain: Float = 31.6
+
+    /// Below this a normalization is not worth performing. Two reasons, and the
+    /// second is the load-bearing one: (1) 0.4 dB cannot change a transcript —
+    /// the engine is level-invariant across a 36 dB span (1.72 % → 2.15 % WER
+    /// from peak 1.0 to 0.015); (2) without a deadband the operation is not
+    /// idempotent, because scaled Int16 samples re-measure a hair either side of
+    /// the target and a second pass would rewrite the buffer by ±1 LSB.
+    static let minimumUsefulGain: Float = 1.05
+
+    /// The gain `normalized(_:targetPeak:)` would apply — 1 means "leave it
+    /// alone", which is the answer for empty audio, for silence, and for
+    /// anything already at or above the target.
+    ///
+    /// The silence exemption is the b0a763f rule reaching down to the sample
+    /// level: a hold nobody spoke into must stay a hold nobody spoke into, and
+    /// amplifying room tone by 30 dB is the one way to turn it into something
+    /// a recognizer will invent words from.
+    public static func normalizationGain(of pcm: Data,
+                                         targetPeak: Float = normalizationTargetPeak) -> Float {
+        guard !pcm.isEmpty else { return 1 }
+        let peak = peakLevel(of: pcm)
+        guard peak >= SpeechAnalyzerEngine.voicedPeakThreshold else { return 1 }
+        let gain = min(targetPeak / peak, maximumNormalizationGain)
+        return gain >= minimumUsefulGain ? gain : 1
+    }
+
+    /// Peak-normalize a whole utterance for the batch rescue.
+    ///
+    /// MEASURED CEILING, so nobody re-litigates this as an accuracy lever: on
+    /// 60 LibriSpeech clips, normalizing quantized-quiet audio back to 0.5
+    /// recovers ~0.6 pt of WER at peak 0.015 and ~0.3 pt at the peak 0.06 the
+    /// user's telemetry actually shows — and ~0.26 pt of a 3.9 pt loss when the
+    /// quiet speech sits over a real noise floor, because gain amplifies the
+    /// floor identically. It is worth its five lines on a path that only runs
+    /// after the streaming engine already failed. It is not worth a live stage:
+    /// the information is gone at the microphone.
+    public static func normalized(_ pcm: Data,
+                                  targetPeak: Float = normalizationTargetPeak) -> Data {
+        let gain = normalizationGain(of: pcm, targetPeak: targetPeak)
+        guard gain > 1 else { return pcm }
+        return scaled(pcm, by: gain)
+    }
+
+    /// Int16 samples × `gain`, saturating at full scale.
+    ///
+    /// The clamp is not decoration: a chunk whose crest factor exceeds 8× its
+    /// RMS reaches full scale before its metered level does, because the meter
+    /// is RMS×4. Measured harmless on the normalization rungs (their WER is at
+    /// or under the control's), and saturating is in any case the only
+    /// alternative to wrapping — an Int16 overflow would turn a loud syllable
+    /// into a click the recognizer has to eat.
+    static func scaled(_ pcm: Data, by gain: Float) -> Data {
+        let count = pcm.count / bytesPerFrame
+        guard count > 0 else { return pcm }
+        var out = [Int16](repeating: 0, count: count)
+        pcm.withUnsafeBytes { raw in
+            let p = raw.bindMemory(to: Int16.self)
+            for i in 0..<count {
+                let v = (Float(Int16(littleEndian: p[i])) * gain).rounded()
+                out[i] = Int16(max(-32_768, min(32_767, v))).littleEndian
+            }
+        }
+        return out.withUnsafeBufferPointer { Data(buffer: $0) }
+    }
+
     // MARK: - internals
 
     private static func rawInt16Data(from buffer: AVAudioPCMBuffer) -> Data {

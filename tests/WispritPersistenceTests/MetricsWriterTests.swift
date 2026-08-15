@@ -305,6 +305,42 @@ final class MetricsWriterTests: XCTestCase {
         XCTAssertFalse(without.contains("config_changed"), "omitted, not null")
     }
 
+    // MARK: the quiet-speech trio (2026-08-15)
+
+    /// `marginal_audio` / `rescue_normalized` / `applied_gain_db` append after
+    /// `config_changed` — the previous tail — in that order, and vanish when
+    /// absent. The append-only rule once more: every row an earlier build could
+    /// have written stays a byte-for-byte prefix of this schema.
+    func testTheQuietSpeechTrioAppendsLastAndOmitsWhenAbsent() throws {
+        let with = MetricsRecord(
+            ts: 1.0, heldMs: 2.0, engine: "apple_live", finalizeMs: 3.0, timedOut: false,
+            postMs: 4.0, insertMs: 5.0, outcome: "empty", chars: 0,
+            emptyReason: "produced_nothing",
+            peakLevel: 0.0398, audioMs: 1000, rawChars: 0,
+            noiseFloor: 0.0146, firstVoicedMs: 181.27,
+            configChanged: true,
+            marginalAudio: true, rescueNormalized: true, appliedGainDb: 22.045)
+        guard case .object(let object) = try WispritJSON.parse(with.jsonLine()) else {
+            return XCTFail("not an object")
+        }
+        XCTAssertEqual(Array(object.keys.suffix(4)),
+                       ["config_changed", "marginal_audio", "rescue_normalized",
+                        "applied_gain_db"],
+                       "strictly after every key that predates them, in on-disk order")
+        XCTAssertEqual(object["marginal_audio"], .bool(true))
+        XCTAssertEqual(object["rescue_normalized"], .bool(true))
+        XCTAssertEqual(object["applied_gain_db"], .double(22.0), "round1, like every other number")
+
+        let without = MetricsRecord(
+            ts: 1785872035.681684, heldMs: 1468.75, engine: "apple_live",
+            finalizeMs: 1500.9, timedOut: false, postMs: 0.0, insertMs: 0.0,
+            outcome: "empty", chars: 0).jsonLine()
+        XCTAssertEqual(without, Golden.metricsLegacyEmptyRow)
+        for key in ["marginal_audio", "rescue_normalized", "applied_gain_db"] {
+            XCTAssertFalse(without.contains(key), "\(key) must be omitted, not null")
+        }
+    }
+
     /// It rides rows WITH text too: a mid-utterance switch truncates silently,
     /// and that row is the one worth counting.
     func testConfigChangedRidesADeliveredRow() throws {

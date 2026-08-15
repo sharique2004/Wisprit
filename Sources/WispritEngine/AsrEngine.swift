@@ -65,17 +65,30 @@ public struct UtteranceResult: Sendable, Equatable {
     /// construction site (the eval runner, the fakes, `rescue()`) still compiles
     /// and still means what it did.
     public var sawConfigurationChange: Bool
+    /// How much gain the rescue's peak normalization applied before the batch
+    /// engine read the audio, in dB — nil when it did not normalize at all,
+    /// which is every path except a quiet-but-voiced rescue (2026-08-15).
+    ///
+    /// It rides the result rather than the metrics call site because the
+    /// decision is made inside `AsrManager.rescue`, where nothing else can see
+    /// it, and because the rate of this class is exactly what says whether the
+    /// normalization is buying anything in production. Set even when the
+    /// rescue's text is DECLINED: the question the field answers is "how often
+    /// did we have to amplify", not "how often did amplifying win".
+    public var rescueGainDb: Double?
 
     public init(text: String, engine: String, finalizeMs: Double,
                 timedOut: Bool = false, crashed: Bool = false,
                 starvedInput: Bool = false, peakLevel: Float = 0,
                 producedNothing: Bool = false, rescued: Bool = false,
-                sawConfigurationChange: Bool = false) {
+                sawConfigurationChange: Bool = false,
+                rescueGainDb: Double? = nil) {
         self.text = text; self.engine = engine; self.finalizeMs = finalizeMs
         self.timedOut = timedOut; self.crashed = crashed
         self.starvedInput = starvedInput; self.peakLevel = peakLevel
         self.producedNothing = producedNothing; self.rescued = rescued
         self.sawConfigurationChange = sawConfigurationChange
+        self.rescueGainDb = rescueGainDb
     }
 }
 

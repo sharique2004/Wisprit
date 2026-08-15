@@ -93,6 +93,20 @@ public struct MetricsRecord: Sendable {
     // mid-utterance switch truncates silently, and that is the shape worth
     // counting.
     public var configChanged: Bool?
+    // 2026-08-15, the quiet-speech trio. Utterance rows only, each omitted
+    // unless it has something to say, so an ordinary loud dictation's row does
+    // not grow a byte.
+    //
+    /// Voiced audio the room nearly swallowed: `peak_level` under 0.12 with
+    /// `peak_level / noise_floor` under 5 (≈14 dB). The rate of THIS is the
+    /// series to watch — it is the class the 3.2× WER penalty lives in, and the
+    /// one no gain stage can fix.
+    public var marginalAudio: Bool?
+    /// The batch rescue read a peak-normalized copy of the retained audio.
+    public var rescueNormalized: Bool?
+    /// …by this much, in dB. Two fields rather than one on purpose: the flag
+    /// counts the rows, the number says how far the audio had to be dragged.
+    public var appliedGainDb: Double?
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
@@ -110,7 +124,10 @@ public struct MetricsRecord: Sendable {
                 relaunches: Int? = nil,
                 vocabRefusal: String? = nil, rung: String? = nil,
                 applyDetail: String? = nil,
-                configChanged: Bool? = nil) {
+                configChanged: Bool? = nil,
+                marginalAudio: Bool? = nil,
+                rescueNormalized: Bool? = nil,
+                appliedGainDb: Double? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -148,6 +165,9 @@ public struct MetricsRecord: Sendable {
         self.rung = rung
         self.applyDetail = applyDetail
         self.configChanged = configChanged
+        self.marginalAudio = marginalAudio
+        self.rescueNormalized = rescueNormalized
+        self.appliedGainDb = appliedGainDb
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -209,6 +229,13 @@ public struct MetricsRecord: Sendable {
         // every row any earlier build could have written, so those stay
         // byte-for-byte prefixes of this schema.
         if let configChanged { entry["config_changed"] = .bool(configChanged) }
+        // The quiet-speech trio (2026-08-15), after every key above — the
+        // append-only rule once more, and the last three keys any reader of this
+        // stream has to know about. Absent from every row an earlier build could
+        // have written, so those stay byte-for-byte prefixes of this schema.
+        if let marginalAudio { entry["marginal_audio"] = .bool(marginalAudio) }
+        if let rescueNormalized { entry["rescue_normalized"] = .bool(rescueNormalized) }
+        if let appliedGainDb { entry["applied_gain_db"] = .double(MetricsWriter.round1(appliedGainDb)) }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -260,6 +287,11 @@ public enum MetricsField {
     public static let applyDetail = "apply_detail"
     /// The audio hardware reconfigured mid-utterance (2026-08-15).
     public static let configChanged = "config_changed"
+    // The quiet-speech trio (2026-08-15). Session-written `MetricsRecord`
+    // fields; named here so readers share one vocabulary with the writer.
+    public static let marginalAudio = "marginal_audio"
+    public static let rescueNormalized = "rescue_normalized"
+    public static let appliedGainDb = "applied_gain_db"
 }
 
 public final class MetricsWriter: @unchecked Sendable {
@@ -349,7 +381,10 @@ public final class MetricsWriter: @unchecked Sendable {
 
     /// Same rule at four decimals, for `peak_level`. The level is a `Float`
     /// widened to `Double`, so it arrives as 0.03700000047683716; four decimals
-    /// is finer than the 0.02 voiced threshold needs and keeps the line short.
+    /// is finer than the 0.01 voiced threshold needs (it was written against an
+    /// earlier 0.02 and the comment outlived it) and keeps the line short. The
+    /// resolution matters now that `noise_floor` shares the rounder: the
+    /// marginal-audio ratio divides two of these.
     static func round4(_ x: Double) -> Double {
         guard x.isFinite, x.magnitude < 1e11 else { return x }
         return Double(String(format: "%.4f", x)) ?? x
