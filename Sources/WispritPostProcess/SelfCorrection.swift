@@ -55,12 +55,22 @@
 // closed-class items of DIFFERENT classes the correction does not type-check
 // ("Thursday no actually 3 o'clock" — you cannot correct a weekday into a
 // time), which is the definition of ambiguous, so the joint passes verbatim
-// and no other rule gets a second look at it. The one marker exempt from that
-// veto is "no wait": its behavior is a Python-parity contract pinned by
-// `Goldens.swift`, so it keeps deleting whatever it is handed — inside the
-// parity domain. Python's comma-only gap never crossed a sentence terminator,
-// so across one (which this engine now permits for the "no"-anchored markers)
-// "no wait" obeys the same vetoes as "no actually".
+// and no other rule gets a second look at it. The one marker still largely
+// exempt from that veto is "no wait": its span is a Python-parity contract
+// pinned by `Goldens.swift`, so inside the parity domain it keeps deleting
+// what it is handed. Python's comma-only gap never crossed a sentence
+// terminator, so across one (which this engine now permits for the
+// "no"-anchored markers) "no wait" obeys the same vetoes as "no actually".
+//
+// PARITY SUPERSEDED, measured. The blanket exemption was wrong on the LITERAL
+// "no wait" — the noun phrase, not the interjection. Two shapes were measured
+// through the shipping pipeline and both lost a word: "There is no wait at the
+// DMV." -> "There at the DMV." and "The clinic has no wait time today." ->
+// "The clinic time today." Python deleted those too, so this is a bug the port
+// inherited rather than a divergence the port introduced, and parity is not a
+// reason to keep shipping it. The exemption now carries two literal-use
+// vetoes (`noWaitLiteralLeaders`, `noWaitObjectWords`) and is otherwise
+// unchanged; every parity golden that exercises the interjection still holds.
 
 import Foundation
 
@@ -111,10 +121,8 @@ public enum SelfCorrection {
         // it gets first claim on the span. See `possessivePairRx`.
         var text = possessivePairRx.replacingAll(in: text, with: "$2")
         text = correctJoints(text)
-        // "scratch that" — keep only what follows the LAST occurrence (greedy).
-        if scratchProbeRx.matches(text) {
-            text = scratchRx.replacingAll(in: text, with: "")
-        }
+        // "scratch that" — keep only what follows the last DIRECTIVE occurrence.
+        text = applyScratch(text)
         // Repeat until stable so "to to to" fully collapses.
         while true {
             let collapsed = dupRx.replacingAll(in: text, with: "$1")
@@ -122,6 +130,60 @@ public enum SelfCorrection {
             text = collapsed
         }
         return text
+    }
+
+    /// "scratch that" — delete everything through the LAST occurrence that is
+    /// actually the directive, and keep the text after it.
+    ///
+    /// The Python rule was one greedy `^.*scratch that` substitution with no
+    /// guard at all, which is fine for the imperative ("draft the email scratch
+    /// that write the memo") and catastrophic for the transitive verb, where
+    /// "that" is a determiner introducing the object rather than the marker's
+    /// pronoun. Measured through the shipping pipeline: "Don't scratch that
+    /// itch, it'll get worse." -> "itch, it'll get worse.", i.e. the sentence
+    /// lost its subject, its verb and its negation.
+    ///
+    /// The guard is a lookback, not a lookahead, because a lookahead cannot
+    /// work: a genuine directive is followed by arbitrary content, including
+    /// the content words a determiner reading would predict ("scratch that
+    /// today", "scratch that write the memo" — both pinned goldens). What the
+    /// two readings do NOT share is what stands in FRONT of the verb. The
+    /// directive is an imperative, so it opens the utterance or follows the
+    /// clause it retracts; the transitive reading needs a negation, a modal, an
+    /// infinitive "to" or a nominative subject to license it, and none of those
+    /// can end a retracted clause. See `scratchLiteralLeaders`.
+    static func applyScratch(_ text: String) -> String {
+        guard scratchProbeRx.matches(text) else { return text }
+        let ns = text as NSString
+        var cut: Int?
+        for m in scratchRx.allMatches(text, ns)
+        where isScratchDirective(at: m.range.location, ns) {
+            cut = m.range.location + m.range.length
+        }
+        guard let cut else { return text }
+        return ns.substring(from: cut)
+    }
+
+    private static func isScratchDirective(at start: Int, _ ns: NSString) -> Bool {
+        // Nothing in front of it (or only fillers/punctuation) is the purest
+        // imperative there is.
+        guard let leader = wordBefore(ns, start) else { return true }
+        return !scratchLiteralLeaders.contains(leader)
+    }
+
+    /// Comparison form of the last non-filler word before `index`, nil when the
+    /// text in front of it holds no word at all.
+    private static func wordBefore(_ ns: NSString, _ index: Int) -> String? {
+        var i = min(index, ns.length)
+        while i > 0 {
+            while i > 0, isWhitespace(ns.character(at: i - 1)) { i -= 1 }
+            guard i > 0 else { return nil }
+            let end = i
+            while i > 0, !isWhitespace(ns.character(at: i - 1)) { i -= 1 }
+            let word = comparisonForm(ns.substring(with: NSRange(location: i, length: end - i)))
+            if !word.isEmpty, !fillerSet.contains(word) { return word }
+        }
+        return nil
     }
 
     /// One left-to-right sweep over the correction joints. The cursor only ever
@@ -203,7 +265,8 @@ public enum SelfCorrection {
         // closed-class Y, otherwise right after the marker's trailing gap.
         let bStart = y.location == NSNotFound ? matchEnd : y.location
         let crossed = terminatorCount(ns, from: xEnd, to: bStart)
-        guard isCorrection(marker, x, ns, xClass, yClass, crossed: crossed) else { return nil }
+        guard isCorrection(marker, x, ns, xClass, yClass, crossed: crossed,
+                           bStart: bStart) else { return nil }
         if let aStart = restartStart(x, bStart: bStart, ns, floor: cursor) {
             return .restart(aStart: aStart, bStart: bStart)
         }
@@ -211,13 +274,54 @@ public enum SelfCorrection {
         // a clause opener after "No," is a denial of the previous sentence,
         // not a replacement ("I finished the report. No, actually I think we
         // should celebrate." stays verbatim).
+        //
+        // …and it may only replace with a bare FRAGMENT. The single-word span
+        // reaches back into the PREVIOUS sentence and deletes its last word, so
+        // when the text after the marker is itself a whole clause the edit
+        // fuses two sentences into garbage rather than correcting anything:
+        // "I finished the report. No, actually Jane finished it." measured as
+        // "I finished the Jane finished it." The restart tier above is the
+        // mechanism for a re-stated CLAUSE and it already declined this one
+        // (the clauses share no re-beginning — "finished" appears in both, but
+        // an incidentally shared verb is not evidence of a restart, only a
+        // shared opening is). What is left for the span is the shape it was
+        // measured to get right — a replacement noun phrase standing alone
+        // after the marker, "…to Viveque. No, actually, Shariq." — so the span
+        // now requires that shape as its evidence and passes everything else
+        // through verbatim. See `isReplacementFragment`.
         if crossed > 0 {
-            guard let head = restartTokens(ns, from: bStart, to: ns.length,
-                                           stopAtSentenceEnd: true, limit: 1).first,
-                  !hedgeLeaders.contains(head.text) else { return nil }
+            let b = restartTokens(ns, from: bStart, to: ns.length,
+                                  stopAtSentenceEnd: true, limit: fragmentWindow + 1)
+            guard let head = b.first, !hedgeLeaders.contains(head.text) else { return nil }
+            guard isReplacementFragment(b) else { return nil }
         }
         return .span
     }
+
+    /// Whether the tokens after a cross-terminator marker are a replacement
+    /// noun phrase rather than a new clause: one bare token ("Shariq.",
+    /// "production."), or two whose first opens a noun phrase ("the footer",
+    /// "next quarter"). Anything longer, or a two-token pair that starts with
+    /// its own subject ("Jane finished"), is prose the span must not touch.
+    ///
+    /// Deliberately shape evidence rather than token evidence: a shared token
+    /// between the two clauses is NOT usable here, because the false-fire that
+    /// motivated the rule shares one ("…the report. No, actually Jane finished
+    /// it."). Phonetic evidence — the mishear-restatement channel — would be
+    /// the natural third signal, but `WispritPostProcess` depends on
+    /// `WispritKit` alone (Package.swift), so `WispritCorrections`'
+    /// DoubleMetaphone is out of reach and a second copy of it is not worth a
+    /// case the shape rule already covers.
+    private static func isReplacementFragment(_ b: [(start: Int, text: String)]) -> Bool {
+        switch b.count {
+        case 1: return true
+        case 2: return fragmentOpeners.contains(b[0].text)
+        default: return false
+        }
+    }
+
+    /// Upper bound, in words, on a cross-terminator replacement fragment.
+    static let fragmentWindow = 2
 
     private enum Repair {
         case restart(aStart: Int, bStart: Int)
@@ -227,7 +331,8 @@ public enum SelfCorrection {
     /// Whether a general marker may correct at this joint at all. `crossed` is
     /// the number of sentence terminators between X and B.
     private static func isCorrection(_ marker: GeneralMarker, _ x: NSRange, _ ns: NSString,
-                                     _ xClass: Int?, _ yClass: Int?, crossed: Int) -> Bool {
+                                     _ xClass: Int?, _ yClass: Int?, crossed: Int,
+                                     bStart: Int) -> Bool {
         // Sentence-boundary veto, narrowed by anchor. The "no"-anchored
         // markers may cross ONE terminator: the recognizer routinely
         // punctuates the pause before a correction ("Vivek. No, actually …"),
@@ -244,7 +349,28 @@ public enum SelfCorrection {
         // but the parity domain is what Python could match, and that never
         // crossed a terminator. Inside it, "no wait" keeps deleting whatever
         // it is handed; across one, it obeys the same vetoes as "no actually".
-        if marker == .noWait, crossed == 0 { return true }
+        //
+        // Minus the LITERAL reading, which parity does not protect: "no wait"
+        // is also an ordinary noun phrase, and there the "no" is a determiner
+        // on "wait", not an interjection. Two high-precision signals, both
+        // measured on the false fires in the header note, and both of them
+        // shapes the interjection cannot take:
+        //   * the word the span would delete is a copula / possession verb /
+        //     preposition ("there IS no wait", "the clinic HAS no wait") — the
+        //     interjection replaces the content word it follows, and a
+        //     correction never replaces "is";
+        //   * "wait" carries a noun continuation ("no wait TIME", "no wait AT
+        //     the DMV") — the interjection is a complete utterance, so what
+        //     follows it is the replacement, never the phrase's own tail.
+        // "…to Bob no wait to Alice" and "…three no wait four pm" are untouched
+        // by both: "Bob"/"three" are content, and "to"/"four" are not tails.
+        if marker == .noWait, crossed == 0 {
+            if xClass == nil, noWaitLiteralLeaders.contains(leaderWord(x, ns)) { return false }
+            if let after = restartTokens(ns, from: bStart, to: ns.length,
+                                         stopAtSentenceEnd: true, limit: 1).first,
+               noWaitObjectWords.contains(after.text) { return false }
+            return true
+        }
         // Cross-class veto — tier (a) looked at this joint and refused it.
         if xClass != nil, yClass != nil { return false }
         // Discourse-hedge veto: "no actually" and "I mean" are also ordinary
@@ -252,13 +378,16 @@ public enum SelfCorrection {
         // that's fine", "what I mean is …"). A correction replaces a CONTENT
         // word, so a function word or interjection in front of the marker means
         // the user is talking, not correcting.
-        if xClass == nil {
-            let start = lastTokenStart(x, ns)
-            let leader = ns.substring(with: NSRange(location: start,
-                                                   length: x.location + x.length - start))
-            if hedgeLeaders.contains(leader.lowercased()) { return false }
-        }
+        if xClass == nil, hedgeLeaders.contains(leaderWord(x, ns)) { return false }
         return true
+    }
+
+    /// The lowercased last token of X — the single word a tier (b) span would
+    /// delete, even when the pattern matched a multi-token closed-class item.
+    private static func leaderWord(_ x: NSRange, _ ns: NSString) -> String {
+        let start = lastTokenStart(x, ns)
+        return ns.substring(with: NSRange(location: start,
+                                          length: x.location + x.length - start)).lowercased()
     }
 
     /// The clause-restart evidence check: start of the deleted span when the
@@ -441,11 +570,40 @@ private let weekdayPattern = alternation([
     "saterday", "satuday", "sundy",
 ])
 
-private let monthPattern = alternation([
-    "january", "february", "march", "april", "may", "june", "july",
+// Months, split by ambiguity. The unambiguous names are not English words, so
+// they are matched case-insensitively like every other class.
+private let unambiguousMonthPattern = alternation([
+    "january", "february", "april", "june", "july",
     "august", "september", "october", "november", "december",
-    "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sept", "sep", "oct", "nov", "dec",
+    "jan", "feb", "apr", "jun", "jul", "aug", "sept", "sep", "oct", "nov", "dec",
 ])
+
+// "may", "march" and "mar" are also a modal and two verbs, and the class list
+// is what tier (a) uses to decide that BOTH sides of a connective are the same
+// kind of thing — so a bare lowercase "may" made every "<verb> actually <verb>"
+// sentence look like a month correction. Measured: "He may actually march in
+// the parade." -> "He march in the parade.", a sentence with no correction in
+// it at all losing its modal.
+//
+// Month sense therefore has to be evidenced, and dictated text carries exactly
+// two cheap signals for it:
+//   * capitalization. The recognizer capitalizes a month and lowercases the
+//     modal, so `(?-i:…)` (an inline ICU flag, since the compiled pattern is
+//     case-insensitive as a whole) is the discriminator. Sentence-initial "May
+//     I …" is capitalized too, but tier (a) needs a same-class item on the
+//     OTHER side of the connective as well, which no modal reading supplies;
+//   * an adjacent day or year number ("march 5", "may 2026") — the date shape,
+//     which the verb reading does not have.
+// Everything else stays a plain word. The pinned pairs are unaffected:
+// "March. Sorry, April." and "May no June" are both capitalized.
+// ("MAR" is left out of the shouted forms on purpose: a three-letter all-caps
+// token is an acronym far more often than a shouted month abbreviation.)
+private let ambiguousMonthPattern = "(?:(?-i:"
+    + alternation(["March", "May", "Mar", "MARCH", "MAY"]) + ")|"
+    + alternation(["march", "may", "mar"])
+    + "(?=\\s+(?:\\d{1,2}(?:st|nd|rd|th)?|\\d{4})(?![\\w-])))"
+
+private let monthPattern = "(?:" + unambiguousMonthPattern + "|" + ambiguousMonthPattern + ")"
 
 private let relativeDayPattern = alternation(["today", "tonight", "tomorrow", "yesterday"])
 
@@ -557,15 +715,79 @@ private let possessivePairRx = Rx(
         + "(?:" + markerPhrases.map(\.pattern).joined(separator: "|") + ")" + gap
         + "(" + datePossessive + "\\s+\\1)(?![\\w'-])")
 
-// "scratch that" — keep only what follows the LAST occurrence (greedy).
-private let scratchRx = Rx(#"^.*\bscratch\s+that\b[,.]?\s*"#,
+// "scratch that" — one occurrence, guarded by `SelfCorrection.applyScratch`,
+// which walks every match and cuts at the last DIRECTIVE one. (Python spelled
+// this as a single greedy `^.*scratch that` substitution; the cut point is the
+// same, the guard is what is new.)
+private let scratchRx = Rx(#"\bscratch\s+that\b[,.]?\s*"#,
                            [.caseInsensitive, .dotMatchesLineSeparators])
 private let scratchProbeRx = Rx(#"\bscratch\s+that\b"#)
+
+/// Words that make "scratch" the transitive verb and "that" its determiner:
+/// negations, modals, the infinitive "to" and nominative subjects. Each one
+/// licenses a verb phrase and none of them can END a retracted clause, which is
+/// what makes the lookback safe — "call him tomorrow scratch that today" and
+/// "draft the email scratch that write the memo" lead with "tomorrow"/"email".
+private let scratchLiteralLeaders: Set<String> = [
+    "don't", "dont", "do", "not", "never", "won't", "wont", "can't", "cant", "cannot",
+    "didn't", "didnt", "doesn't", "doesnt", "wouldn't", "wouldnt",
+    "shouldn't", "shouldnt", "couldn't", "couldnt",
+    "to", "must", "should", "would", "could", "might", "may", "can", "will", "shall",
+    "i", "you", "we", "they", "he", "she",
+]
+
 // Collapse an immediate duplicate of a function word, which self-correction can
 // leave behind ("... to InsForge no wait to production" -> "... to to ...").
-// Restricted to words whose consecutive repetition is virtually always an
-// artifact — "that"/"had" are excluded because "that that"/"had had" are valid.
-private let dupRx = Rx(#"\b(to|the|a|an|of|in|on|at|and|or|for|with|is|was|it|i)\s+\1\b"#)
+//
+// The list is an allowlist of doubles that are NEVER grammatical in English,
+// and it used to be much longer. Three of its members made the stage delete a
+// word from ordinary, correction-free speech — measured through the shipping
+// pipeline:
+//
+//   "Please hand it in in March."        -> "Please hand it in March."
+//   "The show must go on on Friday."     -> "The show must go on Friday."
+//   "What it is is a resourcing problem."-> "What it is a resourcing problem."
+//
+// Those doubles are grammatical (particle + preposition; the pseudo-cleft
+// copula), so no context test can rescue them and they are simply gone, along
+// with "at"/"it"/"i", which buy nothing a correction actually needs. What is
+// left is the shape the rule was written for: "to to", "the the", and their
+// kin, which only ever occur as an artifact of the deletion above — the pinned
+// goldens ("go to the the store", "we need to to to fix it", "…to Bob no wait
+// to Alice") all live in that shape.
+//
+// Content words are deliberately NOT collapsible either: "very very", "long
+// long" and the corpus's "just just ship it" are all real speech, and the
+// stutter-repair they want belongs to WispritRefine, which already owns it.
+private let dupRx = Rx(#"\b(to|the|a|an|and|or|but|of|for|with)\s+\1\b"#)
+
+/// The literal "no wait" (a queue with no waiting), signal one: the word the
+/// span would delete. A copula, a possession verb or a preposition is never
+/// what a correction replaces — "There IS no wait", "The clinic HAS no wait".
+private let noWaitLiteralLeaders: Set<String> = [
+    "is", "was", "are", "were", "be", "been", "being", "has", "have", "had",
+    "with", "of", "there's", "theres", "that's", "thats", "here's", "heres",
+]
+
+/// The literal "no wait", signal two: a noun continuation after "wait". The
+/// interjection is a complete utterance, so what follows it is the replacement
+/// word, never a tail of the phrase itself — "no wait TIME", "no wait AT the
+/// DMV", "no wait LIST". "to" is absent on purpose: "…to Bob no wait to Alice"
+/// is the pinned parity golden.
+private let noWaitObjectWords: Set<String> = [
+    "time", "times", "list", "lists", "at", "for", "on", "in", "anywhere", "whatsoever",
+]
+
+/// Words that can open a two-token replacement fragment after a
+/// cross-terminator marker ("No, actually, the footer." / "…next quarter.").
+/// Determiners, possessives and the ordinal-ish modifiers — everything that
+/// announces a noun phrase rather than a new subject.
+private let fragmentOpeners: Set<String> = [
+    "the", "a", "an", "this", "that", "these", "those", "another", "other", "same",
+    "my", "your", "our", "their", "his", "her", "its",
+    "next", "last", "first", "second", "third", "final", "every", "each", "any", "some",
+    "half", "quarter", "no",
+]
 
 /// Words that make "no actually" / "I mean" a discourse hedge rather than a
 /// correction. Deliberately small and function-word-only: anything a user would

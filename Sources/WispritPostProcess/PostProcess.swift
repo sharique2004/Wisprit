@@ -124,7 +124,15 @@ public enum PostProcess {
 // its joint separator, because the live path hands that engine text this stage
 // has not run on yet.
 let fillerWords = ["um", "umm", "uh", "uhh", "uhm", "erm"]
-private let fillerRx = Rx(#"(?<!\w)(?:"# + fillerWords.joined(separator: "|") + #")(?!\w)[,]?"#)
+
+// The boundary is `[\w-]`, not `\w`, on both sides. A hyphen is a non-word
+// character, so the Python-parity `(?<!\w)…(?!\w)` treated the two halves of a
+// hyphenated word as separate tokens and ate one of them: "Uh-oh that broke the
+// build." measured as "-oh that broke the build." A hyphen glues a word
+// together everywhere else in this file (`emojiRx` already spells the same
+// guard), and "uh-oh"/"uh-huh" are words, not hesitations.
+private let fillerRx = Rx(#"(?<![\w-])(?:"# + fillerWords.joined(separator: "|") + #")(?![\w-])[,]?"#)
+private let fillerEdgePunctuation = CharacterSet(charactersIn: ",")
 
 // Known TLDs for spoken-URL joining. Conservative list — real, common TLDs.
 private let tlds = ["com", "org", "net", "io", "ai", "dev", "co", "edu", "gov", "app", "me"]
@@ -154,22 +162,90 @@ private let dotJoinerRx = Rx(#"\s+dot\s+"#)
 // ordinary speech ("a new line of business"), so we only treat it as a command
 // when it is NOT part of a noun phrase — i.e. not preceded by a determiner and
 // not followed by a word that continues the phrase grammatically.
-private let lineBreakRx = Rx(#"(?:(\w+)\s+)?new\s+(line|paragraph)\b(?:\s+(\w+))?"#)
+//
+// The lookback is TWO words, captured verbatim as one prefix (so the original
+// spacing survives a rewrite), because one word only sees the modifier: "a
+// brand new line", "a whole new paragraph" put the determiner two back, and
+// both measured as a line break jammed into the middle of a sentence ("We are
+// launching a brand\nnext quarter."). A determiner two back only counts when
+// the word between it and "new" is a pre-nominal modifier — "the total new
+// line item two" is still a dictated break, and only an adjective in that slot
+// makes "new line" the head of the phrase instead.
+private let lineBreakRx = Rx(#"((?:\w+\s+){0,2})new\s+(line|paragraph)\b(?:\s+(\w+))?"#)
 private let determiners: Set<String> = [
     "a", "an", "the", "this", "that", "another", "each", "every", "one",
     "my", "your", "our", "his", "her", "their", "its", "some", "any", "no",
 ]
+// Modifiers that sit between a determiner and "new" in a noun phrase. Small and
+// measured: "brand"/"whole" are the two the corpus produced, the rest are the
+// intensifiers and size adjectives that take the same slot.
+private let nounPhraseModifiers: Set<String> = [
+    "brand", "whole", "entire", "completely", "totally", "really", "very", "all",
+    "single", "big", "long", "short", "blank", "extra", "bold", "straight", "solid",
+    "thin", "same", "other",
+]
 private let continuations: Set<String> = [
     "of", "in", "on", "at", "to", "for", "with", "from", "by", "and", "or",
     "that", "which", "is", "was", "are", "were", "between", "through", "than",
+    // "about" completes the preposition family the list already carries — it
+    // was simply missing, and "he started a whole new paragraph ABOUT pricing"
+    // is what missing cost. "into"/"onto" are "in"/"on" with directional
+    // morphology and can no more open a dictated continuation than those can.
+    //
+    // "next" is deliberately NOT here, even though the other measured sentence
+    // ("a brand new line NEXT quarter") ends that way: "new line next up" is a
+    // pinned command shape, so "next" is genuinely ambiguous after the phrase
+    // and the determiner lookback above is what stops that sentence instead.
+    "about", "into", "onto",
 ]
 
 // Trailing spoken punctuation ("... question mark" at the very end).
-private let trailingPunct: [(Rx, String)] = [
-    (Rx(#"\s+(?:question\s+mark)[.\s]*$"#), "?"),
-    (Rx(#"\s+(?:exclamation\s+(?:point|mark))[.\s]*$"#), "!"),
-    (Rx(#"\s+period[.\s]*$"#), "."),
-    (Rx(#"\s+(?:full\s+stop)[.\s]*$"#), "."),
+//
+// The spoken names are also ordinary nouns, and the unguarded rewrite deleted
+// the noun and everything the sentence needed it for — measured: "We billed
+// them for the trial period." -> "We billed them for the trial.", "Add a grace
+// period" -> "Add a grace.", "She answered every question mark" -> "She
+// answered every?" So each rule captures the (up to two) words in front of the
+// name, verbatim, and refuses when they make the name the HEAD of a noun
+// phrase rather than a dictated punctuation mark.
+//
+// The guard is on the IMMEDIATELY preceding word only. A determiner two back
+// was the tempting rule and it is wrong: "that is the end period" is a pinned
+// golden with exactly that shape, and it is a command. What separates it from
+// "the trial period" is the collocation, not the determiner.
+private struct TrailingPunctRule {
+    let rx: Rx
+    let punct: String
+    /// Words that make the spoken name a noun. A match whose immediately
+    /// preceding word is one of these passes through verbatim.
+    let blockedLeaders: Set<String>
+}
+
+/// "<det> period" is always the noun ("the period", "a period"), and these are
+/// the noun-noun compounds where the second word is the head: a trial period,
+/// a grace period, a notice period. Business-dictation frequency ordered.
+private let periodCollocations: Set<String> = determiners.union([
+    "trial", "grace", "notice", "waiting", "cooling", "probation", "probationary",
+    "time", "rest", "class", "free", "lunch", "question", "warranty", "billing",
+    "blackout", "refund", "vesting", "transition", "pay", "sales", "holding", "quiet",
+])
+
+/// "<det/quantifier> question mark" is the noun phrase — "every question mark",
+/// "the question mark". A dictated "question mark" follows the clause it
+/// terminates, which never ends in a determiner.
+private let questionCollocations: Set<String> = determiners.union([
+    "these", "those", "which", "what", "whose", "first", "second", "third", "next", "last",
+])
+
+private let trailingPunct: [TrailingPunctRule] = [
+    TrailingPunctRule(rx: Rx(#"((?:\w+\s+){0,2})question\s+mark[.\s]*$"#), punct: "?",
+                      blockedLeaders: questionCollocations),
+    TrailingPunctRule(rx: Rx(#"((?:\w+\s+){0,2})exclamation\s+(?:point|mark)[.\s]*$"#), punct: "!",
+                      blockedLeaders: determiners),
+    TrailingPunctRule(rx: Rx(#"((?:\w+\s+){0,2})period[.\s]*$"#), punct: ".",
+                      blockedLeaders: periodCollocations),
+    TrailingPunctRule(rx: Rx(#"((?:\w+\s+){0,2})full\s+stop[.\s]*$"#), punct: ".",
+                      blockedLeaders: periodCollocations),
 ]
 
 // Spoken emoji directives — "<name> emoji" -> the glyph. See
@@ -288,8 +364,18 @@ extension PostProcess {
 // MARK: - Stages
 
 extension PostProcess {
+    /// Stage 1. An all-caps token is an acronym, not a hesitation: the
+    /// recognizer writes the hesitation as "um"/"Um", and "UH"/"UM" are
+    /// universities ("She transferred to UH last fall." measured as "She
+    /// transferred to last fall."). The exemption is exact-case, so "Um," at
+    /// the start of a sentence — the shape the recognizer actually emits — is
+    /// still a filler.
     static func removeFillers(_ text: String) -> String {
-        fillerRx.replacingAll(in: text, with: "")
+        fillerRx.replacing(in: text) { m, ns in
+            let token = ns.substring(with: m.range)
+                .trimmingCharacters(in: fillerEdgePunctuation)
+            return token == token.uppercased() ? nil : ""
+        }
     }
 
     static func applyDictionary(_ text: String, _ corrections: (any CorrectionApplying)?) -> String {
@@ -328,15 +414,48 @@ extension PostProcess {
 
     static func applyLineBreaks(_ text: String) -> String {
         lineBreakRx.replacing(in: text) { m, ns in
-            let prev = m.group(1, ns)
+            // The prefix is re-emitted byte-for-byte (its own inter-word
+            // spacing included); only the whitespace the break replaces is
+            // normalized, exactly as the one-word version did.
+            let prefix = m.group(1, ns) ?? ""
+            let words = prefix.split(whereSeparator: { $0.isWhitespace }).map { $0.lowercased() }
             let kind = (m.group(2, ns) ?? "").lowercased()
             let next = m.group(3, ns)
-            // Noun-phrase guards: "a new line of ...", "the new paragraph that ...".
-            if let prev, determiners.contains(prev.lowercased()) { return nil }
+            // Noun-phrase guards: "a new line of ...", "the new paragraph that
+            // ...", "a brand new line ...".
+            if let near = words.last, determiners.contains(near) { return nil }
+            if words.count == 2, determiners.contains(words[0]),
+               nounPhraseModifiers.contains(words[1]) { return nil }
             if let next, continuations.contains(next.lowercased()) { return nil }
             let brk = kind == "paragraph" ? "\n\n" : "\n"
-            return (prev.map { $0 + " " } ?? "") + brk + (next.map { " " + $0 } ?? "")
+            return prefix + brk + (next.map { " " + $0 } ?? "")
         }
+    }
+
+    /// Trailing spoken punctuation, with the noun-phrase guard described at
+    /// `trailingPunct`. Beyond the guard this is the Python rule: the name has
+    /// to be preceded by whitespace (a bare "period" is the word, not a
+    /// command) and it takes the trailing dots and spaces with it.
+    static func applyTrailingPunctuation(_ text: String) -> String {
+        var text = text
+        for rule in trailingPunct {
+            text = rule.rx.replacing(in: text) { m, ns in
+                let prefix = m.group(1, ns) ?? ""
+                let words = prefix.split(whereSeparator: { $0.isWhitespace }).map { $0.lowercased() }
+                if let near = words.last, rule.blockedLeaders.contains(near) { return nil }
+                // No captured word means the name opens the match: it is only a
+                // command if whitespace stands in front of it (Python's `\s+`).
+                guard !words.isEmpty || (m.range.location > 0
+                    && Self.isSpace(ns.character(at: m.range.location - 1))) else { return nil }
+                return prefix.trimmingTrailingWhitespace() + rule.punct
+            }
+        }
+        return text
+    }
+
+    static func isSpace(_ c: unichar) -> Bool {
+        guard let scalar = Unicode.Scalar(c) else { return false }
+        return CharacterSet.whitespacesAndNewlines.contains(scalar)
     }
 
     /// Spoken emoji: "<name> emoji" -> the glyph, for the curated
@@ -408,11 +527,7 @@ extension PostProcess {
     }
 
     static func voiceCommands(_ text: String) -> String {
-        var text = applyLineBreaks(text)
-        for (pattern, punct) in trailingPunct {
-            text = pattern.replacingAll(in: text, with: NSRegularExpression.escapedTemplate(for: punct))
-        }
-        return text
+        applyTrailingPunctuation(applyLineBreaks(text))
     }
 
     /// Stage 5. Unconditional, like the Python rule it ports — self-correction
@@ -485,6 +600,14 @@ struct Rx {
         return out
     }
 
+    /// Every non-overlapping match, left to right — the scanning primitive for
+    /// a stage that has to CHOOSE among the matches (which "scratch that" is
+    /// the directive) rather than rewrite each one where it stands.
+    func allMatches(_ s: String, _ ns: NSString) -> [NSTextCheckingResult] {
+        guard let re else { return [] }
+        return re.matches(in: s, options: [], range: NSRange(location: 0, length: ns.length))
+    }
+
     /// Leftmost match at or after `from`. The text before `from` stays visible
     /// to `\b` and lookbehind (transparent, non-anchoring bounds), so a cursor
     /// parked mid-word cannot manufacture a word boundary — the scanning
@@ -519,6 +642,15 @@ private extension NSTextCheckingResult {
 }
 
 private extension String {
+    /// Right-strip only — the trailing-punctuation stage re-emits the words in
+    /// front of a spoken mark verbatim but drops the gap the mark replaces.
+    func trimmingTrailingWhitespace() -> String {
+        var scalars = Substring.UnicodeScalarView(unicodeScalars)
+        while let last = scalars.last,
+              CharacterSet.whitespacesAndNewlines.contains(last) { scalars.removeLast() }
+        return String(String.UnicodeScalarView(scalars))
+    }
+
     /// Python `str.strip()`: trims every scalar for which `str.isspace()` is
     /// true. Foundation's `.whitespacesAndNewlines` omits U+001C…U+001F, which
     /// Python treats as whitespace, so the set is spelled out.

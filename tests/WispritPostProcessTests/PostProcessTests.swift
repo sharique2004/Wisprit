@@ -59,13 +59,18 @@ private let goldenDictionary = FakeDictionary([
 // MARK: - Golden parity
 
 final class GoldenParityTests: XCTestCase {
+    /// The Python value is the expectation unless `MeasuredDivergences`
+    /// supersedes it — a deliberate behavior change, recorded there with the
+    /// measurement that justifies it, so `Goldens.swift` can stay a literal
+    /// (regenerable) snapshot of the Python run.
     private func assertGolden(_ cases: [(raw: String, expected: String)],
                               _ options: PostProcessOptions,
                               corrections: (any CorrectionApplying)? = nil,
                               file: StaticString = #filePath, line: UInt = #line) {
-        for (raw, expected) in cases {
+        for (raw, python) in cases {
             XCTAssertEqual(PostProcess.process(raw, options: options, corrections: corrections),
-                           expected, "input: \(raw.debugDescription)", file: file, line: line)
+                           MeasuredDivergences.expectation(raw, python),
+                           "input: \(raw.debugDescription)", file: file, line: line)
         }
     }
 
@@ -217,9 +222,29 @@ final class PostProcessContractTests: XCTestCase {
 
 final class FuzzParityTests: XCTestCase {
     func testFourHundredRandomTokenSaladsMatchPython() {
-        for (raw, expected) in FuzzGoldens.cases {
-            XCTAssertEqual(PostProcess.process(raw), expected, "input: \(raw.debugDescription)")
+        for (raw, python) in FuzzGoldens.cases {
+            XCTAssertEqual(PostProcess.process(raw),
+                           MeasuredDivergences.expectation(raw, python),
+                           "input: \(raw.debugDescription)")
         }
         XCTAssertEqual(FuzzGoldens.cases.count, 400)
+    }
+
+    /// The divergence table is an exception list, so it has to stay exactly as
+    /// long as the exceptions: an entry that no longer fires (the parity value
+    /// came back) is dead and would silently mask the next drift.
+    func testEveryRecordedDivergenceStillDiverges() {
+        let parity = Dictionary(
+            (Goldens.defaults + FuzzGoldens.cases).map { ($0.raw, $0.expected) },
+            uniquingKeysWith: { first, _ in first })
+        for (raw, native) in MeasuredDivergences.outputs {
+            XCTAssertEqual(PostProcess.process(raw), native, "input: \(raw.debugDescription)")
+            guard let python = parity[raw] else {
+                return XCTFail("not a parity fixture: \(raw.debugDescription)")
+            }
+            XCTAssertNotEqual(native, python,
+                              "stale divergence entry: \(raw.debugDescription)")
+        }
+        XCTAssertEqual(MeasuredDivergences.outputs.count, 4)
     }
 }
