@@ -57,6 +57,66 @@ final class LetterRunDetectorTests: XCTestCase {
         XCTAssertEqual(collapsed("URL AND API AND S-H-A-R-I-Q-U-E."), ["SHARIQUE"])
     }
 
+    /// The ASR habitually writes the spelled word out again straight after the
+    /// spelling. The parser used to follow the ". " into "Krzysztof", hit the
+    /// lowercase "r", and `return nil` — discarding all NINE accumulated
+    /// segments, so `decide` saw no run at all: the user's dictated spelling
+    /// silently did nothing and the "K-R-Z-Y-S-Z-T-O-F." litter stayed in their
+    /// text. The run has to end AT the word instead.
+    func testARunEndsAtAFollowingWordInsteadOfBeingDiscarded() {
+        XCTAssertEqual(
+            collapsed("That's spelled K-R-Z-Y-S-Z-T-O-F. Krzysztof will join."), ["KRZYSZTOF"])
+        XCTAssertEqual(collapsed("It's S-H-A-R-I-Q-U-E. Sharique is here."), ["SHARIQUE"])
+        // Same fault through the dot-separated shape, where the ". " separator
+        // is what carries the parser into the next word.
+        XCTAssertEqual(
+            collapsed("It's S. H. A. R. I. Q. U. E. Sharique is here."), ["SHARIQUE"])
+        // The corpus clip (tts-stress-v1 sr-01, ref "The payload is JSON, not
+        // YAML.") in the reading where the ASR puts a full stop after the run.
+        XCTAssertEqual(collapsed("The payload is J-S-O-N. Not YAML."), ["JSON"])
+
+        // The run stops before the word, so the splice can only ever touch the
+        // letters — the word itself is not part of `raw`.
+        let text = "That's spelled K-R-Z-Y-S-Z-T-O-F. Krzysztof will join."
+        let run = try! XCTUnwrap(detector.detect(in: text).first)
+        XCTAssertEqual(run.raw, "K-R-Z-Y-S-Z-T-O-F")
+        XCTAssertEqual(String(Array(text)[run.range]), run.raw)
+        XCTAssertFalse(run.isTail)
+    }
+
+    /// The half of that guard that must NOT loosen: with nothing accumulated
+    /// behind it, the token itself is still rejected outright (the break falls
+    /// through `minSegmentCount`). These are the same rows as
+    /// `testRejectsNonSpellings`, restated as the regression they guard.
+    func testTheTokenItselfIsStillRejectedWhenTheRunIsEmpty() {
+        for text in ["COVID-19 numbers", "The AB1 form", "A-B-1-C", "McDONALD-S-CORP",
+                     "The A-B1 form", "I'm on it"] {
+            XCTAssertEqual(collapsed(text), [], text)
+        }
+    }
+
+    /// "It's spelled V-I-V-E-K I think" collapsed to "VIVEKI": the pronoun was
+    /// absorbed as the sixth letter, so the name would have been inserted and
+    /// learned as "Viveki" and the real word "I" eaten. A hyphen-spelled run
+    /// that switches to a bare space is the tell.
+    func testAStandaloneWordIsNotAbsorbedAsTheNextLetter() {
+        XCTAssertEqual(collapsed("It's spelled V-I-V-E-K I think"), ["VIVEK"])
+        XCTAssertEqual(collapsed("Spell that A-B-C A word"), ["ABC"])
+        // Dot-delimited runs carry the same tell.
+        XCTAssertEqual(collapsed("It's V.I.V.E.K I think"), ["VIVEK"])
+    }
+
+    /// …and the shapes that must keep absorbing. A run separated ONLY by spaces
+    /// has no switch to notice, and a dot-separated run's spaces are not bare —
+    /// both of these are research-probe transcripts, letter "I" included.
+    func testSpaceAndDotSpelledRunsStillAbsorbTheirOwnLetters() {
+        XCTAssertEqual(collapsed("It's S H A R I Q U E."), ["SHARIQUE"])
+        XCTAssertEqual(collapsed("It's S. H. A. R. I. Q. U. E."), ["SHARIQUE"])
+        XCTAssertEqual(collapsed("It's S H-A-R-I-Q-U-E."), ["SHARIQUE"])
+        // A capital that opens ANOTHER delimited run is a letter, not a word.
+        XCTAssertEqual(collapsed("It's spelled V-I-V-E-K A-N-A-N-D"), ["VIVEKANAND"])
+    }
+
     func testKnownTermsAreNotDirectives() {
         let vocabulary = StubVocabulary(terms: ["JSON"])
         let aware = LetterRunDetector(vocabulary: vocabulary)

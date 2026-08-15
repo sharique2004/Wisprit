@@ -74,6 +74,10 @@ public enum VocabularyRetroRefusal: String, Equatable, Sendable {
     /// The live words do not sound like the term. A biased engine hearing a
     /// different word is a re-wording, not a recovery.
     case phoneticallyUnrelated
+    /// The live words sound like the term but are not SPELLED like it — a
+    /// phonetic twin, not a misrecognition of this term. See the orthographic
+    /// veto in `judge` (commit 88668c5, the ALIX/WellX incident).
+    case orthographicallyDistant
     /// The live text already says the term.
     case alreadyCorrect
     /// A live token is itself a canonical term — never overwrite a word the
@@ -112,6 +116,12 @@ public enum VocabularyReconciler {
         /// The same 0.62 `AntecedentMatcher` cuts at, on the same scorer, for
         /// the same reason: below it the two strings are unrelated words.
         public var minScore: Double
+        /// Orthographic floor, `1 − levenshtein/maxLen` on the space-squeezed
+        /// forms. Deliberately `LearnPlausibility.orthographicFloor` itself and
+        /// not a copy of the number: the learn gate and this planner are the two
+        /// places a dictionary term can overwrite a word the user actually said,
+        /// and they have to disagree about nothing.
+        public var minSimilarity: Double
         /// Fraction of tokens the two readings may disagree about before the
         /// whole plan is refused. Above it they are not two readings of one
         /// utterance and no block boundary means anything.
@@ -127,12 +137,14 @@ public enum VocabularyReconciler {
 
         public init(maxLiveTokens: Int = 3,
                     minScore: Double = AntecedentMatcher.threshold,
+                    minSimilarity: Double = LearnPlausibility.orthographicFloor,
                     maxDivergence: Double = 0.35,
                     minAnchors: Int = 1,
                     minInnerAnchors: Int = 2,
                     maxEdits: Int = 2) {
             self.maxLiveTokens = maxLiveTokens
             self.minScore = minScore
+            self.minSimilarity = minSimilarity
             self.maxDivergence = maxDivergence
             self.minAnchors = minAnchors
             self.minInnerAnchors = minInnerAnchors
@@ -290,6 +302,31 @@ public enum VocabularyReconciler {
         // antecedent matcher uses, so the two gates agree on "related".
         let score = PhoneticScorer.score(liveForm, term)
         guard score >= limits.minScore else { return .refuse(.phoneticallyUnrelated) }
+
+        // GATE 3b, the orthographic veto — the same one commit 88668c5 added to
+        // the LEARN gate after the ALIX/WellX incident of 2026-08-12
+        // (`LearnPlausibility.mergeTarget`), which this planner never got.
+        // Sounding alike argues FOR a rewrite; only the letters can make one
+        // safe. Double Metaphone codes Alex, ALIX and WellX identically (ALKS),
+        // so a dictionary term that is a phonetic twin of an ordinary word
+        // scores 0.869 here — over every bar above — while the letters agree
+        // almost nowhere (0.400). Without this gate the biased pass could
+        // retro-rename "Alex" to "WellX" in the user's document seconds after
+        // insertion, and the substitution would then be written back as
+        // pronunciation evidence, making the next one likelier.
+        //
+        // Whitespace is squeezed out on both sides for the same reason GATE 4b
+        // squeezes it: the second engine's spacing opinions are not evidence
+        // ("in forge"/"InsForge" is 0.875 squeezed). The matching-initial escape
+        // is the learn gate's, verbatim — it is what keeps a garbled-but-real
+        // recovery alive ("shreek"/"Sharique", 0.375, same 's'), while the
+        // multi-word "cherie catri"/"Sharique Khatri" (0.571) clears the floor
+        // on its letters alone.
+        let runForm = squeezed(liveForm)
+        let termForm = squeezed(Tokenizer.normalForm(term))
+        let similarity = 1 - StringMetrics.normalizedLevenshtein(runForm, termForm)
+        guard similarity >= limits.minSimilarity || runForm.first == termForm.first
+        else { return .refuse(.orthographicallyDistant) }
 
         // GATE 5: the replacement text is sliced out of the inserted string by
         // token range — never rebuilt — so `RetroEditPlanner`'s literal search

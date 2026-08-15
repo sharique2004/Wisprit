@@ -43,6 +43,11 @@ public struct LetterRunDetector {
     public static let minCollapsedLength = 3
     /// Research: the trigger regex runs over the 45 characters preceding the run.
     public static let triggerWindow = 45
+    /// The only two single letters English also writes as whole words. A
+    /// space-separated capital "I" or "A" arriving after a run that has been
+    /// spelling itself with hyphens or dots is that word, not the next letter —
+    /// see the separator rule in `parseRun`.
+    static let standaloneWords: Set<Character> = ["A", "I"]
 
     /// Exactly the phrases the research measured as surviving transcription.
     /// Deliberately NOT widened to bare "spell" — "Let's spell J-O-N" is the
@@ -125,9 +130,20 @@ public struct LetterRunDetector {
             let segmentEnd = scanSegment(chars, from: cursor)
             let length = segmentEnd - cursor
             guard length >= 1, length <= maxSegmentLength else { return nil }
-            // A lowercase letter, digit or apostrophe directly after means this
-            // was never a letter run — "AB1", "COVID-19", "McDonald", "I'm".
-            if segmentEnd < chars.count && isWordCharacter(chars[segmentEnd]) { return nil }
+            // A lowercase letter, digit or apostrophe directly after means THIS
+            // SEGMENT was never a spelled letter — "AB1", "COVID-19",
+            // "McDonald", "I'm". End the run in front of it rather than
+            // discarding everything already accumulated: after a ". " the ASR
+            // routinely writes the spelled word out again ("That's spelled
+            // K-R-Z-Y-S-Z-T-O-F. Krzysztof will join."), and the old `return
+            // nil` threw all nine good segments away on the "K" of "Krzysztof".
+            // Net effect measured on that utterance: `decide` returned `.none`,
+            // the user's dictated spelling silently did nothing, and the
+            // "K-R-Z-Y-S-Z-T-O-F." litter stayed in their text. Nothing is
+            // loosened — with no segments behind it (the "COVID-19"/"AB1"/
+            // "I'm" token ITSELF) the break falls straight through the
+            // `minSegmentCount` guard below and still yields nil.
+            if segmentEnd < chars.count && isWordCharacter(chars[segmentEnd]) { break }
             segments.append(String(chars[cursor..<segmentEnd]))
             end = segmentEnd
 
@@ -147,6 +163,20 @@ public struct LetterRunDetector {
             if separator.contains(" ") {
                 let nextEnd = scanSegment(chars, from: separatorEnd)
                 guard length == 1, nextEnd - separatorEnd == 1 else { break }
+                // …and a run that has been spelling itself with hyphens or dots
+                // and then switches to a BARE space has stopped spelling. "It's
+                // spelled V-I-V-E-K I think" collapsed to "VIVEKI": the pronoun
+                // was eaten and the name would have been learned and inserted
+                // as "Viveki". The switch is the whole tell, so a run separated
+                // only by spaces ("S H A R I Q U E") keeps absorbing its own
+                // "I", and "S. H. A. R. I. Q. U. E." is untouched because its
+                // spaces arrive with a dot. Only the two letters English also
+                // writes as words are refused, and not even those when the
+                // capital opens another delimited run ("V-I-V-E-K A-N-A-N-D"),
+                // where the letter really is a letter.
+                if isDelimited, separator.allSatisfy({ $0 == " " }),
+                   standaloneWords.contains(chars[separatorEnd]),
+                   !opensDelimitedSegment(chars, at: separatorEnd) { break }
             }
             if separator.contains(where: { $0 != " " }) { isDelimited = true }
             cursor = separatorEnd
@@ -156,6 +186,19 @@ public struct LetterRunDetector {
         let collapsedLength = segments.reduce(0) { $0 + $1.count }
         guard collapsedLength >= minCollapsedLength else { return nil }
         return ParsedRun(start: start, end: end, segments: segments, isDelimited: isDelimited)
+    }
+
+    /// True when the single capital at `index` is itself the head of another
+    /// delimited segment — the "A" of "V-I-V-E-K A-N-A-N-D" is a spelled letter,
+    /// the "I" of "V-I-V-E-K I think" is a pronoun. Same separator grammar as
+    /// the main loop, so the two cannot drift apart.
+    private static func opensDelimitedSegment(_ chars: [Character], at index: Int) -> Bool {
+        var end = index + 1
+        while end < chars.count && isSeparator(chars[end]) { end += 1 }
+        let separator = chars[(index + 1)..<end]
+        return !separator.isEmpty && separator.count <= maxSeparatorLength
+            && separator.contains(where: { $0 != " " })
+            && end < chars.count && isUppercaseLetter(chars[end])
     }
 
     private static func scanSegment(_ chars: [Character], from start: Int) -> Int {

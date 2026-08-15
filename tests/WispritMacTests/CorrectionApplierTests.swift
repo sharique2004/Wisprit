@@ -42,6 +42,42 @@ final class CorrectionApplierTests: XCTestCase {
         XCTAssertNil(outcome.notice)
     }
 
+    /// The corpus clip, end to end over the real corrector: `tts-stress-v1`
+    /// sr-01 is scripted "The payload is J-S-O-N, not YAML." against the
+    /// reference "The payload is JSON, not YAML.", so the spelled word — not the
+    /// dashes — is what has to reach the field. Both readings the ASR produces
+    /// for that clip are covered; the full-stop one only detects at all because
+    /// the detector now ends a run AT a following capitalised word.
+    func testTheSpelledWordReachesTheFieldNotTheDashes() {
+        let corrector = SpokenSpellingCorrector()
+        for (raw, expected) in [
+            ("The payload is J-S-O-N, not YAML.", "The payload is JSON, not YAML."),
+            ("The payload is J-S-O-N. Not YAML.", "The payload is JSON. Not YAML."),
+        ] {
+            let outcome = CorrectionApplier.apply(corrector.decide(utterance: raw), to: raw)
+            XCTAssertEqual(outcome.text, expected, raw)
+            XCTAssertNil(outcome.learn, raw)
+        }
+    }
+
+    /// The collapsed run arrives uppercase and stays uppercase: with no
+    /// antecedent there is nothing to take casing from, and an all-caps spelled
+    /// run is either an acronym or a deliberate spelling. Guessing "Json" would
+    /// be inventing evidence.
+    func testInsertLiterallyKeepsTheRunUppercase() {
+        for (word, raw, expected) in [
+            ("JSON", "the payload is J-S-O-N", "the payload is JSON"),
+            ("SHARIQUE", "my name is S-H-A-R-I-Q-U-E", "my name is SHARIQUE"),
+        ] {
+            // A hyphenated run is 2n−1 characters wide, and it is the tail here.
+            let range = (raw.count - (word.count * 2 - 1))..<raw.count
+            XCTAssertEqual(String(Array(raw)[range]), word.map(String.init).joined(separator: "-"))
+            let outcome = CorrectionApplier.apply(
+                .insertLiterally(word: word, replace: range, offer: learned(word, [])), to: raw)
+            XCTAssertEqual(outcome.text, expected, word)
+        }
+    }
+
     func testInsertLiterallyNeverDeletesEarlierWords() {
         // The J-S-O-N regression: a literal insert must not touch "JSON" earlier
         // in the sentence, nor anything before the run.

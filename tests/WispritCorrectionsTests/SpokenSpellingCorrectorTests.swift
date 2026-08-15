@@ -137,6 +137,30 @@ final class SpokenSpellingCorrectorTests: XCTestCase {
         XCTAssertEqual(replacement, "Sharique")
     }
 
+    /// The whole directive used to be lost when the ASR wrote the spelled word
+    /// out again after it: `decide` returned `.none`, nothing was inserted,
+    /// nothing was offered, and the dashes stayed in the user's document.
+    func testASpellingFollowedByTheWordItselfStillDecides() {
+        let utterance = "That's spelled K-R-Z-Y-S-Z-T-O-F. Krzysztof will join."
+        guard case .insertLiterally(let word, let replace, _) = corrector.decide(utterance: utterance)
+        else { return XCTFail("expected insertLiterally, got \(corrector.decide(utterance: utterance))") }
+        XCTAssertEqual(word, "KRZYSZTOF")
+        XCTAssertEqual(String(Array(utterance)[replace]), "K-R-Z-Y-S-Z-T-O-F",
+                       "the replaced span stops before the word the ASR echoed")
+    }
+
+    /// "V-I-V-E-K I think" decided to insert "VIVEKI" over the span
+    /// "V-I-V-E-K I" — the pronoun swallowed, the name mis-learned.
+    func testAPronounAfterARunIsNeitherSpelledNorReplaced() {
+        let utterance = "It's spelled V-I-V-E-K I think"
+        guard case .insertLiterally(let word, let replace, let offer) =
+            corrector.decide(utterance: utterance)
+        else { return XCTFail("expected insertLiterally") }
+        XCTAssertEqual(word, "VIVEK")
+        XCTAssertEqual(String(Array(utterance)[replace]), "V-I-V-E-K")
+        XCTAssertEqual(offer.term, "VIVEK", "an offer for 'Viveki' would be learned as the name")
+    }
+
     func testNoRunIsNoAction() {
         XCTAssertEqual(corrector.decide(utterance: "Please ping Shariq about the migration."), .none)
         XCTAssertEqual(corrector.decide(utterance: ""), .none)

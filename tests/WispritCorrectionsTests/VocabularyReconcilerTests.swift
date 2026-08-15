@@ -124,6 +124,30 @@ final class VocabularyReconcilerTests: XCTestCase {
                  reconciled: "Ping the InsForge team about the timeline.",
                  refusal: .phoneticallyUnrelated),
 
+            // The ALIX/WellX incident of 2026-08-12, arriving through the retro
+            // channel instead of the learn gate: Double Metaphone codes Alex and
+            // WellX identically (ALKS), so the biased pass "recovering" its own
+            // contextual string scores 0.869 — over every other bar in this
+            // file — while the letters agree almost nowhere (0.400). Accepting
+            // it would rename the user's colleague in a document they are
+            // already reading.
+            Case(name: "phonetic twin of an ordinary word",
+                 inserted: "Please email Alex about the invoice today",
+                 reconciled: "Please email WellX about the invoice today",
+                 termHits: ["WellX": 1],
+                 refusal: .orthographicallyDistant),
+
+            // The other half of the veto, and the reason it carries the learn
+            // gate's matching-initial escape verbatim: "shreek" is a REAL hear
+            // phrase of Sharique (tools/eval/fixtures/eval-dictionary.json) and
+            // sits at 0.375, well under the floor. Only the shared 's' keeps
+            // this recovery alive.
+            Case(name: "garbled but same initial",
+                 inserted: "Please email shreek about the invoice today",
+                 reconciled: "Please email Sharique about the invoice today",
+                 termHits: ["Sharique": 1],
+                 edits: [("shreek", "Sharique")]),
+
             // Only the SPACING differs. DictationTranscriber's opinions about
             // whitespace are not evidence, and rewriting the user's document to
             // impose one is exactly the surprise that erodes trust.
@@ -225,6 +249,66 @@ final class VocabularyReconcilerTests: XCTestCase {
                                     "the long-block row is refused by its length, not the scorer")
         XCTAssertLessThan(PhoneticScorer.score("migration", "InsForge"),
                           VocabularyReconciler.Limits().minScore)
+    }
+
+    // MARK: - the orthographic veto (commit 88668c5, ALIX/WellX)
+
+    /// One floor for both places a dictionary term may overwrite a word the user
+    /// actually said. The learn gate got this after the live incident; the retro
+    /// channel is the same hazard through a different door, and a second copy of
+    /// the number is a second thing to forget to move.
+    func testTheOrthographicFloorIsTheLearnGatesOwn() {
+        XCTAssertEqual(VocabularyReconciler.Limits().minSimilarity,
+                       LearnPlausibility.orthographicFloor)
+    }
+
+    /// The numbers behind the "phonetic twin" row, pinned so a scorer change
+    /// that resurrects the hijack fails loudly rather than quietly renaming
+    /// somebody's colleague: phonetics clear every earlier gate, the letters
+    /// fall below the floor, and the initials differ so the escape cannot
+    /// rescue it. Mirrors `LearnPlausibilityTests`
+    /// `testASpelledNewNameIsNotHijackedByAPhoneticTwin`.
+    func testTheHijackClearsEveryGateExceptTheLetters() {
+        XCTAssertGreaterThanOrEqual(PhoneticScorer.score("alex", "WellX"),
+                                    VocabularyReconciler.Limits().minScore)
+        XCTAssertLessThan(1 - StringMetrics.normalizedLevenshtein("alex", "wellx"),
+                          VocabularyReconciler.Limits().minSimilarity)
+        XCTAssertNotEqual("alex".first, "wellx".first)
+    }
+
+    /// …and the accepted rows really do clear it, on the letters or on the
+    /// initial. Measured on the SQUEEZED forms, as GATE 4b measures: the second
+    /// engine's spacing is not evidence, so "in forge" is compared as
+    /// "inforge". The multi-word pair is the tightest row in the file — two
+    /// misheard words, a different first letter, and 0.571 of the letters still
+    /// agree.
+    func testTheAcceptedRowsClearTheVetoOnLettersOrInitial() {
+        let floor = VocabularyReconciler.Limits().minSimilarity
+        XCTAssertGreaterThanOrEqual(
+            1 - StringMetrics.normalizedLevenshtein("cheriecatri", "shariquekhatri"), floor,
+            "a different initial means the letters have to carry it alone")
+        XCTAssertGreaterThanOrEqual(
+            1 - StringMetrics.normalizedLevenshtein("inforge", "insforge"), floor)
+        // The escape row is under the floor and survives only on its initial.
+        XCTAssertLessThan(1 - StringMetrics.normalizedLevenshtein("shreek", "sharique"), floor)
+        XCTAssertEqual("shreek".first, "sharique".first)
+    }
+
+    /// Gate order is part of the contract. A block that fails BOTH similarity
+    /// gates still reports `phoneticallyUnrelated` — the refusal this channel's
+    /// metrics have counted since it shipped — so `orthographicallyDistant`
+    /// means exactly one thing in a scoreboard: sounded right, spelled wrong.
+    func testAnUnrelatedBlockStillReportsThePhoneticRefusal() {
+        let limits = VocabularyReconciler.Limits()
+        XCTAssertLessThan(PhoneticScorer.score("migration", "InsForge"), limits.minScore)
+        XCTAssertLessThan(1 - StringMetrics.normalizedLevenshtein("migration", "insforge"),
+                          limits.minSimilarity)
+        let plan = VocabularyReconciler.plan(
+            inserted: "Ping the migration team about the timeline.",
+            reconciled: "Ping the InsForge team about the timeline.",
+            termHits: ["InsForge": 1],
+            knownTerm: { _ in false })
+        XCTAssertEqual(plan.refusal, .phoneticallyUnrelated)
     }
 
     // MARK: - ambiguity
