@@ -69,6 +69,22 @@ public enum PcmFormat {
         max(1, AVAudioFrameCount((Double(inputFrames) * ratio).rounded(.up)))
     }
 
+    /// A whole utterance cut into pipeline-sized (100 ms) chunks, for the
+    /// off-path passes that feed retained PCM to an analyzer in one burst. One
+    /// definition, because two of them (the vocabulary channel and the batch
+    /// rescue) must agree: the analyzer's accuracy is invariant to the chunking
+    /// only as long as the chunking is the one the eval harness measured.
+    public static func split(_ pcm: Data) -> [Data] {
+        let step = Int(chunkFrames) * bytesPerFrame
+        var out: [Data] = []
+        var i = 0
+        while i < pcm.count {
+            out.append(pcm.subdata(in: i..<min(i + step, pcm.count)))
+            i += step
+        }
+        return out
+    }
+
     /// Normalized RMS level for the pill's input meter, 0…1. Same shape as
     /// `AudioCapture._callback`: RMS over int16/32768, ×4 so quiet speech still
     /// moves the meter, clamped at 1.

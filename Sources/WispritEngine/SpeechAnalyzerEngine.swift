@@ -117,6 +117,28 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
     /// and normal speech 0.1–1.0, so this only has to clear room tone.
     static let voicedPeakThreshold: Float = 0.02
 
+    /// Poll slice for the progress-aware finalize wait. Small enough that the
+    /// stall detector reacts inside the budget, large enough that a result
+    /// actually has time to arrive between two looks — the measured partial
+    /// cadence with `.fastResults` is ~0.95 s worst case, so a slice must be a
+    /// fraction of that or every slice would look like a stall.
+    static let progressSliceSeconds = 0.2
+
+    /// How far past the idle budget a finalize that is STILL PRODUCING may run:
+    /// 2× (3.0 s at the shipped 1.5 s budget). The flat budget killed live
+    /// transcription mid-sentence — on the LibriSpeech eval, 5/200 clips came
+    /// back truncated or empty because the deadline landed while results were
+    /// arriving. This is the ceiling for an actively-working analyzer only; an
+    /// idle one still costs exactly one budget.
+    static let progressBudgetMultiple = 2.0
+
+    /// The collector's OWN window after a completed finalize, measured from the
+    /// moment finalize completed rather than from `t0`. The collector exits when
+    /// `module.results` ends — the analyzer's own statement that nothing more is
+    /// coming — which is normally immediate; 500 ms is the margin for the late
+    /// results that used to be cancelled out from under a slow utterance.
+    static let collectorGraceSeconds = 0.5
+
     public func finalize() async -> UtteranceResult {
         let t0 = Date()
         guard let session = state.take() else {
@@ -127,7 +149,23 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
         let peakLevel = session.fed.peakLevel
 
         session.queue.close()          // drain what is queued, then EOF
-        _ = await session.pump.value
+
+        // The pump drain is INSIDE the deadline, not before it. `await
+        // session.pump.value` was unbounded, which made every millisecond the
+        // pump spent stuck a millisecond nobody was counting — the shape of the
+        // 498 s finalize, where the deadline machinery below never even got to
+        // run. Nothing the pump does is worth an unbounded wait: on the far side
+        // of `queue.close()` it has only to convert what is already queued.
+        let pumped = Signal()
+        let pump = session.pump
+        Task.detached { _ = await pump.value; pumped.fire() }
+        if await pumped.wait(timeout: budget, deadlineFrom: t0) == false {
+            // Drop what is still queued so the pump can reach `builder.finish()`
+            // and the analyzer can see EOF. The cost is the tail of the audio;
+            // the alternative is the whole utterance.
+            session.queue.discardAll()
+            log.warning("pump did not drain inside the finalize budget — discarding the queued tail")
+        }
 
         // A wedged `finalize` cannot be cancelled (spike S1), so it is never
         // awaited directly — it signals, and we wait on the signal with a deadline.
@@ -139,7 +177,7 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
             catch { await sink.setError("finalize: \(error)") }
             done.fire()
         }
-        let completed = await done.wait(timeout: budget, deadlineFrom: t0)
+        let completed = await Self.waitForFinalize(done, sink: sink, budget: budget, from: t0)
 
         // Results can land a beat after finalize returns. Wait for the COLLECTOR
         // to finish rather than polling `sink.isDrained()`: the collector exits
@@ -153,7 +191,13 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
             let drained = Signal()
             let collector = session.collector
             Task.detached { _ = await collector.value; drained.fire() }
-            _ = await drained.wait(timeout: budget, deadlineFrom: t0)
+            // A FRESH window, deliberately not the leftover of the finalize
+            // budget. Sharing one deadline from `t0` meant a finalize that
+            // completed at 1.4 s of a 1.5 s budget left the collector 100 ms to
+            // drain `module.results` before the `cancel()` below threw the rest
+            // away — silent tail truncation, and worst on exactly the long
+            // utterances where the tail is worth the most.
+            _ = await drained.wait(timeout: Self.collectorGraceSeconds, deadlineFrom: Date())
         }
         session.collector.cancel()
 
@@ -166,27 +210,14 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
         let timedOut = !completed
         let crashed = completed && error != nil
         let starved = fedBytes < Self.minimumAudioBytes
-        // The analyzer was given audible speech, finished cleanly, and produced
-        // nothing at all — not a final, not even a volatile. That is a dead
-        // session, and the cached engine behind it is suspect.
-        //
-        // The `peakLevel` gate is load-bearing: MEASURED, 3 s of digital silence
-        // also yields zero results (0 partials, 0 finals), so emptiness alone
-        // cannot tell a wedged analyzer from a user who simply did not speak.
-        // Without the gate every silent press would release the cached engines
-        // and pay a reload on the next press — a routine cooldown, which spike
-        // S1 explicitly rejected.
-        let producedNothing = text.isEmpty && finals.isEmpty && !starved
-            && peakLevel >= Self.voicedPeakThreshold
+        let producedNothing = Self.producedNothing(
+            finals: finals, lastPartial: lastPartial, starved: starved, peakLevel: peakLevel)
 
         if timedOut || crashed || producedNothing {
-            // Best effort, exactly as asr.py: append the last volatile if it adds anything.
-            // This now also covers `producedNothing`, where volatiles had been
-            // collected and then silently discarded.
-            let tail = lastPartial.trimmingCharacters(in: .whitespaces)
-            if !tail.isEmpty && !text.contains(tail) {
-                text = (text + " " + tail).trimmingCharacters(in: .whitespaces)
-            }
+            // Best effort, exactly as asr.py: append the last volatile if it
+            // adds anything. This also covers `producedNothing`, where volatiles
+            // had been collected and then silently discarded.
+            text = TranscriptText.appendingTail(lastPartial, to: text)
             let reason = timedOut ? "timed out" : (crashed ? "engine failed" : "produced no result")
             log.warning("finalize \(reason, privacy: .public) after \(finalizeMs, format: .fixed(precision: 0)) ms (fed \(fedBytes) bytes, peak \(peakLevel, format: .fixed(precision: 2))) — releasing cached engines")
             await teardown(session, hard: true)
@@ -208,12 +239,85 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
     public func cancel() async {
         guard let session = state.take() else { return }
         session.queue.discardAll()
-        _ = await session.pump.value
+        // Bounded for the same reason `finalize` bounds it, with more at stake:
+        // `begin` calls `cancel` defensively, so an unbounded wait here could
+        // hang the START of the next utterance rather than the end of this one.
+        // `discardAll` has already resumed the queue's waiter, so a pump still
+        // running after the budget is one that is never coming back.
+        let pumped = Signal()
+        let pump = session.pump
+        Task.detached { _ = await pump.value; pumped.fire() }
+        if await pumped.wait(timeout: settings.finalizeTimeoutSeconds, deadlineFrom: Date()) == false {
+            log.warning("pump still running at cancel — abandoning it rather than blocking the next utterance")
+        }
         session.collector.cancel()
         await teardown(session, hard: true)
     }
 
     // MARK: - internals
+
+    /// The analyzer was given speech, finished cleanly, and produced no FINAL.
+    /// That is a dead session, and the cached engine behind it is suspect.
+    ///
+    /// "Was given speech" has two independent witnesses, and it needs both:
+    /// * `peakLevel` clears the voiced threshold. Load-bearing on its own —
+    ///   MEASURED, 3 s of digital silence also yields zero results (0 partials,
+    ///   0 finals), so emptiness alone cannot tell a wedged analyzer from a user
+    ///   who did not speak. Without a gate here every silent press would release
+    ///   the cached engines and pay a reload on the next press, the routine
+    ///   cooldown spike S1 explicitly rejected.
+    /// * a non-empty volatile. The meter is a THRESHOLD on a physical signal, so
+    ///   a low-gain mic (or a quiet speaker on a distant array) can sit under
+    ///   0.02 while the analyzer is transcribing perfectly well. When the
+    ///   analyzer itself emitted words, arguing about the microphone's level is
+    ///   absurd: its own output is the better evidence, and requiring the meter
+    ///   too meant a quiet user's utterance was dropped with a volatile in hand.
+    ///
+    /// Neither witness can fire on true silence: digital silence produces no
+    /// volatiles, and its peak is exactly 0.
+    static func producedNothing(finals: [String], lastPartial: String,
+                                starved: Bool, peakLevel: Float) -> Bool {
+        guard finals.allSatisfy({ $0.trimmingCharacters(in: .whitespaces).isEmpty }),
+              !starved else { return false }
+        return peakLevel >= voicedPeakThreshold
+            || !lastPartial.trimmingCharacters(in: .whitespaces).isEmpty
+    }
+
+    /// Wait for `done`, extending the deadline for as long as the analyzer is
+    /// still producing results.
+    ///
+    /// The flat `budget`-from-`t0` deadline this replaces could not tell "the
+    /// analyzer is stuck" from "the analyzer is busy", so it treated both as
+    /// stuck and hard-killed at 1.5 s — discarding the tail of a long utterance,
+    /// or all of it when no final had landed yet. `TranscriptSink.changes` is
+    /// the discriminator: it moves on every result of either kind, so a finalize
+    /// that is transcribing visibly differs from one that is wedged.
+    ///
+    /// Two guarantees, both deliberate:
+    /// * an IDLE stall costs exactly `budget` — the dead-microphone case does
+    ///   not get slower;
+    /// * a WORKING finalize gets up to `progressBudgetMultiple × budget` from
+    ///   `t0` and not one slice more, so a wedged analyzer that somehow keeps
+    ///   emitting cannot extend itself forever.
+    static func waitForFinalize(_ done: Signal, sink: TranscriptSink,
+                                budget: Double, from t0: Date) async -> Bool {
+        let hardCap = max(budget, budget * progressBudgetMultiple)
+        var lastChange = await sink.changes
+        var lastProgress = Date()
+        while true {
+            // Polls at 1 ms inside the slice, so the common 40–110 ms finalize
+            // still returns as fast as it ever did.
+            if await done.wait(timeout: progressSliceSeconds, deadlineFrom: Date()) { return true }
+            if Date().timeIntervalSince(t0) >= hardCap { return false }
+            let changes = await sink.changes
+            if changes != lastChange {
+                lastChange = changes
+                lastProgress = Date()
+                continue
+            }
+            if Date().timeIntervalSince(lastProgress) >= budget { return false }
+        }
+    }
 
     private func teardown(_ session: Session, hard: Bool) async {
         if hard {
@@ -279,7 +383,17 @@ actor TranscriptSink {
     private var lastEmitted = ""
     private var error: String?
 
+    /// Monotonic count of results absorbed, of EITHER kind.
+    ///
+    /// This is the liveness signal `finalize` polls, which is why it counts
+    /// every arrival rather than every text change: a run of identical volatiles
+    /// is suppressed for the live field (it would spam it), but it is still
+    /// proof that the analyzer is working, and killing a finalize that is
+    /// repeating itself would be the same defect in a smaller costume.
+    private(set) var changes: UInt64 = 0
+
     func appendFinal(_ text: String) -> String? {
+        changes &+= 1
         finals.append(text)
         joinedFinals = finals.map { $0.trimmingCharacters(in: .whitespaces) }
             .filter { !$0.isEmpty }.joined(separator: " ")
@@ -288,6 +402,7 @@ actor TranscriptSink {
     }
 
     func setVolatile(_ text: String) -> String? {
+        changes &+= 1
         volatileText = text
         let joined = joinedFinals.isEmpty
             ? text

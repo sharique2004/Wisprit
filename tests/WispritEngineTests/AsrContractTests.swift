@@ -132,28 +132,37 @@ final class AsrManagerFallbackTests: XCTestCase {
         XCTAssertEqual(batch.calls, 1)
     }
 
-    func testCrashWithTextKeepsTheStreamingResult() async {
+    /// A crash's partial text is still only as far as the engine got, so the
+    /// batch pass now runs — but it only WINS by reading more of the utterance.
+    /// (Was: crash-with-text short-circuited the batch entirely.)
+    func testCrashWithTextKeepsTheStreamingResultWhenTheBatchReadLess() async {
         let engine = FakeAsrEngine(script: .init(
-            result: .init(text: "partial words", engine: "apple_live", finalizeMs: 40, crashed: true)))
-        let (m, batch) = manager(engine: engine, batchText: "should not be used")
+            result: .init(text: "partial words here", engine: "apple_live",
+                          finalizeMs: 40, crashed: true)))
+        let (m, batch) = manager(engine: engine, batchText: "two words")
         await m.begin { _ in }
         m.feed(pcm: pcm(1))
         let r = await m.finalize()
-        XCTAssertEqual(r.text, "partial words")
-        XCTAssertEqual(batch.calls, 0)
+        XCTAssertEqual(r.text, "partial words here")
+        XCTAssertEqual(r.engine, "apple_live")
+        XCTAssertEqual(batch.calls, 1, "the retained audio is always worth a second read")
     }
 
-    func testTimeoutReturnsPartialsAndDoesNotTriggerBatch() async {
+    /// Policy change (measured): a timeout's partial is a truncation, not a
+    /// result. All 25 timeouts in the 494-utterance production sample returned
+    /// `chars=0` while the audio sat unread — the batch pass now reads it, and
+    /// the longer reading of the same audio wins.
+    func testTimeoutWithPartialsNowRunsTheBatchEngine() async {
         let engine = FakeAsrEngine(script: .init(
             result: .init(text: "as far as it got", engine: "apple_live",
                           finalizeMs: 1500, timedOut: true)))
-        let (m, batch) = manager(engine: engine, batchText: "should not be used")
+        let (m, batch) = manager(engine: engine, batchText: "as far as it got before the deadline")
         await m.begin { _ in }
         m.feed(pcm: pcm(1))
         let r = await m.finalize()
-        XCTAssertTrue(r.timedOut)
-        XCTAssertEqual(r.text, "as far as it got")
-        XCTAssertEqual(batch.calls, 0)
+        XCTAssertTrue(r.timedOut, "the streaming failure is still counted")
+        XCTAssertEqual(r.text, "as far as it got before the deadline")
+        XCTAssertEqual(batch.calls, 1)
     }
 
     func testCrashRecoveryStillDropsHallucinations() async {
