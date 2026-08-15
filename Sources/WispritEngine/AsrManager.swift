@@ -45,7 +45,7 @@ public final class AsrManager: @unchecked Sendable {
     public init(settings: AsrSettings,
                 vocabulary: (any VocabularySource)? = nil,
                 primaryFactory: @escaping @Sendable (AsrSettings) -> any AsrEngine = { SpeechAnalyzerEngine(settings: $0) },
-                batch: (any BatchTranscribing)? = FilteredBatchTranscriber(WhisperKitBatchStub())) {
+                batch: (any BatchTranscribing)? = FilteredBatchTranscriber(AppleBatchTranscriber())) {
         self.settings = settings
         self.primaryFactory = primaryFactory
         self.batch = batch
@@ -115,15 +115,8 @@ public final class AsrManager: @unchecked Sendable {
         if let engine = currentPrimary, primaryIsStarted {
             let result = await engine.finalize()
             setPrimary(nil, started: false)
-            // Any streaming result with text (clean or timeout-with-partials) is
-            // returned as-is. The batch engine is the recovery path for a genuine
-            // CRASH only — never for an empty result. On silence the engine
-            // legitimately returns nothing, and running Whisper on that silence is
-            // slow AND hallucinates stock phrases like "Thank you." A silent
-            // push-to-talk must insert nothing. (commit b0a763f)
-            if !result.text.isEmpty || !result.crashed { return result }
-            if let fallback = await runBatch(retained.pcm) { return fallback }
-            return result
+            guard Self.needsRescue(result) else { return result }
+            return await rescue(result, pcm: retained.pcm)
         }
 
         // Batch-only path (engine override, or the primary never started).
@@ -182,6 +175,82 @@ public final class AsrManager: @unchecked Sendable {
         lastRetainedValue = RetainedUtterance(id: utteranceID, pcm: Data())
         lock.unlock()
     }
+
+    /// Is this streaming result one the batch engine is allowed to re-read?
+    ///
+    /// The old rule was "crash only", and it was written when `runBatch` could
+    /// not succeed (the WhisperKit slot was a stub returning nil) and when the
+    /// only batch engine on the table was a Whisper that hallucinates stock
+    /// captions on silence. Both premises are gone: the batch engine is now
+    /// Apple's own on-device recognizer over the SAME retained PCM, and the
+    /// production numbers say crash-only left the user with nothing far too
+    /// often — 14.4 % of 494 utterances empty, and all 25 timeouts (5.1 %)
+    /// returned `chars=0` while the full utterance sat unread in retention.
+    ///
+    /// So: rescue every way the ENGINE can fail —
+    /// * `crashed` — the original trigger, unchanged.
+    /// * `timedOut` — the finalize deadline fired. Whatever the streaming
+    ///   engine had is a truncation of the utterance at best; on the LibriSpeech
+    ///   eval, 5/200 clips were truncated or emptied by exactly this.
+    /// * `producedNothing` — audible speech in, clean finish, nothing out.
+    /// * empty text with a peak level that clears `voicedPeakThreshold` — the
+    ///   same defect as `producedNothing`, for an engine that did not label it
+    ///   (a starved-but-loud session; any `AsrEngine` other than this one).
+    ///
+    /// The quiet-microphone case arrives through `producedNothing`, not through
+    /// the peak clause: `SpeechAnalyzerEngine.producedNothing` treats a volatile
+    /// the analyzer emitted as speech evidence in its own right, precisely
+    /// because the meter can sit under the threshold while the analyzer is
+    /// transcribing. A result that carried a partial is therefore already
+    /// flagged by the time it gets here — and, having had that partial salvaged
+    /// into its text, is no longer empty either.
+    ///
+    /// And never rescue SILENCE. A clean finish with a peak below the voiced
+    /// threshold is a user who did not speak, and a silent push-to-talk must
+    /// insert nothing — the b0a763f rule, still load-bearing. `peakLevel` is
+    /// what makes the distinction possible at all: MEASURED, 3 s of digital
+    /// silence yields zero results, exactly like a wedged analyzer does.
+    static func needsRescue(_ result: UtteranceResult) -> Bool {
+        if result.crashed || result.timedOut || result.producedNothing { return true }
+        return result.text.isEmpty
+            && result.peakLevel >= SpeechAnalyzerEngine.voicedPeakThreshold
+    }
+
+    /// Re-transcribe the retained utterance and decide which reading to keep.
+    ///
+    /// The interesting case is timeout-WITH-partial-text, which used to be
+    /// returned as a success. It is not one: the deadline fired mid-utterance,
+    /// so the partial is the sentence cut off wherever the clock happened to
+    /// land. The batch pass reads the whole thing, and more words is the signal
+    /// that it did — a longer reading of the same audio can only be a longer
+    /// reading. When the batch pass comes back shorter (or empty, or the filter
+    /// dropped it as a hallucination), the streaming text stands: the rescue is
+    /// allowed to add words, never to lose them.
+    private func rescue(_ streaming: UtteranceResult, pcm: Data) async -> UtteranceResult {
+        guard let batch = await runBatch(pcm) else { return streaming }
+        if !streaming.text.isEmpty,
+           Self.wordCount(batch.text) <= Self.wordCount(streaming.text) {
+            log.info("batch rescue declined: streaming kept \(Self.wordCount(streaming.text)) words vs batch \(Self.wordCount(batch.text))")
+            return streaming
+        }
+        log.warning("batch rescue applied: \(batch.text.count) chars from \(batch.engine, privacy: .public) after the streaming engine returned \(streaming.text.count)")
+        // The engine name and elapsed ms are the BATCH pass's, because that is
+        // the pass whose text the user is about to see. Everything describing
+        // the streaming failure survives untouched, so `metrics.log` still
+        // counts this utterance against the streaming engine.
+        return UtteranceResult(text: batch.text, engine: batch.engine,
+                               finalizeMs: batch.finalizeMs,
+                               timedOut: streaming.timedOut,
+                               crashed: streaming.crashed,
+                               starvedInput: streaming.starvedInput,
+                               peakLevel: streaming.peakLevel,
+                               producedNothing: streaming.producedNothing,
+                               rescued: true)
+    }
+
+    /// Words after lowercasing and stripping punctuation, so "more words" is a
+    /// statement about CONTENT and not about how each engine punctuates.
+    static func wordCount(_ text: String) -> Int { TranscriptText.words(text).count }
 
     private func runBatch(_ pcm: Data) async -> UtteranceResult? {
         guard let batch, !pcm.isEmpty else { return nil }

@@ -119,7 +119,7 @@ public final class VocabularyChannel: @unchecked Sendable {
             try await analyzer.prepareToAnalyze(in: format)
             try await analyzer.start(inputSequence: sequence)
             // Off the paste path: feed as fast as the analyzer accepts it, no pacing.
-            for chunk in Self.split(pcm) {
+            for chunk in PcmFormat.split(pcm) {
                 guard let buffer = PcmFormat.buffer(from: chunk, in: format) else { continue }
                 builder.yield(AnalyzerInput(buffer: buffer))
             }
@@ -166,16 +166,6 @@ public final class VocabularyChannel: @unchecked Sendable {
         return hits
     }
 
-    private static func split(_ pcm: Data) -> [Data] {
-        let step = Int(PcmFormat.chunkFrames) * PcmFormat.bytesPerFrame
-        var out: [Data] = []
-        var i = 0
-        while i < pcm.count {
-            out.append(pcm.subdata(in: i..<min(i + step, pcm.count)))
-            i += step
-        }
-        return out
-    }
 }
 
 actor FinalsSink {

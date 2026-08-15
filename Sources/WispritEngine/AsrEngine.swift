@@ -14,9 +14,12 @@ public struct UtteranceResult: Sendable, Equatable {
     public var finalizeMs: Double
     /// finalize did not complete inside `finalize_timeout_ms`.
     public var timedOut: Bool
-    /// The engine failed for real (results stream errored / finalize threw) —
-    /// the ONLY condition that may trigger the batch fallback. An empty result
-    /// is not a failure: on silence the engine legitimately returns nothing.
+    /// The engine failed for real (results stream errored / finalize threw).
+    /// One of several conditions that may trigger the batch rescue — see
+    /// `AsrManager.needsRescue`, which also covers a timeout and a clean finish
+    /// that ate audible speech. What has never been a rescue trigger, and must
+    /// not become one, is emptiness alone: on silence the engine legitimately
+    /// returns nothing.
     public var crashed: Bool
     /// Less than one 100 ms chunk of audio ever reached the analyzer, so an
     /// empty result says nothing about the engine — the capture side starved it.
@@ -29,21 +32,36 @@ public struct UtteranceResult: Sendable, Equatable {
     public var starvedInput: Bool
     /// Loudest `PcmFormat.level` the engine saw across this utterance, 0 when it
     /// never metered any (batch paths, a session that never started). It is the
-    /// only thing that separates "the user did not speak" from "the analyzer ate
-    /// speech and returned nothing" — see `EmptyReason`.
+    /// primary thing that separates "the user did not speak" from "the analyzer
+    /// ate speech and returned nothing" — see `EmptyReason`.
     public var peakLevel: Float
-    /// Audible speech in, clean finish, no text out — the defect, as opposed to
-    /// the several benign ways an utterance legitimately comes back empty.
+    /// Speech in, clean finish, no final out — the defect, as opposed to the
+    /// several benign ways an utterance legitimately comes back empty.
+    ///
+    /// "Speech in" has two witnesses and needs only one: a `peakLevel` over the
+    /// voiced threshold, or a volatile the analyzer itself emitted. The second
+    /// exists because the meter is a threshold on a physical signal — a low-gain
+    /// microphone can sit under it while the analyzer transcribes perfectly
+    /// well, and requiring the meter dropped those utterances on the floor.
     public var producedNothing: Bool
+    /// This text came from the batch engine after the streaming one failed.
+    ///
+    /// The failure flags (`timedOut`/`crashed`/`producedNothing`) stay set on a
+    /// rescued result on purpose: the streaming engine did fail, and a metrics
+    /// stream that quietly relabelled those rows as successes would erase the
+    /// very rate this whole path exists to drive down. This flag is what keeps
+    /// "the streaming engine failed" and "the user lost their words" separable —
+    /// before it, the two were the same row.
+    public var rescued: Bool
 
     public init(text: String, engine: String, finalizeMs: Double,
                 timedOut: Bool = false, crashed: Bool = false,
                 starvedInput: Bool = false, peakLevel: Float = 0,
-                producedNothing: Bool = false) {
+                producedNothing: Bool = false, rescued: Bool = false) {
         self.text = text; self.engine = engine; self.finalizeMs = finalizeMs
         self.timedOut = timedOut; self.crashed = crashed
         self.starvedInput = starvedInput; self.peakLevel = peakLevel
-        self.producedNothing = producedNothing
+        self.producedNothing = producedNothing; self.rescued = rescued
     }
 }
 

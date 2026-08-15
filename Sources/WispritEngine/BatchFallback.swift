@@ -3,11 +3,10 @@ import WispritKit
 
 /// The batch recovery path, ported from `wisprit/asr_batch.py`.
 ///
-/// Python ran mlx-whisper (GPU) then faster-whisper (CPU). The native port
-/// replaces both with WhisperKit large-v3-turbo shipped as a Background Assets
-/// pack (research §asr-alternatives) — Phase 3. Until then the slot is a stub
-/// that reports itself unavailable, which makes the fallback a no-op and leaves
-/// the streaming result untouched.
+/// Python ran mlx-whisper (GPU) then faster-whisper (CPU). The shipping
+/// implementation is `AppleBatchTranscriber` — Apple's own on-device
+/// `SpeechTranscriber` over the retained PCM, no downloaded weights and no
+/// network. It is what `AsrManager` installs by default.
 public protocol BatchTranscribing: Sendable {
     var name: String { get }
     /// nil = this engine could not produce anything (unavailable / failed).
@@ -15,18 +14,21 @@ public protocol BatchTranscribing: Sendable {
     func transcribe(pcm: Data, settings: AsrSettings) async -> String?
 }
 
-/// Phase 3 slot. `mlx_whisper` and `faster_whisper` in `settings["engine"]` both
-/// map here — the Python model names stay valid config values so an existing
-/// `config.json` keeps working.
+/// The never-built Phase-3 slot, kept only because `mlx_whisper` and
+/// `faster_whisper` are still valid `settings["engine"]` values (the Python
+/// model names stay accepted so an existing `config.json` keeps working) and a
+/// config that names one has to map SOMEWHERE.
+///
+/// It is no longer the default. It always returned nil, which meant that for as
+/// long as it was wired in as `AsrManager`'s batch engine there was no recovery
+/// path at all — the retained PCM of every failed utterance was read by nobody.
+/// Do not restore it to that position without a real engine behind it.
 public struct WhisperKitBatchStub: BatchTranscribing {
     public let name = "whisperkit"
     public init() {}
 
     public func transcribe(pcm: Data, settings: AsrSettings) async -> String? {
-        // TODO(Phase 3): WhisperKit large-v3-turbo via Background Assets.
-        // Returning nil keeps the b0a763f semantics exactly: no phantom text,
-        // and a crash with no recoverable audio simply yields an empty utterance.
-        WLog.logger("engine.batch").info("batch fallback requested but WhisperKit is not built yet (Phase 3)")
+        WLog.logger("engine.batch").info("WhisperKit batch slot was never built — no recovery from this engine")
         return nil
     }
 }
