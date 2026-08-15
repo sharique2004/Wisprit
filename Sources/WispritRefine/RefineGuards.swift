@@ -455,12 +455,23 @@ public enum RefineGuards {
     /// the one transform this guard must never touch. Known-remaining hole,
     /// pinned by `testTheRemainingCueHolesAreRecorded`.
     static func hasSelfCorrectionCue(_ raw: String) -> Bool {
+        firstSelfCorrectionCue(raw) != nil
+    }
+
+    /// The UTF-16 range of the first genuine cue's own words — the alternation
+    /// only, NOT the trailing `[^\w\n]*\w`, which reaches into the first word of
+    /// the replacement and would swallow a one-word correction whole.
+    ///
+    /// `hasSelfCorrectionCue` is this, asked as a yes/no. `droppedCorrection`
+    /// needs the position too: what it compares is the text on either SIDE of
+    /// the cue.
+    static func firstSelfCorrectionCue(_ raw: String) -> NSRange? {
         let ns = raw as NSString
         for match in selfCorrectionCue.matches(
             in: raw, range: NSRange(location: 0, length: ns.length))
         {
             let cueRange = match.range(at: 1)
-            guard cueRange.location != NSNotFound else { return true }
+            guard cueRange.location != NSNotFound else { return match.range }
             let cue = ns.substring(with: cueRange)
                 .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
                 .lowercased()
@@ -468,9 +479,9 @@ public enum RefineGuards {
             if cue == "no" && literalNoLeaders.contains(leader) { continue }
             if cue == "rather" && leader != "or" { continue }
             if cue == "i said" && reportedSayingLeaders.contains(leader) { continue }
-            return true
+            return cueRange
         }
-        return false
+        return nil
     }
 
     /// The last word before a UTF-16 offset, lowercased, hesitations skipped.
@@ -591,6 +602,98 @@ public enum RefineGuards {
             loss += 1
         }
         return loss >= droppedContentThreshold
+    }
+
+    // MARK: - dropped correction
+    //
+    // The cue is a two-edged thing. `droppedContent` and `paraphrasedContent`
+    // both stand down when they see one, because rule 4 — resolving a spoken
+    // self-correction — is the model's job and it necessarily deletes and
+    // rewrites. That trust is only earned when the model actually RESOLVES the
+    // correction. Measured in production (~/.wisprit/history.sqlite
+    // utterance_detail #172): "I was going to a hackathon tomorrow. I mean
+    // today." came back "I was going to a hackathon tomorrow." — the model read
+    // the correction as a hedge, deleted it, and KEPT THE SUPERSEDED WORD. The
+    // user asked for today and the field said tomorrow. Outcome `applied`.
+    //
+    // Nothing upstream can see it. `plausible` sees a normal shrink,
+    // `droppedContent` counts one lost content word against a threshold of 3,
+    // and both content guards have already stood down on the cue. And it cannot
+    // be repaired downstream either: refine runs BEFORE the deterministic
+    // resolver, so deleting the cue destroys the only evidence the resolver
+    // works from.
+    //
+    // Which is exactly why the fix is to return VERBATIM rather than to try to
+    // resolve it here. The same table shows the deterministic resolver handling
+    // this shape whenever refine leaves it alone — #173 "…today, I mean
+    // tomorrow." → "…hackathon tomorrow.", #174, #175, #176 "…tomorrow, I mean
+    // today." → "…today.", #177 "…tonight. I mean, tomorrow morning." →
+    // "…tomorrow morning." — 5 of the 7 in that family resolved correctly,
+    // every one of them an utterance refine passed through untouched.
+    //
+    // Confirmed end to end for #172 itself by running its two texts through
+    // `PostProcess.process`: the VERBATIM form comes out "I was going to a
+    // hackathon today." — the day the user actually asked for — while refine's
+    // shortened form comes out unchanged, because the evidence is gone. This
+    // guard's whole job is to hand the intact cue back to the stage that
+    // already knows what to do with it.
+
+    /// How many content words after the cue count as "the replacement". A
+    /// spoken correction replaces a phrase, not a clause ("I mean today",
+    /// "sorry, tomorrow morning", "no actually quarter past ten"); three is
+    /// past the longest in the measured family and short enough that a restart
+    /// ("actually you know what let's take the coast road") still lands inside
+    /// it, which is what keeps the battery's restart cases passing.
+    static let correctionReplacementWords = 3
+
+    /// True when the model deleted a spoken self-correction instead of
+    /// resolving it — the cue is gone, the replacement is gone with it, and the
+    /// word the speaker was correcting is still standing.
+    ///
+    /// All three conditions are required, and the third is what makes this a
+    /// diagnosis rather than a second opinion on deletion:
+    ///
+    /// - (a) the reply no longer carries the cue. While it is still there the
+    ///   downstream resolver can act and there is nothing to protect.
+    /// - (b) none of the replacement survived. If ANY of it did, the model
+    ///   resolved the correction — "…tonight. I mean, tomorrow morning." →
+    ///   "…tomorrow morning." is the stage doing its job and must pass. This is
+    ///   the condition that carries the not-fire discipline.
+    /// - (c) …and the word the replacement supersedes is still there. Without
+    ///   it a plain trailing-clause deletion would be reported here as well,
+    ///   which is `droppedContent`'s row; WITH it, "kept the wrong word" is
+    ///   stated in evidence rather than assumed.
+    ///
+    /// Stem-tolerant on both sides like every other guard here, and tolerance
+    /// can only ever SUPPRESS (b) — a surviving replacement is what makes the
+    /// output legitimate.
+    public static func droppedCorrection(raw: String, refined: String) -> Bool {
+        guard let cue = firstSelfCorrectionCue(raw) else { return false }
+        // (a) the cue survived → the resolver can still act on it.
+        if hasSelfCorrectionCue(refined) { return false }
+
+        let ns = raw as NSString
+        let surviving = expandColloquial(contentTokens(refined))
+            .filter { !contentLossStopWords.contains($0) }
+        guard !surviving.isEmpty else { return false }
+        func survives(_ token: String) -> Bool {
+            surviving.contains { sharesStem($0, token) }
+        }
+
+        // (b) …and none of what the speaker replaced it WITH came through.
+        let after = ns.substring(from: cue.location + cue.length)
+        let replacement = expandColloquial(contentTokens(after))
+            .filter { !contentLossStopWords.contains($0) }
+            .prefix(correctionReplacementWords)
+        guard !replacement.isEmpty, !replacement.contains(where: survives) else { return false }
+
+        // (c) …while the word it was replacing did.
+        let before = ns.substring(to: cue.location)
+        guard let superseded = expandColloquial(contentTokens(before))
+            .last(where: { !contentLossStopWords.contains($0) }),
+              survives(superseded)
+        else { return false }
+        return true
     }
 
     // MARK: - paraphrase

@@ -56,11 +56,21 @@ public enum RefineOutcome: String, Sendable, CaseIterable {
     /// count is unremarkable and nothing was deleted). Measured on LibriSpeech
     /// test-clean: refined WER 3.16% → 2.93% with this guard in the chain.
     case paraphrased
+    /// NEW (not in the Python vocabulary): the reply deleted a spoken
+    /// self-correction instead of resolving it, keeping the word the speaker
+    /// was correcting. Its own value because it is the one failure whose repair
+    /// is DOWNSTREAM: the verbatim text still carries the cue, and the
+    /// deterministic resolver measurably resolves this shape (production
+    /// utterance_detail #173–#177). Measured on #172: "I was going to a
+    /// hackathon tomorrow. I mean today." → "I was going to a hackathon
+    /// tomorrow.", outcome `applied`, wrong day inserted.
+    case droppedCorrection = "dropped_correction"
 
     /// True for the thirteen outcomes `wisprit/refine.py` can emit.
     public var isPythonVocabulary: Bool {
         switch self {
-        case .hasLetterRun, .obeyed, .skippedVerbatimApp, .droppedContent, .paraphrased:
+        case .hasLetterRun, .obeyed, .skippedVerbatimApp, .droppedContent, .paraphrased,
+             .droppedCorrection:
             return false
         default: return true
         }

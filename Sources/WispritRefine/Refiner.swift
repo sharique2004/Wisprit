@@ -226,6 +226,22 @@ public actor Refiner {
                 log.warning("refined text dropped content words; keeping verbatim")
                 return RefineResult(text: raw, outcome: .droppedContent)
             }
+            // The cue's other edge. Both content guards STAND DOWN on a spoken
+            // self-correction because resolving one is the model's job; this is
+            // the check that the model actually did it. Placed after
+            // `droppedContent` so a correction deletion that also took a whole
+            // clause with it keeps reporting `dropped_content`, and before
+            // `paraphrasedContent` because it is the narrower diagnosis of the
+            // same input — though the order between those two is behaviourally
+            // moot, since `paraphrasedContent` disables itself on any cued
+            // utterance this one can fire on. Returning verbatim is the POINT:
+            // it hands the intact cue to the deterministic resolver, which
+            // measurably resolves this shape (production utterance_detail
+            // #173–#177, 5 of 7).
+            guard !RefineGuards.droppedCorrection(raw: raw, refined: refined) else {
+                log.warning("refined text dropped a spoken self-correction; keeping verbatim")
+                return RefineResult(text: raw, outcome: .droppedCorrection)
+            }
             // AFTER `droppedContent`, deliberately: every guard above polices
             // length, obedience or DELETION, and each one owns a metrics row it
             // has been reporting since the cutover. This one is the last and
