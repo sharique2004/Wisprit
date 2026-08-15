@@ -104,8 +104,37 @@ enum WispritMacMain {
 
         // Single instance: two taps would each paste on every release. The lock
         // file is shared with the Python era, so the two cannot both run.
+        //
+        // Losing the lock is not an error the user should ever see. They opened
+        // Wisprit; the answer is to show them Wisprit. Only the CLI verbs above
+        // reach `exit()` before this line, so `doctor`/`stats`/`eval`/… never
+        // touch the lock and can never be mistaken for a second launch — the two
+        // paths that get here (`Wisprit window …` and a bare launch) are exactly
+        // the two that mean "put the app on screen".
         let lock = SingleInstanceLock()
-        guard lock.acquire() else {
+        switch InstanceHandoff.arbitrate(
+            lock: lock,
+            request: InstanceHandoff.request(for: launch),
+            client: InstanceHandoffClient(name: InstanceHandoff.portName()))
+        {
+        case .weArePrimary:
+            break
+
+        case .handedOff:
+            // A best-effort nudge; the real raise is the primary's own
+            // (MainWindowController.show activates and bounces LaunchServices).
+            // Silent by design: no notification, no stderr — from where the user
+            // stands, opening Wisprit opened Wisprit.
+            NSRunningApplication.runningApplications(withBundleIdentifier: "com.wisprit.app")
+                .first { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }?
+                .activate()
+            WLog.logger("app").info("another Wisprit is running — handed the window off and exiting")
+            exit(0)
+
+        case .lockedByForeignProcess:
+            // Nobody answered: the Python-era Wisprit (which shares this lock
+            // file on purpose and must never be handed the keyboard question),
+            // or a pre-handoff build. The old refusal is still the right one.
             WLog.logger("app").error("""
                 another Wisprit instance is already running — exiting so we don't \
                 double-paste. Quit the other one from its menu first.

@@ -50,6 +50,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
     let editCapture: EditCapture
     private var statusMenu: StatusMenu!
     private let instanceLock: SingleInstanceLock
+    /// Answers second launches that lost the lock — see `InstanceHandoff`.
+    /// Held for the process lifetime; torn down in `terminate()` *before* the
+    /// lock, so a launcher can never get an ack from an instance that has
+    /// already let go.
+    private var instanceServer: InstanceHandoffServer?
 
     /// The front end. Built eagerly (it is cheap — no probes until the window
     /// opens) so `applicationShouldHandleReopen` never has to construct it while
@@ -154,6 +159,14 @@ public final class AppController: NSObject, NSApplicationDelegate {
         }
         // One notice per device appearance, silenced by `input_device_policy=off`.
         let narrowbandWarner = NarrowbandWarner(
+            isEnabled: { InputDevicePolicySettings.policy(settings) != .off })
+        // Its quiet-speech twin (2026-08-15): the same once-per-device
+        // discipline, the same `input_device_policy=off` kill switch, and a
+        // strictly read-only Core Audio property. Consulted only when an
+        // utterance actually came back marginal — see `SessionController
+        // .flashEmpty` — so a user whose slider is low and whose dictation works
+        // never hears about it.
+        let inputVolumeAdvisor = InputVolumeAdvisor(
             isEnabled: { InputDevicePolicySettings.policy(settings) != .off })
 
         // R33 — the microphone opens at KEY-DOWN, off the session thread.
@@ -335,7 +348,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 expandSnippets: { snippets.expand($0) },
                 // One definition of the grace, in `KeyupGraceSettings`.
                 releaseGrace: KeyupGraceSettings.seconds(settings),
-                inputWarning: { narrowbandWarner.warning() }))
+                inputWarning: { narrowbandWarner.warning() },
+                inputVolumeAdvisory: { inputVolumeAdvisor.lowVolumePercent() }))
 
         super.init()
 
@@ -565,6 +579,37 @@ public final class AppController: NSObject, NSApplicationDelegate {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         app.delegate = self
+
+        // As early as possible: everything below is a beat during which a
+        // simultaneous second launch would find the lock taken and nobody
+        // listening. (`arbitrate`'s retry loop covers that beat; this shortens
+        // it to almost nothing.)
+        //
+        // `assumeIsolated`, not `Task { @MainActor }`: the port source lives on
+        // this run loop, so the handler already IS on the main actor, and the
+        // hop must stay synchronous — the ack has to mean "the window is
+        // opening", not "the request was filed". A launcher that gets an ack
+        // exits immediately and hands focus over.
+        let server = InstanceHandoffServer(name: InstanceHandoff.portName()) { [weak self] request in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                switch request {
+                // `.window(nil)` lands on Setup, because that is where
+                // `openWindow()`'s default lands — deliberately the SAME call a
+                // Dock click makes, so the two entry points cannot drift.
+                case .window(nil): self.openWindow()
+                case .window(let tab?): self.openWindow(tab: tab)
+                case .setupGuide: self.openSetupGuide()
+                }
+            }
+        }
+        if !server.start() {
+            log.warning("""
+                instance-handoff port name is already taken — a second launch will \
+                fall back to the "another copy is running" notice
+                """)
+        }
+        instanceServer = server
 
         statusMenu.install()
 
@@ -910,6 +955,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
         // pasteboard permanently, which the old on-thread sleep made impossible.
         // Bounded by the restore delay (500 ms default).
         Inserter.drainClipboardCustody()
+        // Order matters: stop answering handoffs BEFORE letting go of the lock,
+        // or a launcher could be acked by an instance that is already gone and
+        // then exit having shown the user nothing.
+        instanceServer?.stop()
+        instanceServer = nil
         instanceLock.release()
         NSApplication.shared.terminate(self)
     }
@@ -938,6 +988,15 @@ public final class AppController: NSObject, NSApplicationDelegate {
     /// Clicking the app in Finder, the Dock, or Spotlight when it is already
     /// running. Without this, "opening" Wisprit does nothing at all — the single
     /// behaviour that made a working install look broken.
+    ///
+    /// `hasVisibleWindows` is ignored on purpose: the pill is a visible window
+    /// (a borderless non-activating panel) and would otherwise talk us out of
+    /// opening the real one.
+    ///
+    /// The twin of this is `InstanceHandoff`'s `.window(nil)`, for the case
+    /// LaunchServices does NOT route here — a second *copy* at a different path.
+    /// Both end at this same `openWindow()` so a Dock click and a second launch
+    /// land in exactly the same place.
     public func applicationShouldHandleReopen(_ sender: NSApplication,
                                               hasVisibleWindows flag: Bool) -> Bool {
         openWindow()
@@ -988,6 +1047,7 @@ final class MainThreadPill: PillPort, @unchecked Sendable {
     func flashError(_ message: String) { onMain { $0.flashError(message) } }
     func transientNotice(_ text: String) { onMain { $0.transientNotice(text) } }
     func flashMissed(_ message: String) { onMain { $0.flashMissed(message) } }
+    func flashTooQuiet(_ message: String) { onMain { $0.flashTooQuiet(message) } }
     func hide() { onMain { $0.hide() } }
     func showIdle() { onMain { $0.showIdle() } }
     func showPrewarming() { onMain { $0.showPrewarming() } }

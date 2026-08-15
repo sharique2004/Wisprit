@@ -197,6 +197,9 @@ final class WindowModelTests: XCTestCase {
         model.setHistoryEnabled(false)
         model.setLiveTypingEnabled(true)
         model.setDictationEnabled(false)
+        model.setKeyupGraceMs(80)
+        model.setInputDevicePolicy(.preferBuiltin)
+        model.setVocabularyRetro(false)
 
         let reread = Settings(path: settings.configPath)
         XCTAssertEqual(reread.hotkey, "right_option")
@@ -207,6 +210,9 @@ final class WindowModelTests: XCTestCase {
         XCTAssertFalse(reread.historyEnabled)
         XCTAssertTrue(reread.bool(SettingsKey.liveTyping, or: false))
         XCTAssertFalse(reread.enabled)
+        XCTAssertEqual(reread.int(KeyupGraceSettings.key), 80)
+        XCTAssertEqual(reread.string(InputDevicePolicySettings.key), "prefer_builtin")
+        XCTAssertFalse(VocabularyRetroSettings.isEnabled(reread))
     }
 
     func testStepperValuesAreClampedBeforeTheyReachDisk() {
@@ -214,12 +220,15 @@ final class WindowModelTests: XCTestCase {
 
         model.setHoldDebounceMs(99_999)
         model.setPasteRestoreDelayMs(0)
+        model.setKeyupGraceMs(999)
 
         XCTAssertEqual(model.holdDebounceMs, WindowSettings.holdDebounceRange.upperBound)
         XCTAssertEqual(model.pasteRestoreDelayMs, WindowSettings.pasteRestoreRange.lowerBound)
+        XCTAssertEqual(model.keyupGraceMs, WindowSettings.keyupGraceRange.upperBound)
         let reread = Settings(path: settings.configPath)
         XCTAssertEqual(reread.holdDebounceMs, WindowSettings.holdDebounceRange.upperBound)
         XCTAssertEqual(reread.pasteRestoreDelayMs, WindowSettings.pasteRestoreRange.lowerBound)
+        XCTAssertEqual(reread.int(KeyupGraceSettings.key), WindowSettings.keyupGraceRange.upperBound)
     }
 
     /// The Live Typing row reads the setting through `DoctorFacts`, which only a
@@ -282,6 +291,22 @@ final class WindowModelTests: XCTestCase {
 
         XCTAssertEqual(model.hotkey, .rightOption)
         XCTAssertEqual(model.holdDebounceMs, 275)
+        XCTAssertEqual(model.keyupGraceMs, WindowSettings.keyupGraceDefault)
+        XCTAssertEqual(model.inputDevicePolicy, .warn)
+        XCTAssertTrue(model.vocabularyRetro)
+    }
+
+    func testStringKeyedEngineFeatureKeysReloadFromAHandEditedFile() throws {
+        try """
+            {"keyup_grace_ms": 40, "input_device_policy": "off", "vocabulary_retro": false}
+            """.write(to: settings.configPath, atomically: true, encoding: .utf8)
+        let model = makeModel()
+
+        model.reloadSettings()
+
+        XCTAssertEqual(model.keyupGraceMs, 40)
+        XCTAssertEqual(model.inputDevicePolicy, .off)
+        XCTAssertFalse(model.vocabularyRetro)
     }
 
     // MARK: - history + dictation proof

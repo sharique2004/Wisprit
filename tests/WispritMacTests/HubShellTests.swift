@@ -208,6 +208,23 @@ final class HubShellTests: XCTestCase {
         XCTAssertEqual(WindowSettings.clampAiCleanupTimeout(99999), 30000)
         XCTAssertEqual(WindowSettings.clampFinalizeTimeout(0), 500)
         XCTAssertEqual(WindowSettings.clampFinalizeTimeout(99999), 5000)
+        XCTAssertEqual(WindowSettings.clampKeyupGrace(-1), 0)
+        XCTAssertEqual(WindowSettings.clampKeyupGrace(120), 120)
+        XCTAssertEqual(WindowSettings.clampKeyupGrace(500), 500)
+        XCTAssertEqual(WindowSettings.clampKeyupGrace(501), 500)
+        XCTAssertEqual(WindowSettings.keyupGraceDefault, KeyupGraceSettings.defaultMs)
+    }
+
+    func testInputDevicePolicyFallsBackToWarn() {
+        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.allCases.map(\.rawValue),
+                       ["warn", "prefer_builtin", "off"])
+        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.parse("prefer_builtin"),
+                       .preferBuiltin)
+        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.parse("nonsense"), .warn)
+        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.warn.label, "Warn once")
+        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.preferBuiltin.label,
+                       "Prefer built-in mic")
+        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.off.label, "Do nothing")
     }
 
     func testSelectionPolicyFallsBackToWarm() {
@@ -265,6 +282,28 @@ final class SettingsPageWriteTests: XCTestCase {
         XCTAssertEqual(reread.finalizeTimeoutMs, 2000)
         XCTAssertEqual(reread.engine, "apple_live")
         XCTAssertEqual(reread.terminalBundleIDs, ["com.apple.Terminal"])
+    }
+
+    /// `keyup_grace_ms`, `input_device_policy`, `vocabulary_retro` live outside
+    /// `Settings.defaults` (the `ContextSettings` string-key precedent). A
+    /// visit to Settings still has to write them.
+    func testStringKeyedEngineFeatureKeysWriteThrough() {
+        let model = makeModel()
+        XCTAssertEqual(model.keyupGraceMs, KeyupGraceSettings.defaultMs)
+        XCTAssertEqual(model.inputDevicePolicy, .warn)
+        XCTAssertTrue(model.vocabularyRetro)
+
+        model.setKeyupGraceMs(200)
+        model.setInputDevicePolicy(.off)
+        model.setVocabularyRetro(false)
+
+        let reread = Settings(path: settings.configPath)
+        XCTAssertEqual(reread.int(KeyupGraceSettings.key), 200)
+        XCTAssertEqual(reread.string(InputDevicePolicySettings.key), "off")
+        XCTAssertFalse(VocabularyRetroSettings.isEnabled(reread))
+        XCTAssertFalse(Set(Settings.defaults.keys).contains(KeyupGraceSettings.key))
+        XCTAssertFalse(Set(Settings.defaults.keys).contains(InputDevicePolicySettings.key))
+        XCTAssertFalse(Set(Settings.defaults.keys).contains(VocabularyRetroSettings.enabledKey))
     }
 
     /// The bundle-id list is free text. Blank entries and duplicates are dropped

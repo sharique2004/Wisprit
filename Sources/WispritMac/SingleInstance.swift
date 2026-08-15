@@ -24,6 +24,12 @@ public final class SingleInstanceLock: @unchecked Sendable {
     public var lockPath: URL { path }
     public var isHeld: Bool { descriptor >= 0 }
 
+    #if DEBUG
+    /// Test seam for the `FD_CLOEXEC` assertion. Debug-only and internal:
+    /// nothing outside this guard's own tests has any business with the fd.
+    var descriptorForTesting: Int32 { descriptor }
+    #endif
+
     /// True when we got the lock; false when another Wisprit already holds it.
     public func acquire() -> Bool {
         guard descriptor < 0 else { return true }
@@ -36,7 +42,13 @@ public final class SingleInstanceLock: @unchecked Sendable {
             log.error("cannot create state dir for the instance lock")
             return true
         }
-        let fd = open(path.path, O_WRONLY | O_CREAT, 0o600)
+        // O_CLOEXEC: `flock` belongs to the open-file-description, so any child
+        // that inherited this fd would keep holding the lock after we exit. The
+        // relaunch helper (`AppRelaunch.spawnHelper`) lives up to 10 s waiting
+        // for us to die and then opens the bundle — inheriting would deadlock
+        // the very relaunch it exists to perform. Foundation's `Process` closes
+        // descriptors today; this makes it not depend on that.
+        let fd = open(path.path, O_WRONLY | O_CREAT | O_CLOEXEC, 0o600)
         guard fd >= 0 else {
             log.error("cannot open \(self.path.path, privacy: .public); skipping the single-instance guard")
             return true

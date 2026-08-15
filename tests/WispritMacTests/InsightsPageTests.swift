@@ -171,6 +171,118 @@ final class InsightsMapperTests: XCTestCase {
         XCTAssertEqual(alarm, "1 unexplained (5.0%) — audible speech, clean finish, no text")
     }
 
+    // MARK: - Recovery
+
+    private func mappedRecovery(_ rows: [JSONObject],
+                                choice: MetricsWindowChoice = .days30) -> InsightsRecovery {
+        InsightsMapper.recovery(rows: rows, window: choice.window, now: now)
+    }
+
+    private func rescued(ts: Double, engine: String = "apple_batch",
+                         rescuedFlag: Bool? = nil) -> JSONObject {
+        var object = written(MetricsRecord(ts: ts, heldMs: 1_800, engine: engine,
+                                           finalizeMs: 400, timedOut: false, postMs: 4,
+                                           insertMs: 9, outcome: "paste", chars: 18,
+                                           releaseToTextMs: 420))
+        if let rescuedFlag { object[InsightsRecovery.rescuedKey] = .bool(rescuedFlag) }
+        return object
+    }
+
+    /// `engine == apple_batch` and `rescued: true` both count, and a row that
+    /// carries both is still one utterance.
+    func testRecoveryCountsRescuedHoldsOnce() {
+        let rows = [
+            rescued(ts: daysAgo(1)),
+            rescued(ts: daysAgo(1), engine: "apple_live", rescuedFlag: true),
+            rescued(ts: daysAgo(1), engine: "apple_batch", rescuedFlag: true),
+            spoken(ts: daysAgo(1), releaseMs: 200),
+        ]
+        XCTAssertEqual(mappedRecovery(rows).rescued, 3)
+    }
+
+    /// Integer-era `rescued: 1` still counts — the same 0/1 boolean the rest
+    /// of the stream already accepts.
+    func testRecoveryReadsIntegerEraRescuedFlags() {
+        var row = spoken(ts: daysAgo(1), releaseMs: 200)
+        row[InsightsRecovery.rescuedKey] = .int(1)
+        XCTAssertEqual(mappedRecovery([row]).rescued, 1)
+    }
+
+    func testRecoveryEmptyReasonsIncludeDeviceChangedAndNeverFoldUnclassified() {
+        let rows = [
+            empty(ts: daysAgo(1), reason: InsightsRecovery.deviceChangedReason),
+            empty(ts: daysAgo(1), reason: InsightsRecovery.deviceChangedReason),
+            empty(ts: daysAgo(1), reason: "silent"),
+            empty(ts: daysAgo(1), reason: nil),
+        ]
+        let recovery = mappedRecovery(rows)
+
+        XCTAssertEqual(recovery.emptyReasons,
+                       [InsightsRecovery.deviceChangedReason: 2, "silent": 1])
+        XCTAssertEqual(recovery.unclassifiedEmpty, 1)
+        XCTAssertEqual(recovery.unclassifiedFootnote,
+                       "unclassified 1 — logged before reasons existed")
+        XCTAssertFalse(recovery.emptyReasons.keys.contains("unclassified"))
+    }
+
+    /// Quiet speech is last 7 days, even when the page window is all-time.
+    /// A hold without `peak_level` is an absence, not a quiet hold.
+    func testQuietSpeechIsTheLastSevenDaysAndIgnoresMissingPeaks() {
+        let rows = [
+            empty(ts: daysAgo(1), reason: "silent", peak: 0.05),
+            empty(ts: daysAgo(2), reason: "silent", peak: 0.20),
+            empty(ts: daysAgo(3), reason: "silent"),            // no peak
+            empty(ts: daysAgo(10), reason: "silent", peak: 0.04), // outside 7 days
+            spoken(ts: daysAgo(1), releaseMs: 200),
+        ]
+        // spoken() does not write peak_level, so the 7-day sample is the two
+        // empties that carried one: 0.05 (quiet) and 0.20 (not).
+        let recovery = mappedRecovery(rows, choice: .all)
+
+        XCTAssertEqual(recovery.quietSpeechSample, 2)
+        XCTAssertEqual(recovery.quietSpeech, 1)
+        XCTAssertEqual(recovery.quietSpeechShare, 0.5, accuracy: 1e-9)
+        XCTAssertTrue(recovery.showsQuietCaption)
+        XCTAssertEqual(InsightsRecovery.quietSpeechCaption,
+                       "Speak a touch louder or raise input gain for best accuracy")
+    }
+
+    func testQuietSpeechCaptionFiresOnlyAboveTwentyPercent() {
+        // 1 of 5 is 20% — at the line, not over it.
+        let atLine = (0..<5).map { index -> JSONObject in
+            empty(ts: daysAgo(1), reason: "silent",
+                  peak: index == 0 ? 0.05 : 0.20)
+        }
+        XCTAssertEqual(mappedRecovery(atLine).quietSpeechShare, 0.20, accuracy: 1e-9)
+        XCTAssertFalse(mappedRecovery(atLine).showsQuietCaption)
+
+        let over = atLine + [empty(ts: daysAgo(1), reason: "silent", peak: 0.04)]
+        XCTAssertGreaterThan(mappedRecovery(over).quietSpeechShare, 0.20)
+        XCTAssertTrue(mappedRecovery(over).showsQuietCaption)
+    }
+
+    func testRecoveryDropsNonUtteranceRowsAndHidesWhenThereIsNothingToShow() {
+        let observation = written(MetricsRecord(
+            ts: daysAgo(1), heldMs: 0, engine: "", finalizeMs: 0, timedOut: false,
+            postMs: 0, insertMs: 0, outcome: "edit_observed", chars: 0,
+            editDist: 0, editScope: "im"))
+        var rescuedObservation = observation
+        rescuedObservation[InsightsRecovery.rescuedKey] = .bool(true)
+        rescuedObservation["engine"] = .string(InsightsRecovery.appleBatchEngine)
+
+        XCTAssertTrue(mappedRecovery([observation, rescuedObservation]).isEmpty)
+        XCTAssertEqual(mappedRecovery([spoken(ts: daysAgo(1), releaseMs: 200)]).rescued, 0)
+        XCTAssertTrue(mappedRecovery([]).isEmpty)
+    }
+
+    /// Rescued count follows the page window; a 10-day-old rescue is all-time
+    /// only.
+    func testRecoveryRescuedCountFollowsThePageWindow() {
+        let rows = [rescued(ts: daysAgo(1)), rescued(ts: daysAgo(10))]
+        XCTAssertEqual(mappedRecovery(rows, choice: .days7).rescued, 1)
+        XCTAssertEqual(mappedRecovery(rows, choice: .all).rescued, 2)
+    }
+
     // MARK: - legacy shapes
 
     /// Python wrote `ts` as a float and `timed_out` as 0/1; a later build wrote
@@ -515,5 +627,36 @@ final class InsightsPageModelTests: XCTestCase {
         await model.refreshIfNeeded(dictionary: [DictionaryRow(term: "InsForge", hitCount: 4)])
         XCTAssertEqual(model.input?.vocabulary, [TermUse(term: "InsForge", hits: 4)])
         XCTAssertEqual(reads.count, 1, "a dictionary edit is not a metrics change")
+    }
+
+    /// Recovery is computed from the rows already in memory, on the same
+    /// recompute as the tiles — never a second parse.
+    func testRecoveryIsComputedFromTheSameReadAsTheTiles() async {
+        var rescued = JSONObject([("ts", .double(1_786_000_000)),
+                                  ("outcome", .string("paste")),
+                                  ("engine", .string(InsightsRecovery.appleBatchEngine)),
+                                  ("finalize_ms", .double(60)),
+                                  ("release_to_text_ms", .double(200))])
+        rescued[InsightsRecovery.rescuedKey] = .bool(true)
+        let empty = JSONObject([("ts", .double(1_786_000_000)),
+                                ("outcome", .string("empty")),
+                                ("empty_reason", .string(InsightsRecovery.deviceChangedReason)),
+                                ("peak_level", .double(0.05))])
+        let reads = Reads(), stamp = Stamp(Date())
+        let model = InsightsPageModel(ports: .init(modificationDate: { stamp.date },
+                                                   readAll: { reads.bump(); return [rescued, empty] },
+                                                   now: { 1_786_000_000 },
+                                                   calendar: { .current }))
+
+        XCTAssertNil(model.recovery)
+        await model.refreshIfNeeded()
+        XCTAssertEqual(model.recovery?.rescued, 1)
+        XCTAssertEqual(model.recovery?.emptyReasons[InsightsRecovery.deviceChangedReason], 1)
+        XCTAssertEqual(model.recovery?.quietSpeech, 1)
+        XCTAssertEqual(reads.count, 1)
+
+        model.choice = .days7
+        XCTAssertEqual(model.recovery?.rescued, 1)
+        XCTAssertEqual(reads.count, 1, "a window change is not a metrics change")
     }
 }

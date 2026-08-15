@@ -58,6 +58,19 @@ final class SingleInstanceTests: XCTestCase {
         held.release()
     }
 
+    func testDescriptorIsCloseOnExec() {
+        // A child that inherited the fd would inherit the flock with it and hold
+        // the lock past our exit — which would hang the relaunch helper, since
+        // it is itself the child waiting for the lock to come free.
+        let held = lock()
+        XCTAssertTrue(held.acquire())
+        defer { held.release() }
+
+        let flags = fcntl(held.descriptorForTesting, F_GETFD)
+        XCTAssertNotEqual(flags, -1)
+        XCTAssertNotEqual(flags & FD_CLOEXEC, 0)
+    }
+
     func testDefaultPathIsTheSameFileThePythonEraLocks() {
         let root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("wisprit-lockpath-\(UUID().uuidString)")
