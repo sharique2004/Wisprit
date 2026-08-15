@@ -1,4 +1,5 @@
 import XCTest
+import WispritKit
 
 @testable import WispritCorrections
 

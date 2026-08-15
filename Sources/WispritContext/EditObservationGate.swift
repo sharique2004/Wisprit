@@ -1,5 +1,6 @@
 import Foundation
 import WispritCorrections
+import WispritKit
 
 /// One observed correction the flywheel may eventually learn from.
 ///

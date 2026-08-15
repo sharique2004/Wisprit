@@ -114,6 +114,82 @@ final class DroppedContentGuardTests: XCTestCase {
             refined: refined))
     }
 
+    /// …and the other half of the cue check, the one the bare alternation never
+    /// had: `no`, `rather` and `i said` are ordinary English, matched ANYWHERE,
+    /// so a single incidental occurrence turned the guard off for the whole
+    /// utterance. Every row below is a real clause deletion whose only "cue" is
+    /// a word the speaker used literally. Measured against this file before the
+    /// leader-word narrowing: all of them returned false — no protection at all.
+    func testAnIncidentalCueWordNoLongerDisablesTheGuard() {
+        let tail = " and then review the migration script with the platform team on monday"
+        let cases: [(String, String)] = [
+            // bare "no" after a copula — the negation, not a correction
+            ("there is no way we can ship the retry policy before friday" + tail,
+             "There is no way we can ship the retry policy before Friday."),
+            // …with the hesitation the ASR leaves between them
+            ("there is um no way we can ship the retry policy before friday" + tail,
+             "There is no way we can ship the retry policy before Friday."),
+            ("we have no time to ship the retry policy before friday" + tail,
+             "We have no time to ship the retry policy before Friday."),
+            // "rather" as a degree adverb rather than "or rather"
+            ("the rollout plan is rather aggressive so we should ship the retry policy "
+             + "before friday" + tail,
+             "The rollout plan is rather aggressive, so we should ship the retry policy "
+             + "before Friday."),
+            // "as I said" is a speaker referring back, not correcting
+            ("as i said we should ship the retry policy before friday" + tail,
+             "As I said, we should ship the retry policy before Friday."),
+        ]
+        for (raw, refined) in cases {
+            XCTAssertTrue(RefineGuards.droppedContent(raw: raw, refined: refined),
+                          raw.debugDescription)
+        }
+    }
+
+    /// The holes that stay open, pinned so they are a decision and not a
+    /// surprise. `sorry` and `actually` are ordinary words too, but neither has
+    /// a leader that separates the readings, and narrowing them on a guess would
+    /// bounce genuine rule-4 corrections — the one transform this guard must
+    /// never touch. Failing safe here means failing permissive.
+    func testTheRemainingCueHolesAreRecorded() {
+        let tail = " and then review the migration script with the platform team on monday"
+        for raw in [
+            "sorry i missed your call we should ship the retry policy before friday" + tail,
+            "it actually shipped last week so we should ship the retry policy "
+                + "before friday" + tail,
+        ] {
+            XCTAssertFalse(
+                RefineGuards.droppedContent(
+                    raw: raw, refined: "We should ship the retry policy before Friday."),
+                "known-remaining: " + raw.debugDescription)
+        }
+    }
+
+    /// Inverse Text Normalization is the model's JOB, and the 4-character stem
+    /// cannot map a spelled number onto a digit — "elev" is not a prefix of
+    /// "11%". Any cleanup that normalized a 3+-word number therefore counted
+    /// three losses and bounced the whole refine to verbatim; two-word numbers
+    /// escaped only by sitting under the threshold, which is arithmetic, not a
+    /// guard. All four pairs below fired the guard before the exemption.
+    func testInverseTextNormalizationIsNotContentLoss() {
+        let itn: [(String, String)] = [
+            ("um the total is three hundred twenty seven dollars", "The total is $327."),
+            ("twenty five thousand dollars", "$25,000."),
+            ("five five five one two one two", "555-1212."),
+            ("nine forty five a m", "9:45 AM."),
+        ]
+        for (raw, refined) in itn {
+            XCTAssertFalse(RefineGuards.droppedContent(raw: raw, refined: refined),
+                           refined.debugDescription)
+        }
+        // The exemption is conditioned on the reply actually being in digits, so
+        // it cannot be used to delete a clause that merely mentions a number.
+        XCTAssertTrue(RefineGuards.droppedContent(
+            raw: "the total is three hundred twenty seven dollars and the invoice is overdue "
+                + "so please chase the vendor about it",
+            refined: "The total is three hundred twenty seven dollars."))
+    }
+
     /// A cue in the REPLY is not a cue: the model may not license its own
     /// deletion.
     func testCueOnlyCountsInTheInput() {
@@ -176,12 +252,49 @@ final class DroppedContentGuardTests: XCTestCase {
     }
 
     /// Loss is a MULTISET difference: a repeated word that comes back once is a
-    /// real loss, not a free pass. (Three distinct repeats, so this fires.)
+    /// real loss, not a free pass.
+    ///
+    /// This fixture is repeats and NOTHING else — four "tape"s in, one back, so
+    /// the loss is exactly 3 and the threshold is cleared by the repeats alone.
+    /// The claim used to be made by the comment and denied by the code: after
+    /// the exact-match multiset decremented to zero the stem fallback searched
+    /// the whole refined token list again, so every repeat found the occurrence
+    /// its predecessor had already spent and repeated-word loss was never
+    /// counted. The old fixture (kept below) could not see that — it cleared the
+    /// threshold on green/blue/plus and passed either way.
     func testRepeatedWordsAreCountedAsAMultiset() {
+        XCTAssertTrue(RefineGuards.droppedContent(
+            raw: "bring the tape the tape the tape and the tape", refined: "Bring the tape."))
+        // Three occurrences is a loss of 2 — under the threshold, and therefore
+        // the boundary that says the count is a count and not a flag.
+        XCTAssertFalse(RefineGuards.droppedContent(
+            raw: "bring the tape the tape and the tape", refined: "Bring the tape."))
+        // The original fixture, which fires on the distinct words.
         XCTAssertTrue(RefineGuards.droppedContent(
             raw: "bring the red folder the green folder and the blue folder plus the tape "
                 + "the tape and the stapler the stapler",
             refined: "Bring the red folder, the tape and the stapler."))
+    }
+
+    /// The stem fallback draws from the same multiset, so it cannot resurrect an
+    /// occurrence an exact match already spent — but it must still absorb a
+    /// genuine inflection, and it must consume a STABLE occurrence (dictionary
+    /// iteration order is not).
+    func testTheStemFallbackConsumesFromTheSameMultiset() {
+        // "migrate"/"migration" is one word rewritten, not two words lost.
+        XCTAssertFalse(RefineGuards.droppedContent(
+            raw: "we should migrate the cluster this week",
+            refined: "We should complete the migration of the cluster this week."))
+        // …but two raw words may not both be paid for by one refined token.
+        XCTAssertTrue(RefineGuards.droppedContent(
+            raw: "review the migration script and the migration plan and the migration "
+                + "runbook before friday",
+            refined: "Review the migration script before Friday."))
+        for _ in 0..<25 {
+            XCTAssertTrue(RefineGuards.droppedContent(
+                raw: "bring the tape the tape the tape and the tape", refined: "Bring the tape."),
+                "the consumed occurrence must not depend on dictionary order")
+        }
     }
 
     /// An empty reply belongs to `plausible`, which runs first and owns the

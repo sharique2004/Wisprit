@@ -20,6 +20,7 @@ public enum WispritPaths {
 
     public static var configPath: URL { stateDir.appendingPathComponent("config.json") }
     public static var dictionaryPath: URL { stateDir.appendingPathComponent("dictionary.json") }
+    public static var snippetsPath: URL { stateDir.appendingPathComponent("snippets.json") }
     public static var historyPath: URL { stateDir.appendingPathComponent("history.sqlite") }
     public static var metricsPath: URL { stateDir.appendingPathComponent("metrics.log") }
     public static var logPath: URL { stateDir.appendingPathComponent("wisprit.log") }

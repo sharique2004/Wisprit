@@ -36,11 +36,26 @@ public struct VocabularyRetroEdit: Equatable, Sendable {
     /// `PhoneticScorer.score(replace, with)` — recorded so a refusal threshold
     /// can be re-tuned against real accepted edits later.
     public var score: Double
+    /// WHERE in the inserted text this block sits, as a UTF-16 offset.
+    ///
+    /// The exact position has always been known here; until it was carried it
+    /// was thrown away, and the input method could only ever fix the LAST
+    /// occurrence of `replace` inside the run it committed — the wrong one
+    /// whenever a word repeats, which across the consecutive utterances an IM
+    /// session spans is the ordinary case, not the exotic one.
+    ///
+    /// UTF-16 because the wire, the input method's committed record and the
+    /// app-side mirror all speak `NSRange`, while the token ranges above index
+    /// `Array(Character)` (grapheme clusters). The conversion happens exactly
+    /// once, in `judge`, so an emoji before the block cannot shift the anchor
+    /// by the two units a surrogate pair costs.
+    public var utf16Location: Int
 
-    public init(replace: String, with: String, score: Double) {
+    public init(replace: String, with: String, score: Double, utf16Location: Int) {
         self.replace = replace
         self.with = with
         self.score = score
+        self.utf16Location = utf16Location
     }
 }
 
@@ -332,10 +347,15 @@ public enum VocabularyReconciler {
         // token range — never rebuilt — so `RetroEditPlanner`'s literal search
         // finds it in the document exactly as we committed it. Whatever sat
         // between the tokens (a comma, a stray emoji) travels with them.
+        //
+        // The offset travels too, converted to UTF-16 HERE and nowhere else:
+        // it is what lets the input method fix the occurrence this block IS
+        // rather than the last one that happens to read the same.
         let from = live[block.live.lowerBound].range.lowerBound
         let upTo = live[block.live.upperBound - 1].range.upperBound
         return .accept(VocabularyRetroEdit(replace: String(chars[from..<upTo]),
-                                           with: term, score: score))
+                                           with: term, score: score,
+                                           utf16Location: String(chars[0..<from]).utf16.count))
     }
 
     /// Every space removed — the form the "already correct" gate compares, so a

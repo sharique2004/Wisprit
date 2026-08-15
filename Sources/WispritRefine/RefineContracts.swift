@@ -47,11 +47,21 @@ public enum RefineOutcome: String, Sendable, CaseIterable {
     /// the band. Measured on LibriSpeech test-clean (200 clips): raw ASR WER
     /// 2.68% → refined 3.59%, worst clip ten words short, outcome `applied`.
     case droppedContent = "dropped_content"
+    /// NEW (not in the Python vocabulary): the reply said something the
+    /// utterance did not — a substitution or an insertion that is neither a
+    /// phonetic repair, a merge, nor ITN. Its own value rather than a reuse of
+    /// `dropped_content` because the two are different failures and both are
+    /// read out of `metrics.log`: that one is words GONE, this one is words
+    /// CHANGED, which every guard before it is structurally blind to (the word
+    /// count is unremarkable and nothing was deleted). Measured on LibriSpeech
+    /// test-clean: refined WER 3.16% → 2.93% with this guard in the chain.
+    case paraphrased
 
     /// True for the thirteen outcomes `wisprit/refine.py` can emit.
     public var isPythonVocabulary: Bool {
         switch self {
-        case .hasLetterRun, .obeyed, .skippedVerbatimApp, .droppedContent: return false
+        case .hasLetterRun, .obeyed, .skippedVerbatimApp, .droppedContent, .paraphrased:
+            return false
         default: return true
         }
     }

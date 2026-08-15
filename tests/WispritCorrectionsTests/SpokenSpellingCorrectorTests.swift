@@ -166,6 +166,33 @@ final class SpokenSpellingCorrectorTests: XCTestCase {
         XCTAssertEqual(corrector.decide(utterance: ""), .none)
     }
 
+    /// The decision layer's half of the truncated-run repair. `insertLiterally`
+    /// needs NO trigger phrase, so a partial run reached the user's text field
+    /// unconditionally: "Grab S-A-R-A-H's laptop" became "Grab SARA-H's laptop"
+    /// and offered "SARA" to the dictionary; "Email J-O-H-N B. Smith about it"
+    /// offered "JOHNB". Nothing may be inserted or offered for a word the
+    /// speaker never spelled.
+    func testATruncatedRunIsNeverInsertedOrOffered() {
+        for utterance in ["Grab S-A-R-A-H's laptop",
+                          "It's spelled K-R-Z-Y-S-Z-T-O-F's team will join."] {
+            XCTAssertEqual(corrector.decide(utterance: utterance), .none, utterance)
+        }
+        // The absorbed middle initial keeps its run, but only the letters the
+        // speaker actually spelled — the "B"/"A" are the next word.
+        for (utterance, expected, span) in [
+            ("Email J-O-H-N B. Smith about it", "JOHN", "J-O-H-N"),
+            ("Send it to V-I-V-E-K A. Sharma", "VIVEK", "V-I-V-E-K"),
+        ] {
+            guard case .insertLiterally(let word, let replace, let offer) =
+                corrector.decide(utterance: utterance)
+            else { return XCTFail("expected insertLiterally for \(utterance)") }
+            XCTAssertEqual(word, expected)
+            XCTAssertEqual(String(Array(utterance)[replace]), span,
+                           "the splice must not reach the initial")
+            XCTAssertEqual(offer.term, expected)
+        }
+    }
+
     // MARK: - the learn plausibility gate
 
     /// The live bug, at the corrector level. Each of these utterances wrote a

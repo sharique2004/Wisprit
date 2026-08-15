@@ -497,8 +497,10 @@ final class RefinerCageTests: XCTestCase {
         XCTAssertEqual(RefineOutcome.obeyed.rawValue, "obeyed")
         XCTAssertEqual(RefineOutcome.skippedVerbatimApp.rawValue, "skipped_verbatim_app")
         XCTAssertEqual(RefineOutcome.droppedContent.rawValue, "dropped_content")
+        XCTAssertEqual(RefineOutcome.paraphrased.rawValue, "paraphrased")
         XCTAssertEqual(RefineOutcome.allCases.filter { !$0.isPythonVocabulary }.map(\.rawValue),
-                       ["has_letter_run", "obeyed", "skipped_verbatim_app", "dropped_content"])
+                       ["has_letter_run", "obeyed", "skipped_verbatim_app", "dropped_content",
+                        "paraphrased"])
     }
 
     // MARK: - the verbatim-app skip (context_verbatim_bundle_ids)

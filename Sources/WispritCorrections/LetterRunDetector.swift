@@ -122,9 +122,19 @@ public struct LetterRunDetector {
 
     private static func parseRun(_ chars: [Character], from start: Int) -> ParsedRun? {
         var segments: [String] = []
+        /// The separator that PRECEDED each segment, "" for the first (which has
+        /// none). Carried alongside `segments` because both repairs below are
+        /// decisions about the JOIN, not about the letters: whether the token
+        /// that ended the run was physically attached to it, and whether a
+        /// trailing capital arrived on a bare space in an otherwise
+        /// hyphen/dot-spelled run.
+        var joins: [String] = []
+        /// Where each segment ended, so popping one restores `end` exactly.
+        var ends: [Int] = []
         var cursor = start
-        var end = start
         var isDelimited = false
+        var lastSeparator = ""
+        var endedAtWordCharacter = false
 
         while true {
             let segmentEnd = scanSegment(chars, from: cursor)
@@ -132,20 +142,39 @@ public struct LetterRunDetector {
             guard length >= 1, length <= maxSegmentLength else { return nil }
             // A lowercase letter, digit or apostrophe directly after means THIS
             // SEGMENT was never a spelled letter — "AB1", "COVID-19",
-            // "McDonald", "I'm". End the run in front of it rather than
-            // discarding everything already accumulated: after a ". " the ASR
-            // routinely writes the spelled word out again ("That's spelled
-            // K-R-Z-Y-S-Z-T-O-F. Krzysztof will join."), and the old `return
-            // nil` threw all nine good segments away on the "K" of "Krzysztof".
-            // Net effect measured on that utterance: `decide` returned `.none`,
-            // the user's dictated spelling silently did nothing, and the
-            // "K-R-Z-Y-S-Z-T-O-F." litter stayed in their text. Nothing is
-            // loosened — with no segments behind it (the "COVID-19"/"AB1"/
-            // "I'm" token ITSELF) the break falls straight through the
-            // `minSegmentCount` guard below and still yields nil.
-            if segmentEnd < chars.count && isWordCharacter(chars[segmentEnd]) { break }
+            // "McDonald", "I'm". What to do about it depends on HOW that token
+            // is joined to the run, because the two joins are not the same
+            // evidence:
+            //
+            //  * across a SPACE the offender is a separate word, and after a
+            //    ". " the ASR routinely writes the spelled word out again
+            //    ("That's spelled K-R-Z-Y-S-Z-T-O-F. Krzysztof will join.").
+            //    Ending the run in front of it keeps all nine good segments;
+            //    the old blanket `return nil` threw them away on the "K" of
+            //    "Krzysztof", so `decide` returned `.none`, the user's dictated
+            //    spelling silently did nothing, and the "K-R-Z-Y-S-Z-T-O-F."
+            //    litter stayed in their text.
+            //  * with a SPACE-FREE join the offender is glued to the run — same
+            //    token. Measured against this file with the blanket break:
+            //    "Grab S-A-R-A-H's laptop" stopped at the apostrophe and handed
+            //    back segments [S,A,R,A], which `decide` fires as
+            //    `.insertLiterally("SARA", replace: "S-A-R-A")` with no trigger
+            //    required → "Grab SARA-H's laptop" plus a learn offer for a
+            //    name nobody said; "K-R-Z-Y-S-Z-T-O-F's" came back "KRZYSZTO".
+            //    A truncated run is not a spelling, so the old conservatism is
+            //    restored exactly where the token is attached.
+            //
+            // With no segments behind it (the "COVID-19"/"AB1"/"I'm" token
+            // ITSELF) the break still falls straight through the
+            // `minSegmentCount` guard below and yields nil, as it always did.
+            if segmentEnd < chars.count && isWordCharacter(chars[segmentEnd]) {
+                if !segments.isEmpty && !lastSeparator.contains(" ") { return nil }
+                endedAtWordCharacter = true
+                break
+            }
             segments.append(String(chars[cursor..<segmentEnd]))
-            end = segmentEnd
+            joins.append(lastSeparator)
+            ends.append(segmentEnd)
 
             var separatorEnd = segmentEnd
             while separatorEnd < chars.count && isSeparator(chars[separatorEnd]) {
@@ -179,13 +208,46 @@ public struct LetterRunDetector {
                    !opensDelimitedSegment(chars, at: separatorEnd) { break }
             }
             if separator.contains(where: { $0 != " " }) { isDelimited = true }
+            lastSeparator = String(separator)
             cursor = separatorEnd
         }
 
-        guard segments.count >= minSegmentCount else { return nil }
+        // Un-absorb a trailing capital that was never a spelled letter. "Email
+        // J-O-H-N B. Smith about it" reached the "B" through the bare-space rule
+        // (only "A"/"I" are exempt there) and the run then ended on the "m" of
+        // "Smith", handing back "JOHNB" over the raw "J-O-H-N B"; "Send it to
+        // V-I-V-E-K A. Sharma" gave "VIVEKA", the "A." certified as a delimited
+        // segment head by the "A." + capital "S" of "Sharma". Both are middle
+        // initials, and both are only reachable through the word-character
+        // break, which is why the pop is scoped to it.
+        //
+        // The tell is the JOIN, not `isDelimited`: that flag is set by the ". "
+        // leading INTO the re-spoken word, so gating on it would pop every
+        // letter of "It's S H A R I Q U E. Sharique is here." down to [S] and
+        // lose a run this detector gets right today. A trailing single letter is
+        // an initial only when it arrived on a bare space AND some earlier join
+        // in the run was a hyphen or a dot — i.e. the run switched mid-way. A
+        // run whose internal joins are all spaces never switched, so it keeps
+        // every letter.
+        if endedAtWordCharacter {
+            while segments.count > 1, segments[segments.count - 1].count == 1,
+                  let join = joins.last, !join.isEmpty, join.allSatisfy({ $0 == " " }),
+                  joins.dropLast().contains(where: { $0.contains { $0 != " " } }) {
+                segments.removeLast()
+                joins.removeLast()
+                ends.removeLast()
+            }
+        }
+
+        guard segments.count >= minSegmentCount, let end = ends.last else { return nil }
         let collapsedLength = segments.reduce(0) { $0 + $1.count }
         guard collapsedLength >= minCollapsedLength else { return nil }
-        return ParsedRun(start: start, end: end, segments: segments, isDelimited: isDelimited)
+        // Read off the SURVIVING joins rather than the loop's running flag (which
+        // the standalone-word rule still needs mid-run), for the same reason the
+        // pop does: the flag also counts the separator that carried the parser
+        // out of the run.
+        let delimited = joins.contains { $0.contains { $0 != " " } }
+        return ParsedRun(start: start, end: end, segments: segments, isDelimited: delimited)
     }
 
     /// True when the single capital at `index` is itself the head of another

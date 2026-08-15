@@ -405,10 +405,89 @@ public enum RefineGuards {
     /// (a correction at the very end corrects nothing) and tolerates the
     /// punctuation cleanup inserts around it, so "No, actually, quarter past 10"
     /// still reads as a cue.
+    ///
+    /// The alternation is CAPTURED (group 1) because three of its branches are
+    /// also ordinary English and have to be judged by the word in front of them
+    /// — see `hasSelfCorrectionCue`.
     static let selfCorrectionCue = regex(
-        #"\b(?:no[^\w\n]*actually|actually|sorry|i\s+meant?|scratch\s+that|rather|"#
+        #"\b(no[^\w\n]*actually|actually|sorry|i\s+meant?|scratch\s+that|rather|"#
             + #"make\s+that|i\s+said|no)\b[^\w\n]*\w"#,
         [.caseInsensitive])
+
+    /// Words in front of a bare `no` that make it the ordinary negation rather
+    /// than a correction cue: a copula, an auxiliary of possession, a
+    /// preposition, or a verb of saying. "there IS no way we can ship…",
+    /// "we HAVE no time", "with no warning", "the sign SAYS no entry".
+    ///
+    /// This matters because the cue disables the guard entirely. Measured
+    /// against this file with the bare alternation: four clause-deletion inputs
+    /// whose only "cue" was an incidental "no"/"i said"/"rather" all returned
+    /// false — a whole clause deleted with no protection at all, on a word that
+    /// occurs in ordinary speech constantly.
+    static let literalNoLeaders: Set<String> = [
+        "is", "was", "are", "were", "has", "have", "had", "there's", "with",
+        "of", "says", "said",
+    ]
+
+    /// "AS I said" / "LIKE I said" is a speaker referring back, not correcting.
+    static let reportedSayingLeaders: Set<String> = ["as", "like"]
+
+    /// Hesitation noise skipped when looking for the word in front of a cue —
+    /// deliberately NOT `leadFillers`, which contains "like", itself a leader.
+    static let hesitations: Set<String> = ["um", "umm", "uh", "uhh", "uhm", "erm", "hmm"]
+
+    /// True when the utterance really carries a spoken self-correction.
+    ///
+    /// `selfCorrectionCue` alone is too generous: `no`, `rather` and `i said`
+    /// are ordinary English, matched ANYWHERE, and a single incidental
+    /// occurrence turns off `droppedContent` for the whole utterance. Narrowing
+    /// is done by the word in FRONT of the cue (the `noWaitLiteralLeaders`
+    /// technique from the postprocess self-correction detector) rather than by
+    /// anchoring the regex to punctuation: real dictation is unpunctuated at the
+    /// cue — every row of `testEveryCueSuppressesTheGuard` is raw ASR text
+    /// ("…on friday sorry ship the migration on tuesday") — so a
+    /// punctuation-anchored form would reject every genuine cue there is.
+    ///
+    /// `sorry` and `actually` are deliberately left wide. Both are also
+    /// ordinary words ("so sorry I missed your call", "it actually shipped"),
+    /// but neither has a leader that separates the two readings, and the failure
+    /// direction of narrowing them is bouncing a genuine rule-4 correction —
+    /// the one transform this guard must never touch. Known-remaining hole,
+    /// pinned by `testTheRemainingCueHolesAreRecorded`.
+    static func hasSelfCorrectionCue(_ raw: String) -> Bool {
+        let ns = raw as NSString
+        for match in selfCorrectionCue.matches(
+            in: raw, range: NSRange(location: 0, length: ns.length))
+        {
+            let cueRange = match.range(at: 1)
+            guard cueRange.location != NSNotFound else { return true }
+            let cue = ns.substring(with: cueRange)
+                .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .lowercased()
+            let leader = wordBefore(raw, utf16Offset: cueRange.location)
+            if cue == "no" && literalNoLeaders.contains(leader) { continue }
+            if cue == "rather" && leader != "or" { continue }
+            if cue == "i said" && reportedSayingLeaders.contains(leader) { continue }
+            return true
+        }
+        return false
+    }
+
+    /// The last word before a UTF-16 offset, lowercased, hesitations skipped.
+    /// "" when the cue opens the utterance — which is itself a tell (a leading
+    /// "No, …" corrects nothing that was said), but one the existing fixtures
+    /// do not exercise, so it is left as a cue.
+    static func wordBefore(_ text: String, utf16Offset: Int) -> String {
+        let head = (text as NSString).substring(to: utf16Offset)
+        let words = head.split(whereSeparator: {
+            !($0.isLetter || $0.isNumber || $0 == "'" || $0 == "\u{2019}")
+        })
+        for word in words.reversed() {
+            let bare = String(word).lowercased()
+            if !hesitations.contains(bare) { return bare }
+        }
+        return ""
+    }
 
     /// How many unique content words the model may delete before the reply
     /// counts as damage rather than cleanup. Measured over 254 refine outputs on
@@ -423,22 +502,63 @@ public enum RefineGuards {
     /// ever SUPPRESS this detector, never trigger it.
     static let contentStemLength = 4
 
+    /// Spelled-out numbers and the measure words that travel with them.
+    ///
+    /// The stem tolerance cannot map these onto the digits the model is
+    /// INSTRUCTED to write ("elev" is not a prefix of "11%"), so any cleanup
+    /// that normalizes a 3+-word number counted three losses and bounced the
+    /// whole refine. Measured against this file before the exemption: "um the
+    /// total is three hundred twenty seven dollars" → "The total is $327." and
+    /// "nine forty five a m" → "9:45 AM." both fired the guard. Two-word
+    /// numbers escaped only because they sat under the threshold, so the
+    /// deviations note claiming the stems keep ITN out was never true — it was
+    /// arithmetic.
+    ///
+    /// Pinned to the set the replay oracle scores with
+    /// (`scratchpad/simulate_guard.py` NUMWORDS) so the Swift guard and the
+    /// Python replay cannot disagree about what a number is.
+    static let spokenNumberWords: Set<String> = [
+        "zero", "one", "two", "three", "four", "five", "six", "seven", "eight",
+        "nine", "ten", "eleven", "twelve", "thirteen", "fourteen", "fifteen",
+        "sixteen", "seventeen", "eighteen", "nineteen", "twenty", "thirty",
+        "forty", "fifty", "sixty", "seventy", "eighty", "ninety",
+        "hundred", "thousand", "million", "billion",
+        "percent", "dollar", "dollars", "cent", "cents",
+        "point", "half", "quarter",
+        "first", "second", "third", "fourth", "fifth",
+        "am", "pm", "oclock", "o'clock",
+    ]
+
+    /// What the ASR leaves behind when it splits a time or a currency into bare
+    /// letters — "nine forty five A M", "three P M", "nine OH five". Only the
+    /// loss count uses them: they are far too weak to certify anything on their
+    /// own, but as retention evidence beside a digit-bearing reply they are
+    /// exactly the ITN transform. ("a" is already a stop word.)
+    static let spokenNumberFragments: Set<String> = [
+        "m", "p", "oh", "grand", "euro", "euros", "pound", "pounds",
+    ]
+
     /// True when the reply deleted content the utterance carried — the failure
     /// the word-count band structurally cannot see, because its floor scales
     /// with the input (see §dropped content above).
     ///
-    /// Loss is a MULTISET difference: each raw content word is matched against
-    /// one refined occurrence, so "the tape and the tape" coming back with one
-    /// "tape" is one loss, not zero. Stop words are excluded before counting,
-    /// and any word whose stem survives on the refined side counts as retained.
+    /// Loss is a MULTISET difference: each raw content word consumes ONE refined
+    /// occurrence, by exact match or by stem, so "the tape the tape the tape and
+    /// the tape" coming back with one "tape" is three losses, not zero. Stop
+    /// words are excluded before counting, and a spelled number is retained
+    /// whenever the reply carries digits.
     public static func droppedContent(raw: String, refined: String) -> Bool {
         // A cued self-correction is the model doing what it was told.
-        if matches(selfCorrectionCue, raw) { return false }
+        if hasSelfCorrectionCue(raw) { return false }
 
         let refinedTokens = contentTokens(refined)
         // An empty reply belongs to `plausible`, which runs first and owns it —
         // reporting it here would move a long-recorded `implausible` row.
         guard !refinedTokens.isEmpty else { return false }
+
+        // One `contains(where:)` for the whole call: the ITN exemption asks
+        // whether the reply is written in digits at all, not where.
+        let refinedHasDigits = refinedTokens.contains { $0.contains(where: \.isNumber) }
 
         var remaining: [String: Int] = [:]
         for token in refinedTokens { remaining[token, default: 0] += 1 }
@@ -450,11 +570,226 @@ public enum RefineGuards {
                 remaining[token] = count - 1          // one raw word, one refined word
                 continue
             }
+            if refinedHasDigits,
+               spokenNumberWords.contains(token) || spokenNumberFragments.contains(token) {
+                continue
+            }
+            // The stem fallback draws from the SAME multiset. Reading
+            // `refinedTokens` directly (as it used to) handed every repeated raw
+            // word the occurrence an earlier one had already consumed, so
+            // repeated-word loss was never counted at all and the multiset
+            // comment above was aspirational. `refinedTokens` order, not the
+            // dictionary's, decides which occurrence is consumed — dictionary
+            // iteration order is not stable and this must be.
             let stem = String(token.prefix(contentStemLength))
-            if refinedTokens.contains(where: { $0.hasPrefix(stem) }) { continue }
+            if let match = refinedTokens.first(where: {
+                $0.hasPrefix(stem) && remaining[$0, default: 0] > 0
+            }) {
+                remaining[match]! -= 1
+                continue
+            }
             loss += 1
         }
         return loss >= droppedContentThreshold
+    }
+
+    // MARK: - paraphrase
+    //
+    // Every guard above polices LENGTH, OBEDIENCE or DELETION. Substitution and
+    // insertion are structurally invisible to all of them: `plausible` sees the
+    // same word count, the obedience detectors need a lost opening verb, and
+    // `droppedContent` counts words that vanished, not words that changed. So a
+    // reply that swaps "till" for "until", reshuffles "my Galatians for
+    // instance" into "such as my Galatians", or inserts a hedge reaches
+    // `applied` untouched.
+    //
+    // Measured on the current tree's stage records: ls-test-clean refined 3.16%
+    // WER against raw 2.60%, ls-test-other 6.53% against 5.58% — 48 clips
+    // regressed, 72 extra edits, every one of them ai="applied". This guard
+    // recovers 16 of those 72 with ZERO measured collateral (0 improved clips
+    // bounced, 0 of the 23 battery legit-repair pairs, 0 of the changed
+    // tts-samantha stage records): ls-test-clean 3.16% → 2.93%, ls-test-other
+    // 6.53% → 6.33%. The other ~56 edits are structurally unguardable and are
+    // accepted — see the three exemptions below, each of which is a measured
+    // overlap between damage and repair, not a hedge.
+    //
+    // The replay oracle is scratchpad/simulate_guard.py (variant FINAL, thr
+    // 0.60); it and this function must flag the same clip ids.
+
+    /// Colloquial contractions, expanded on BOTH sides before a region is
+    /// scored. Without them the restart collapse "I was going. I was gonna say"
+    /// → "I was going to say" region-merges to (i, was, gonna) → (to) and reads
+    /// as a paraphrase; expanded, the raw side's only content word is "going",
+    /// which the reply still carries. Closed set: a slang contraction not listed
+    /// here bounces a legitimate rewrite to verbatim, which is the product's
+    /// safe direction but is still a cost.
+    static let colloquialExpansions: [String: [String]] = [
+        "gonna": ["going", "to"], "wanna": ["want", "to"], "gotta": ["got", "to"],
+        "kinda": ["kind", "of"], "sorta": ["sort", "of"], "outta": ["out", "of"],
+        "lemme": ["let", "me"], "gimme": ["give", "me"], "dunno": ["don't", "know"],
+        "cause": ["because"], "cuz": ["because"],
+    ]
+
+    /// Below this, a substitution is a different word rather than a repair of
+    /// the same one.
+    ///
+    /// NOT `AntecedentMatcher`'s 0.62, which is the constant an implementer
+    /// naturally reaches for: the nearest measured LEGITIMATE repair is
+    /// torture→torch at 0.609 (clip ls-4852-28312-0027, a real fix), and the
+    /// nearest true positive is the such-as reshuffle at 0.568. 0.62 bounces the
+    /// repair; anything ≤ 0.568 loses the catch. The safe window is (0.568,
+    /// 0.609] and 0.60 sits in it. Both scores are pinned by
+    /// `ParaphraseGuardTests`.
+    public static let paraphraseSimilarityFloor = 0.60
+
+    /// True when the reply says something the utterance did not — a substitution
+    /// or an insertion that is neither a phonetic repair, a merge, nor ITN.
+    ///
+    /// Deliberately blind to three classes, all of them measured overlaps rather
+    /// than caution:
+    ///
+    /// 1. phonetically close substitutions. here→hear scores 0.947,
+    ///    perverters→perverts 0.898, haranguing→harassing 0.780 — the same band
+    ///    as the must-keep repairs right→write 0.893 and torture→torch 0.609.
+    ///    No threshold separates them, so ~13 of the 72 residual edits stay.
+    /// 2. function-word churn. Bouncing stop-word edits would kill filler
+    ///    removal, which is the stage's core job.
+    /// 3. pure deletions. `droppedContent` owns those, and re-counting them here
+    ///    would move rows it has been reporting for a long time.
+    public static func paraphrasedContent(raw: String, refined: String) -> Bool {
+        // Same contract as `droppedContent`: a cued self-correction is the model
+        // doing what rule 4 told it to, including the rewrite half.
+        if hasSelfCorrectionCue(raw) { return false }
+
+        let rawTokens = contentTokens(raw)
+        let refinedTokens = contentTokens(refined)
+        guard !rawTokens.isEmpty, !refinedTokens.isEmpty else { return false }
+        let refinedPool = expandColloquial(refinedTokens)
+
+        for (rawSide, refinedSide) in alignedRegions(rawTokens, refinedTokens) {
+            // Pure deletion: `droppedContent`'s territory, not this guard's.
+            if refinedSide.isEmpty { continue }
+            // Pure insertion: the model added a word nobody said. Function words
+            // are grammar cleanup; anything else is invention.
+            if rawSide.isEmpty {
+                if refinedSide.contains(where: { !contentLossStopWords.contains($0) }) {
+                    return true
+                }
+                continue
+            }
+            if rawSide.allSatisfy(contentLossStopWords.contains),
+               refinedSide.allSatisfy(contentLossStopWords.contains) { continue }
+
+            // A restart the model collapsed: once colloquials are expanded,
+            // nothing on the raw side is missing from the reply, and the reply
+            // added only function words.
+            let effective = expandColloquial(rawSide).filter { token in
+                !contentLossStopWords.contains(token)
+                    && !refinedPool.contains { sharesStem($0, token) }
+            }
+            if effective.isEmpty, refinedSide.allSatisfy(contentLossStopWords.contains) {
+                continue
+            }
+
+            // Compare the region as ONE string, not token by token: a merge is a
+            // paraphrase's exact shape at the token level. "post grass" →
+            // "postgres", "i phone" → "iPhone", "write heavy" → "write-heavy",
+            // "to morrow" → "tomorrow" all collapse to equality here, and a
+            // per-token reading bounces every one of them.
+            let before = collapse(expandColloquial(rawSide))
+            let after = collapse(expandColloquial(refinedSide))
+            if before == after { continue }
+            if after.hasPrefix(String(before.prefix(contentStemLength)))
+                || before.hasPrefix(String(after.prefix(contentStemLength))) { continue }
+            if isNumericRegion(rawSide: rawSide, refinedSide: refinedSide) { continue }
+            if PhoneticScorer.score(before, after) >= paraphraseSimilarityFloor { continue }
+            return true
+        }
+        return false
+    }
+
+    static func expandColloquial(_ tokens: [String]) -> [String] {
+        tokens.flatMap { colloquialExpansions[$0] ?? [$0] }
+    }
+
+    /// Bidirectional 4-prefix, the same tolerance `droppedContent` uses.
+    static func sharesStem(_ a: String, _ b: String) -> Bool {
+        a.hasPrefix(String(b.prefix(contentStemLength)))
+            || b.hasPrefix(String(a.prefix(contentStemLength)))
+    }
+
+    /// Region text as one string: separators dropped so a merge reads as an
+    /// identity.
+    static func collapse(_ tokens: [String]) -> String {
+        tokens.joined().filter { $0 != "-" && $0 != "." && $0 != "'" && $0 != "\u{2019}" }
+    }
+
+    /// ITN: either side already written in digits, or the raw side is nothing
+    /// but spelled numbers. "eleven percent" → "11%" is the transform the prompt
+    /// asks for, and it is a substitution of exactly this shape.
+    static func isNumericRegion(rawSide: [String], refinedSide: [String]) -> Bool {
+        if (rawSide + refinedSide).contains(where: { $0.contains(where: \.isNumber) }) {
+            return true
+        }
+        return rawSide.allSatisfy(spokenNumberWords.contains)
+    }
+
+    /// Contiguous non-matching stretches of a token-level alignment, as
+    /// (raw side, refined side) pairs.
+    ///
+    /// The backtrace preference — diagonal (match/substitute) over deletion over
+    /// insertion — is LOAD-BEARING, not a tidy default. The marquee catch
+    /// (ls-2830-3979-0007, "my galatians for instance" → "such as my galatians")
+    /// is an exact cost tie between four substitutions and two insertions plus
+    /// two deletions. Only the diagonal path merges it into one scoreable
+    /// region; the insertion/deletion path yields a pure-insertion region that
+    /// is all stop words ("such", "as") plus a pure deletion, and both are
+    /// skipped. `ParaphraseGuardTests` pins that clip as the tie-break canary.
+    static func alignedRegions(_ a: [String], _ b: [String]) -> [([String], [String])] {
+        var distance = Array(repeating: Array(repeating: 0, count: b.count + 1),
+                             count: a.count + 1)
+        for i in 0...a.count { distance[i][0] = i }
+        for j in 0...b.count { distance[0][j] = j }
+        if a.count > 0 && b.count > 0 {
+            for i in 1...a.count {
+                for j in 1...b.count {
+                    let cost = a[i - 1] == b[j - 1] ? 0 : 1
+                    distance[i][j] = min(distance[i - 1][j] + 1,
+                                         distance[i][j - 1] + 1,
+                                         distance[i - 1][j - 1] + cost)
+                }
+            }
+        }
+
+        var regions: [([String], [String])] = []
+        var current: ([String], [String])?
+        var i = a.count, j = b.count
+        while i > 0 || j > 0 {
+            let diagonal = i > 0 && j > 0
+                && distance[i][j] == distance[i - 1][j - 1] + (a[i - 1] == b[j - 1] ? 0 : 1)
+            if diagonal && a[i - 1] == b[j - 1] {
+                if let region = current { regions.append(region); current = nil }
+                i -= 1; j -= 1
+            } else if diagonal {
+                var region = current ?? ([], [])
+                region.0.insert(a[i - 1], at: 0)
+                region.1.insert(b[j - 1], at: 0)
+                current = region
+                i -= 1; j -= 1
+            } else if i > 0 && distance[i][j] == distance[i - 1][j] + 1 {
+                var region = current ?? ([], [])
+                region.0.insert(a[i - 1], at: 0)
+                current = region
+                i -= 1
+            } else {
+                var region = current ?? ([], [])
+                region.1.insert(b[j - 1], at: 0)
+                current = region
+                j -= 1
+            }
+        }
+        if let region = current { regions.append(region) }
+        return regions
     }
 
     /// Whitespace-split, lowercased, edge-punctuation-trimmed words. Interior

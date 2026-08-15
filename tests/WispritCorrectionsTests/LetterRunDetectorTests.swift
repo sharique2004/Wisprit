@@ -95,6 +95,54 @@ final class LetterRunDetectorTests: XCTestCase {
         }
     }
 
+    /// The other half, and the one the ". "-break cost when it was written as an
+    /// unconditional `break`: a run GLUED to the word that ended it is a
+    /// truncated run, not a spelling. With the blanket break these four came
+    /// back as SARA / KRZYSZTO — and `decide` fires `.insertLiterally` on a run
+    /// with no trigger at all, so the user got "Grab SARA-H's laptop" plus a
+    /// learn offer for a name nobody said. The join is the whole tell: the
+    /// apostrophe is attached to the "H", "Krzysztof" is not attached to the
+    /// "F".
+    func testARunGluedToTheWordThatEndsItIsRefused() {
+        XCTAssertEqual(collapsed("Grab S-A-R-A-H's laptop"), [])
+        XCTAssertEqual(collapsed("It's spelled K-R-Z-Y-S-Z-T-O-F's team will join."), [])
+        // The curly apostrophe the ASR actually emits.
+        XCTAssertEqual(collapsed("Grab S-A-R-A-H\u{2019}s laptop"), [])
+        // …and the same shape with a space is still the Krzysztof fixture above,
+        // so the rule discriminates rather than just re-tightening.
+        XCTAssertEqual(
+            collapsed("That's spelled K-R-Z-Y-S-Z-T-O-F. Krzysztof will join."), ["KRZYSZTOF"])
+    }
+
+    /// A middle initial is not the run's last letter. "Email J-O-H-N B. Smith"
+    /// absorbed the "B" through the bare-space rule (only "A"/"I" are exempt
+    /// there) and ended on the "m" of "Smith" → "JOHNB" over the raw "J-O-H-N B";
+    /// "V-I-V-E-K A. Sharma" gave "VIVEKA", the "A." certified as a delimited
+    /// segment head by the "A." + capital "S". Both are popped back off, and the
+    /// raw slice must shrink with them or the splice would eat the initial.
+    func testAnAbsorbedMiddleInitialIsPoppedBackOff() {
+        XCTAssertEqual(collapsed("Email J-O-H-N B. Smith about it"), ["JOHN"])
+        XCTAssertEqual(collapsed("Send it to V-I-V-E-K A. Sharma"), ["VIVEK"])
+
+        let text = "Email J-O-H-N B. Smith about it"
+        let run = try! XCTUnwrap(detector.detect(in: text).first)
+        XCTAssertEqual(run.raw, "J-O-H-N")
+        XCTAssertEqual(String(Array(text)[run.range]), run.raw)
+    }
+
+    /// The pop's boundary, and why it cannot be gated on `isDelimited`: that flag
+    /// is set by the ". " leading INTO the re-spoken word, so an all-spaces run
+    /// followed by its own word would be popped down to [S] and vanish. The join
+    /// history is what separates them — this run never switched away from
+    /// spaces, so it keeps every letter.
+    func testASpaceSpelledRunFollowedByItsOwnWordKeepsEveryLetter() {
+        XCTAssertEqual(collapsed("It's S H A R I Q U E. Sharique is here."), ["SHARIQUE"])
+        // A trailing letter joined by a hyphen is a letter, popped or not.
+        XCTAssertEqual(
+            collapsed("It's spelled V-I-V-E-K A-N-A-N-D. Vivekanand will join."),
+            ["VIVEKANAND"])
+    }
+
     /// "It's spelled V-I-V-E-K I think" collapsed to "VIVEKI": the pronoun was
     /// absorbed as the sixth letter, so the name would have been inserted and
     /// learned as "Viveki" and the real word "I" eaten. A hyphen-spelled run

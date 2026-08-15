@@ -1,4 +1,5 @@
 import Foundation
+import WispritKit
 
 /// A word from the recent context that the letter run is probably correcting.
 public struct Antecedent: Equatable, Sendable {

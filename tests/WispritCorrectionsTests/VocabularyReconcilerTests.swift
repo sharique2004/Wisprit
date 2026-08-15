@@ -311,6 +311,84 @@ final class VocabularyReconcilerTests: XCTestCase {
         XCTAssertEqual(plan.refusal, .phoneticallyUnrelated)
     }
 
+    // MARK: - the anchor: WHICH occurrence
+
+    /// The seed of the wrong-instance defect, at the layer that seeds it. The
+    /// planner has always known the block's exact position — it slices
+    /// `replace` out of the inserted text by that very range — and used to
+    /// throw it away, leaving the input method to guess. It guessed LAST, so
+    /// whenever the same words appeared again later, the fix landed on the
+    /// wrong one.
+    func testTheAcceptedEditCarriesItsOwnOffsetNotTheLastOccurrences() {
+        let inserted = "Ping the in forge team about the in forge migration."
+        let plan = VocabularyReconciler.plan(
+            inserted: inserted,
+            reconciled: "Ping the InsForge team about the in forge migration.",
+            termHits: ["InsForge": 1],
+            knownTerm: { _ in false })
+
+        XCTAssertEqual(plan.edits.map(\.replace), ["in forge"])
+        let edit = plan.edits[0]
+        let text = inserted as NSString
+        XCTAssertEqual(edit.utf16Location, 9)
+        XCTAssertEqual(text.substring(with: NSRange(location: edit.utf16Location,
+                                                    length: (edit.replace as NSString).length)),
+                       edit.replace,
+                       "the offset names the block the planner sliced, not another reading of it")
+        XCTAssertNotEqual(edit.utf16Location,
+                          text.range(of: "in forge", options: .backwards).location,
+                          "…and it is emphatically not the last occurrence")
+    }
+
+    /// The one place grapheme clusters have to become UTF-16, so it happens
+    /// exactly once and is pinned here. The block ranges index
+    /// `Array(Character)`; the wire, the input method's record and the app-side
+    /// mirror all speak `NSRange`. A surrogate pair ahead of the block costs
+    /// two units, and an anchor one short lands on the space before the word —
+    /// where the input method's substring check refuses it and the fallback
+    /// quietly fixes the wrong occurrence instead.
+    func testTheOffsetIsUTF16NotGraphemeClusters() {
+        let inserted = "Ping the 🚀 in forge team about the migration."
+        let plan = VocabularyReconciler.plan(
+            inserted: inserted,
+            reconciled: "Ping the 🚀 InsForge team about the migration.",
+            termHits: ["InsForge": 1],
+            knownTerm: { _ in false })
+
+        let edit = plan.edits[0]
+        XCTAssertEqual(edit.utf16Location, 12)
+        XCTAssertEqual((inserted as NSString).substring(with: NSRange(location: 12, length: 8)),
+                       "in forge")
+
+        let chars = Array(inserted)
+        let graphemeOffset = chars.firstIndex(of: "🚀")! + 2      // the rocket, then its space
+        XCTAssertEqual(graphemeOffset, 11)
+        XCTAssertNotEqual(edit.utf16Location, graphemeOffset,
+                          "counting characters instead of UTF-16 units is off by the surrogate pair")
+    }
+
+    /// Two edits in one utterance carry two different offsets, in document
+    /// order. Whoever applies them has to account for the shift the first one
+    /// causes — which is why the offsets are ordered facts and not opinions.
+    func testEachEditInAPlanCarriesItsOwnOffsetInDocumentOrder() {
+        let inserted = "We tested in forge then whisper it plus Monday morning with the whole team"
+        let plan = VocabularyReconciler.plan(
+            inserted: inserted,
+            reconciled: "We tested InsForge then Wisprit plus Monday morning with the whole team",
+            termHits: ["InsForge": 1, "Wisprit": 1],
+            knownTerm: { _ in false })
+
+        let text = inserted as NSString
+        XCTAssertEqual(plan.edits.map(\.utf16Location), [10, 24])
+        XCTAssertEqual(plan.edits.map(\.utf16Location).sorted(), plan.edits.map(\.utf16Location),
+                       "document order, so an applier can walk them backwards")
+        for edit in plan.edits {
+            XCTAssertEqual(text.substring(with: NSRange(location: edit.utf16Location,
+                                                        length: (edit.replace as NSString).length)),
+                           edit.replace)
+        }
+    }
+
     // MARK: - ambiguity
 
     /// Two canonical spellings that normalize to the same block. We genuinely
