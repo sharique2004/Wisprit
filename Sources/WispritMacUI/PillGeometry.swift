@@ -194,6 +194,16 @@ public enum PillGeometry {
     /// 107 → 143 px), snapped to the 8 pt grid. Wide enough for the dot row to
     /// sit leading-aligned with the spinner at the trailing inset.
     public static let widthProcessing: Double = 128.0
+
+    /// The mini rest. A user directive that overrides Flow-fidelity: at rest
+    /// the pill must be "extremely small", growing only while it is actually
+    /// listening or working. 36×10 is the smallest sliver that still reads as
+    /// the pill (wider than tall, same capsule family) and survives as a drag
+    /// target. The bar field cannot fit inside it, so the resting dots are
+    /// gone — rest is a bare glass sliver, and `idle → prewarming` became a
+    /// real expansion rather than Flow's colour crossfade.
+    public static let widthMini: Double = 36.0
+    public static let heightMini: Double = 10.0
     /// `_BOTTOM_MARGIN` for the default bottom-centre placement — unchanged.
     public static let bottomMargin: Double = 90.0
     /// §2.6 edge flip: keep this much clear of the screen's right edge.
@@ -658,8 +668,11 @@ public enum PillMotion {
         }
         if isVisible && oldWidth != newWidth {
             // The commit is the one shrink with its own name: the pill is
-            // returning to rest, not resizing for content.
-            if newState == .success && newWidth < oldWidth && notice != .closing {
+            // returning to rest, not resizing for content. The settle into the
+            // mini idle sliver is the same going-to-rest move, so it shares
+            // the contract timing rather than the content-resize timing.
+            if (newState == .success || newState == .idle)
+                && newWidth < oldWidth && notice != .closing {
                 return FrameChange(kind: .contract, duration: committedDuration,
                                    travel: 0, animatesFrame: !reduceMotion, curve: .easeOut)
             }

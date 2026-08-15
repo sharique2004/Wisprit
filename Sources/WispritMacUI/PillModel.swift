@@ -187,7 +187,7 @@ public final class PillModel {
             message: message,
             glyph: glyph,
             totalWidth: totalWidth,
-            height: PillGeometry.height,
+            height: state == .idle ? PillGeometry.heightMini : PillGeometry.height,
             tailMuted: deadMicCue || patienceCue)
     }
 
@@ -505,16 +505,17 @@ public final class PillModel {
 
     /// The meter — one ten-bar field, in every state that has one.
     ///
-    /// The old compact/idle/full split is gone. Flow has a single field and
-    /// grows the capsule around it: its idle dots and its listening bars are
-    /// the same ten objects in the same places, which is why `idle → listening`
-    /// there is not a transition at all, only the bars coming alive. The two
-    /// alarm states keep an empty meter because their glyph *is* the meter.
+    /// Flow keeps its idle dots alive because its idle and listening capsules
+    /// are the same frame. Ours are not, by user directive: rest is the mini
+    /// sliver (`PillGeometry.widthMini`) with no meter at all — the bar field
+    /// cannot fit, and an empty `targets` is the established "no meter in this
+    /// state" contract. The two alarm states keep an empty meter because their
+    /// glyph *is* the meter.
     private var bars: [Double] {
         switch state {
-        case .hidden, .error, .blockedSecure:
+        case .hidden, .error, .blockedSecure, .idle:
             return []
-        case .prewarming, .recording, .finalizing, .refining, .missed, .success, .idle:
+        case .prewarming, .recording, .finalizing, .refining, .missed, .success:
             return barValues
         }
     }
@@ -555,10 +556,14 @@ public final class PillModel {
             return max(PillGeometry.widthProcessing, max(waiting, heldWidth ?? 0))
         case .missed:
             return max(natural, heldWidth ?? 0)
-        // `success` and `idle` are the same resting capsule now — the commit
-        // is a contraction back to it, not to a circle.
-        case .hidden, .prewarming, .recording, .success, .idle:
+        // `success` holds the full capsule for its flash; the settle that
+        // follows is what lands on the mini sliver.
+        case .hidden, .prewarming, .recording, .success:
             return natural
+        // Rest is "extremely small" by user directive — the sliver, no meter,
+        // no tail (showIdle clears the bubble before this is ever read).
+        case .idle:
+            return PillGeometry.widthMini
         }
     }
 

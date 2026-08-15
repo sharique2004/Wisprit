@@ -179,37 +179,44 @@ final class PillModelTests: XCTestCase {
 
     // MARK: - state transitions
 
-    func testIdleIsACompactPersistentBar() {
+    /// The mini rest, by user directive: "extremely small" until the pill is
+    /// actually listening or working. No meter fits inside 36×10, so rest is
+    /// a bare sliver — the empty `bars` is the established no-meter contract.
+    func testIdleIsTheMiniSliver() {
         let (model, sink) = makeModel()
         model.showIdle()
         XCTAssertEqual(model.state, .idle)
-        XCTAssertTrue(sink.last.isVisible)
-        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening,
-                       "idle and listening are one capsule — Flow measures them equal")
-        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount))
+        XCTAssertTrue(sink.last.isVisible, "Flow stays on the desktop")
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthMini)
+        XCTAssertEqual(sink.last.height, PillGeometry.heightMini)
+        XCTAssertEqual(sink.last.bars, [])
         XCTAssertEqual(sink.last.glyph, .none)
         XCTAssertEqual(sink.last.tint, PillPalette.muted)
         XCTAssertNotEqual(sink.last.tint, PillPalette.hot)
-        XCTAssertEqual(PillPalette.meterTint(for: .idle), PillPalette.cream,
-                       "the resting dots are cream, not grey")
         XCTAssertEqual(PillPalette.bodyFill(for: .idle).color, PillPalette.body)
     }
 
-    /// The consequence worth its own name: `idle → listening` moves no frame
-    /// at all. The bars are already where they will be; only their colour and
-    /// their heights change, which is exactly what the real app does.
-    func testIdleAndListeningShareOneFrame() {
+    /// The consequence worth its own name: `idle → listening` is now a real
+    /// expansion — the sliver grows into the listening capsule the moment the
+    /// key goes down, and settles back on rest. Growth animates as a resize;
+    /// the return shares the commit's contract timing (a going-to-rest move).
+    func testIdleGrowsIntoListeningAndContractsBack() {
         let (model, sink) = makeModel()
         model.showIdle()
         let idle = sink.last
         model.showRecording()
         let listening = sink.last
-        XCTAssertEqual(idle.totalWidth, listening.totalWidth)
-        XCTAssertEqual(idle.bars.count, listening.bars.count)
+        XCTAssertEqual(idle.totalWidth, PillGeometry.widthMini)
+        XCTAssertEqual(listening.totalWidth, PillGeometry.widthListening)
+        XCTAssertEqual(listening.height, PillGeometry.height)
         XCTAssertEqual(PillMotion.frameChange(
             wasVisible: true, isVisible: true,
             oldWidth: idle.totalWidth, newWidth: listening.totalWidth,
-            newState: .recording, reduceMotion: false).kind, PillMotion.FrameChange.Kind.none)
+            newState: .recording, reduceMotion: false).kind, .resize)
+        XCTAssertEqual(PillMotion.frameChange(
+            wasVisible: true, isVisible: true,
+            oldWidth: listening.totalWidth, newWidth: idle.totalWidth,
+            newState: .idle, reduceMotion: false).kind, .contract)
     }
 
     func testShowRecordingGoesOrangeVisibleAndZeroLevel() {
@@ -250,8 +257,9 @@ final class PillModelTests: XCTestCase {
 
         model.fireDeferred(.settle)
         XCTAssertEqual(model.state, .idle)
-        XCTAssertTrue(sink.last.isVisible, "Flow stays on the desktop")
-        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening)
+        XCTAssertTrue(sink.last.isVisible, "the pill stays on the desktop")
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthMini,
+                       "the settle lands on the mini sliver, not the capsule")
         XCTAssertEqual(sink.last.glyph, .none)
     }
 

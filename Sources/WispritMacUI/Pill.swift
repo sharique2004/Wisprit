@@ -242,8 +242,14 @@ public final class Pill: NSObject, NSWindowDelegate {
         guard let anchor = preferredOrigin else { return panel?.frame.origin ?? .zero }
         guard let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(anchor) })
                 ?? NSScreen.main else { return anchor }
+        // `preferredOrigin` is, by convention, where a LISTENING-width pill's
+        // origin sits (`windowDidMove` normalizes whatever size was dragged).
+        // Every other size is placed around that pill's centre, so the mini
+        // sliver rests exactly under where the capsule will grow and a notice
+        // unfolds from the middle instead of marching right.
+        let centered = anchor.x + (PillGeometry.widthListening - width) / 2.0
         let limit = screen.visibleFrame.maxX - PillGeometry.edgeMargin - width
-        let x = max(screen.visibleFrame.minX, min(anchor.x, limit))
+        let x = max(screen.visibleFrame.minX, min(centered, limit))
         return CGPoint(x: x, y: anchor.y)
     }
 
@@ -251,8 +257,15 @@ public final class Pill: NSObject, NSWindowDelegate {
 
     public func windowDidMove(_ notification: Notification) {
         guard !suppressMoveNotifications, frameAnimations == 0, let panel else { return }
-        preferredOrigin = panel.frame.origin
-        config.persistPosition(panel.frame.origin)
+        // Normalize to the listening-width origin whatever size was dragged —
+        // dragging the mini sliver and dragging the full capsule must both
+        // mean "the pill lives here". Keeps the persisted format (and every
+        // position saved before the mini rest existed) unchanged.
+        let normalized = CGPoint(
+            x: panel.frame.origin.x + (panel.frame.width - PillGeometry.widthListening) / 2.0,
+            y: panel.frame.origin.y)
+        preferredOrigin = normalized
+        config.persistPosition(normalized)
     }
 
     /// Every step of every width animation, including the ones AppKit drives
