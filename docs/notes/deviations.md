@@ -473,3 +473,39 @@ for an opt-in feature whose ship decision is scoreboard-gated.
   warmup 506 ms warm, reconcile 348 ms on pn-01, alias hit "whisper"/"whisper
   it" → `Wisprit` recovered — the spike's numbers reproduced through the
   shipping code path.
+
+## Refine content-loss guard (2026-08-14)
+
+**`dropped_content`: a refine outcome beyond the Python thirteen** (the
+`has_letter_run` / `obeyed` / `skipped_verbatim_app` precedent). Measured on
+200 LibriSpeech test-clean clips through the real pipeline: raw ASR WER 2.68%,
+**refined** WER 3.59% — the cleanup stage made real speech 34% relatively
+worse. The word-count band could not see it because its floor is a RATIO
+(0.4×), so the slack grows with the utterance: the worst clip
+(ls-5142-33396-0052) lost a ten-word trailing clause ("…and a sword would not
+be ashamed to hang at your side." → "…and a sword.") and was still `applied`.
+
+- **The discriminator is measured, not guessed.** Over 254 refine outputs on
+  two corpora (LibriSpeech real speech + the tts-samantha battery corpus),
+  unique content-word loss never exceeded 2 for a legitimate cleanup — filler
+  removal, stutter collapse, ITN — *unless* the input carried a spoken
+  self-correction; every damaging output scored 3, 3, 3 or 9. Threshold: 3.
+- **Loss counts a multiset difference over non-stop words**, with a 4-character
+  stem tolerance so inflection fixes and ITN rewrites ("founded"/"found",
+  "eleven percent"/"11%") are not losses. The stop set is `leadFillers` plus
+  the closed-class function words and greeting interjections; every word added
+  to it makes the guard MORE permissive, which is the safe direction — this
+  detector's only job is a multi-content-word clause drop.
+- **Prompt rule 4 is exempt.** A cued self-correction ("no / no actually /
+  sorry / I mean / rather / scratch that / make that / I said / actually")
+  legitimately deletes three or more content words, so a cue anywhere in the
+  INPUT suppresses the guard outright. The cue is read from the input only —
+  the model may not license its own deletion.
+- **Ordering:** last in the accept chain, after `plausible` and both obedience
+  detectors. An executed instruction also loses content words, and `obeyed` is
+  what every recorded row called it; `dropped_content` reports the failure
+  nothing else names.
+- **Polish shares it for `.cleanUp` only** (that mode already delegates to
+  `RefineGuards.plausible`; WispritPolish depends on WispritRefine). The tone
+  modes are *supposed* to replace content words wholesale, so their bands stay
+  the guard.

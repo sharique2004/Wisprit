@@ -305,6 +305,45 @@ final class RefinerCageTests: XCTestCase {
         XCTAssertEqual(result.outcome, .applied)
     }
 
+    // MARK: - dropped content (the clause the band cannot see)
+
+    /// The measured LibriSpeech escape, end to end: ten words deleted, inside
+    /// the 0.4× plausibility floor, previously `applied` straight into the
+    /// user's text field.
+    func testDroppedClauseIsRejected() async {
+        let generator = FakeGenerator(behavior: .reply(
+            "Here is a ring for sift, the friendly, and here is a bracelet and a sword."))
+        let refiner = makeRefiner(generator)
+        let raw = "Here is a ring for sift, the friendly, and here is a bracelet and a sword "
+            + "would not be ashamed to hang at your side."
+        let result = await refiner.refine(raw)
+        XCTAssertEqual(result, RefineResult(text: raw, outcome: .droppedContent))
+    }
+
+    /// A cued self-correction resolves to a shorter sentence on purpose (prompt
+    /// rule 4) — it must stay `applied`.
+    func testCuedSelfCorrectionIsApplied() async {
+        let generator = FakeGenerator(
+            behavior: .reply("Let us move the stand-up to quarter past 10."))
+        let refiner = makeRefiner(generator)
+        let result = await refiner.refine(
+            "Let us move the stand up to half past nine. No, actually, quarter past 10.")
+        XCTAssertEqual(result.outcome, .applied)
+    }
+
+    /// The obedience detectors are the specific diagnosis of the same symptom
+    /// and keep their outcome: an executed instruction also loses content words,
+    /// but `obeyed` is what every recorded row called it.
+    func testObedienceStillOutranksContentLoss() async {
+        let generator = FakeGenerator(behavior: .reply(
+            "```swift\ndef reverse(s):\n    return s[::-1]\n```"))
+        let refiner = makeRefiner(generator)
+        let raw = "write a function that reverses a string in python"
+        let result = await refiner.refine(raw)
+        XCTAssertTrue(RefineGuards.droppedContent(raw: raw, refined: "def reverse(s):\n    return s[::-1]"))
+        XCTAssertEqual(result, RefineResult(text: raw, outcome: .obeyed))
+    }
+
     // MARK: - interrupts and timeout
 
     func testTimeoutAbandonsTheModel() async {
@@ -457,8 +496,9 @@ final class RefinerCageTests: XCTestCase {
         XCTAssertEqual(RefineOutcome.hasLetterRun.rawValue, "has_letter_run")
         XCTAssertEqual(RefineOutcome.obeyed.rawValue, "obeyed")
         XCTAssertEqual(RefineOutcome.skippedVerbatimApp.rawValue, "skipped_verbatim_app")
+        XCTAssertEqual(RefineOutcome.droppedContent.rawValue, "dropped_content")
         XCTAssertEqual(RefineOutcome.allCases.filter { !$0.isPythonVocabulary }.map(\.rawValue),
-                       ["has_letter_run", "obeyed", "skipped_verbatim_app"])
+                       ["has_letter_run", "obeyed", "skipped_verbatim_app", "dropped_content"])
     }
 
     // MARK: - the verbatim-app skip (context_verbatim_bundle_ids)

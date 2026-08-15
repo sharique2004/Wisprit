@@ -20,6 +20,10 @@ import WispritKit
 /// - output must not be code the utterance did not contain, and must not be the
 ///   utterance minus its opening instruction — the two ways an obedient reply
 ///   slips through the word-count band (`RefineGuards` §obedience evidence);
+/// - output must not have deleted a clause: the band's floor is a ratio, so a
+///   long utterance can lose ten words and still look plausible (`RefineGuards`
+///   §dropped content — measured on LibriSpeech, where the stage made real
+///   speech 34% relatively worse);
 /// - any error, timeout, or crash keeps the verbatim text. Refinement can only
 ///   ever *win* — it must never lose words or block insertion.
 ///
@@ -210,6 +214,17 @@ public actor Refiner {
             guard !RefineGuards.droppedLeadingInstruction(raw: raw, refined: refined) else {
                 log.warning("refined text dropped the leading instruction; keeping verbatim")
                 return RefineResult(text: raw, outcome: .obeyed)
+            }
+            // LAST, deliberately. This is the broad content-loss check, and the
+            // two obedience detectors above are the specific diagnoses of the
+            // same symptom — an executed instruction also loses content words.
+            // Running it after them keeps `obeyed` meaning exactly what it has
+            // always meant, and leaves `dropped_content` to report the failure
+            // nothing else names: a plain clause deletion out of ordinary
+            // speech, which the ratio-floored word-count band cannot see.
+            guard !RefineGuards.droppedContent(raw: raw, refined: refined) else {
+                log.warning("refined text dropped content words; keeping verbatim")
+                return RefineResult(text: raw, outcome: .droppedContent)
             }
             return RefineResult(text: refined, outcome: .applied)
         }

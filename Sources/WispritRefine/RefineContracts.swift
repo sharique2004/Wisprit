@@ -40,11 +40,18 @@ public enum RefineOutcome: String, Sendable, CaseIterable {
     /// `hasLetterRun` got one: every previously recorded `off` row meant "the
     /// setting is off", and it has to keep meaning exactly that.
     case skippedVerbatimApp = "skipped_verbatim_app"
+    /// NEW (not in the Python vocabulary): the reply deleted content words the
+    /// utterance carried — a whole clause gone. Distinct from `implausible`
+    /// because the word-count band structurally cannot see it: its floor is a
+    /// ratio (0.4×), so a 24-word dictation may lose ten words and stay inside
+    /// the band. Measured on LibriSpeech test-clean (200 clips): raw ASR WER
+    /// 2.68% → refined 3.59%, worst clip ten words short, outcome `applied`.
+    case droppedContent = "dropped_content"
 
     /// True for the thirteen outcomes `wisprit/refine.py` can emit.
     public var isPythonVocabulary: Bool {
         switch self {
-        case .hasLetterRun, .obeyed, .skippedVerbatimApp: return false
+        case .hasLetterRun, .obeyed, .skippedVerbatimApp, .droppedContent: return false
         default: return true
         }
     }

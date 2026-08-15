@@ -172,9 +172,19 @@ public enum PolishGuards {
         let text = polished.trimmingCharacters(in: .whitespacesAndNewlines)
         if text.isEmpty { return false }
         if mode == .cleanUp {
-            // Same transform as the on-path stage → same measured guard,
-            // including its apology-opener handling.
+            // Same transform as the on-path stage → same measured guards,
+            // including the apology-opener handling and the content-loss check
+            // (`RefineGuards` §dropped content: the band's floor is a ratio, so
+            // a long transcript can lose a whole clause and stay inside it —
+            // measured on LibriSpeech, refined WER 3.59% vs raw 2.68%).
+            //
+            // `.cleanUp` ONLY. The tone modes are supposed to replace content
+            // words wholesale — "hey can u send me that deck thing whenever ur
+            // free" → "Could you please send me the deck when you have a
+            // moment?" drops five by this count — so the same check there would
+            // reject every good formal rewrite. Their bands stay the guard.
             return RefineGuards.plausible(raw: raw, refined: text)
+                && !RefineGuards.droppedContent(raw: raw, refined: text)
         }
         if matchesAtStart(assistantOpener, text),
            firstContentWord(raw) != firstContentWord(text) {

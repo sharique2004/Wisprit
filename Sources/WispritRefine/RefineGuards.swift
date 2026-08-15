@@ -324,6 +324,139 @@ public enum RefineGuards {
         return Double(covered) / Double(replyWords.count) >= subsetCoverageFloor
     }
 
+    // MARK: - dropped content
+    //
+    // `plausible`'s floor is a RATIO, so the slack it grants grows with the
+    // utterance: at 0.4× a 24-word dictation may come back ten words shorter and
+    // still be "plausible". That is not a hypothetical. Measured over 200
+    // LibriSpeech test-clean clips through the real pipeline: raw ASR WER 2.68%,
+    // refined WER 3.59% — the cleanup stage made real speech 34% relatively
+    // WORSE. The worst clip (ls-5142-33396-0052) went in as "…and here is a
+    // bracelet and a sword would not be ashamed to hang at your side." and came
+    // back as "…and here is a bracelet and a sword." — ten words silently
+    // deleted, comfortably inside the 0.4× band, outcome `applied`.
+    //
+    // The discriminator below is measured, not guessed. Over 254 refine outputs
+    // on two corpora (LibriSpeech real speech + the tts-samantha battery
+    // corpus), unique content-word loss NEVER exceeded 2 for a legitimate
+    // cleanup — filler removal, stutter collapse, ITN — unless the utterance
+    // carried a spoken self-correction; every output that damaged the transcript
+    // scored 3, 3, 3 or 9. So the rule is: three content words gone, with no cue
+    // in the INPUT that the speaker corrected themselves, means the model
+    // deleted a clause. Reject to verbatim like every other guard failure —
+    // cleanup can only ever win, never lose words.
+
+    /// Words that never count as content loss. `leadFillers` (the model is
+    /// *supposed* to delete those) plus the closed-class function words —
+    /// articles, conjunctions, prepositions, pronouns, auxiliaries, negations,
+    /// quantifiers, greetings and the contractions of all of the above.
+    ///
+    /// Deliberately generous: every word added here makes the guard MORE
+    /// permissive, and permissive is the safe direction. This detector's only
+    /// job is to catch a multi-content-word clause drop, not to police
+    /// grammar — a cleanup that legitimately rewrites "would not" as "wouldn't"
+    /// or drops a stray "the" must never be bounced for it.
+    static let contentLossStopWords: Set<String> = leadFillers.union([
+        // articles + determiners
+        "a", "an", "the", "this", "that", "these", "those", "such", "same", "each",
+        "every", "all", "any", "some", "both", "few", "more", "most", "other",
+        "another", "much", "many", "own", "no", "none", "either", "neither",
+        // conjunctions + subordinators
+        "or", "but", "nor", "if", "then", "than", "as", "because", "while", "when",
+        "whenever", "though", "although", "unless", "until", "whether", "since",
+        // prepositions + particles
+        "of", "to", "in", "on", "at", "by", "for", "with", "from", "into", "onto",
+        "over", "under", "about", "after", "before", "between", "through", "during",
+        "without", "within", "up", "down", "out", "off", "above", "below", "near",
+        "per", "via", "upon", "against", "along", "across", "around", "behind",
+        // pronouns + possessives
+        "i", "you", "he", "she", "it", "we", "they", "me", "him", "her", "us",
+        "them", "my", "your", "his", "its", "our", "their", "mine", "yours",
+        "hers", "ours", "theirs", "who", "whom", "whose", "which", "what",
+        "myself", "yourself", "himself", "herself", "itself", "ourselves",
+        "themselves", "one", "ones", "there", "here",
+        // auxiliaries + copulas + modals
+        "am", "is", "are", "was", "were", "be", "been", "being", "do", "does",
+        "did", "done", "doing", "have", "has", "had", "having", "will", "would",
+        "shall", "should", "can", "could", "may", "might", "must", "ought",
+        // negation and degree
+        "not", "very", "just", "really", "quite", "also", "too", "again", "still",
+        "even", "only", "yes",
+        // greetings and interjections — the same class as `leadFillers`, which
+        // only covers the ones that can OPEN an utterance — plus the texting
+        // shorthand a cleanup expands ("u" → "you", "ur" → "your").
+        "hey", "hi", "hello", "yeah", "yep", "yup", "nope", "nah", "u", "ur",
+        // the contractions the ASR and the model swap freely in both directions
+        "don't", "doesn't", "didn't", "isn't", "aren't", "wasn't", "weren't",
+        "can't", "cannot", "won't", "wouldn't", "shouldn't", "couldn't", "hasn't",
+        "haven't", "hadn't", "it's", "i'm", "i've", "i'll", "i'd", "you're",
+        "you've", "you'll", "we're", "we've", "we'll", "they're", "they've",
+        "they'll", "he's", "she's", "that's", "there's", "here's", "what's",
+        "let's", "lets", "let",
+    ])
+
+    /// A spoken self-correction in the INPUT. Prompt rule 4 ("send it to bob
+    /// sorry to alice" → "send it to alice") is the one transform that
+    /// legitimately deletes three or more content words, and it is always CUED
+    /// by the speaker — that is what makes it resolvable at all. When a cue is
+    /// present this guard never fires: rule-4 deletions are the model's job.
+    ///
+    /// The trailing `[^\w\n]*\w` requires at least one more word after the cue
+    /// (a correction at the very end corrects nothing) and tolerates the
+    /// punctuation cleanup inserts around it, so "No, actually, quarter past 10"
+    /// still reads as a cue.
+    static let selfCorrectionCue = regex(
+        #"\b(?:no[^\w\n]*actually|actually|sorry|i\s+meant?|scratch\s+that|rather|"#
+            + #"make\s+that|i\s+said|no)\b[^\w\n]*\w"#,
+        [.caseInsensitive])
+
+    /// How many unique content words the model may delete before the reply
+    /// counts as damage rather than cleanup. Measured over 254 refine outputs on
+    /// LibriSpeech + tts-samantha: legitimate cleanups topped out at 2 (absent a
+    /// self-correction cue), damaging ones scored 3, 3, 3 and 9. The gap is the
+    /// threshold.
+    public static let droppedContentThreshold = 3
+
+    /// Prefix length at which two tokens count as the same word. Keeps
+    /// legitimate inflection fixes ("founded"/"found", "walk"/"walking") and ITN
+    /// rewrites out of the loss count. Like `verbStemLength`, tolerance can only
+    /// ever SUPPRESS this detector, never trigger it.
+    static let contentStemLength = 4
+
+    /// True when the reply deleted content the utterance carried — the failure
+    /// the word-count band structurally cannot see, because its floor scales
+    /// with the input (see §dropped content above).
+    ///
+    /// Loss is a MULTISET difference: each raw content word is matched against
+    /// one refined occurrence, so "the tape and the tape" coming back with one
+    /// "tape" is one loss, not zero. Stop words are excluded before counting,
+    /// and any word whose stem survives on the refined side counts as retained.
+    public static func droppedContent(raw: String, refined: String) -> Bool {
+        // A cued self-correction is the model doing what it was told.
+        if matches(selfCorrectionCue, raw) { return false }
+
+        let refinedTokens = contentTokens(refined)
+        // An empty reply belongs to `plausible`, which runs first and owns it —
+        // reporting it here would move a long-recorded `implausible` row.
+        guard !refinedTokens.isEmpty else { return false }
+
+        var remaining: [String: Int] = [:]
+        for token in refinedTokens { remaining[token, default: 0] += 1 }
+
+        var loss = 0
+        for token in contentTokens(raw) {
+            if contentLossStopWords.contains(token) { continue }
+            if let count = remaining[token], count > 0 {
+                remaining[token] = count - 1          // one raw word, one refined word
+                continue
+            }
+            let stem = String(token.prefix(contentStemLength))
+            if refinedTokens.contains(where: { $0.hasPrefix(stem) }) { continue }
+            loss += 1
+        }
+        return loss >= droppedContentThreshold
+    }
+
     /// Whitespace-split, lowercased, edge-punctuation-trimmed words. Interior
     /// punctuation is kept, so "twenty-three" stays one token and "11%" is not
     /// silently turned into "11".
