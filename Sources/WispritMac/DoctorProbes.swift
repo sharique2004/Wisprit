@@ -34,6 +34,16 @@ public extension Doctor {
         facts.microphone = Permissions.microphone().rawValue
         facts.secureInputActive = Permissions.secureInput().active
 
+        // Three Core Audio property reads, microseconds, no permission needed —
+        // the answer to "why did accuracy drop when I put my headset on?".
+        facts.inputDevicePolicy = InputDevicePolicySettings.policy(Settings.load()).rawValue
+        if let device = InputDeviceProbe.defaultInput() {
+            facts.inputDeviceName = device.name
+            facts.inputDeviceTransport = device.transportName
+            facts.inputDeviceSampleRateHz = device.nominalSampleRate
+            facts.inputDeviceNarrowband = device.isNarrowband
+        }
+
         let preflight = await AsrDoctor.check(locale: locale)
         facts.requestedLocale = locale
         facts.speechOK = preflight.ok

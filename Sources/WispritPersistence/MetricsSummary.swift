@@ -106,7 +106,7 @@ public struct MetricsSummary: Sendable, Equatable {
     /// Mirrors `SpeechAnalyzerEngine.voicedPeakThreshold`. WispritPersistence
     /// cannot import WispritEngine (WispritKit is the only shared seam), so the
     /// constant is restated here; it is pinned to the engine's by test.
-    public static let voicedPeakThreshold = 0.02
+    public static let voicedPeakThreshold = 0.01
     /// Below this the hold was too short to have said anything.
     public static let shortHoldMs = 1000.0
     /// The `empty_reason` value that means "no benign explanation applies".

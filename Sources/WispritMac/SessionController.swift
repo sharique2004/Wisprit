@@ -27,6 +27,56 @@ public enum VocabularyRetroSettings {
     }
 }
 
+/// `keyup_grace_ms` — how long the microphone stays open after key-up.
+///
+/// The number, in one place. `SessionController.Configuration.releaseGrace` is
+/// the knob the state machine reads; this is where the app's value for it comes
+/// from, so the grace has a single definition instead of a literal at the
+/// wiring site. Same string-keyed accessor pattern as `VocabularyRetroSettings`
+/// above: `Settings.defaults` stays golden-pinned and a config written by either
+/// build round-trips intact.
+///
+/// 120 ms is not arbitrary: the tap is installed at 100 ms granularity, so at
+/// key-up a uniformly distributed 0–100 ms of already-captured hardware audio is
+/// sitting in it undelivered, and `MicCapture.stop()` used to throw that away
+/// along with the resampler's 15 ms tail. 120 ms covers the whole tap window
+/// with margin; the resampler tail is recovered by `PcmDownconverter.flush()`
+/// and no longer needs grace at all. Read at wiring time (like
+/// `levelTickInterval` and `History.detailEnabled`), so an edit takes effect on
+/// the next launch. Clamped to 500 ms by the session, whatever the file says.
+public enum KeyupGraceSettings {
+    public static let key = "keyup_grace_ms"
+    public static let defaultMs = 120
+
+    public static func milliseconds(_ settings: Settings) -> Int {
+        settings.int(key, or: defaultMs)
+    }
+
+    public static func seconds(_ settings: Settings) -> TimeInterval {
+        Double(milliseconds(settings)) / 1000.0
+    }
+}
+
+/// `input_device_policy` — what to do about a narrowband Bluetooth microphone.
+///
+/// * `warn` (default) — one pill notice the first time such a device appears.
+/// * `prefer_builtin` — additionally pin capture to the built-in mic while the
+///   default input is a narrowband classic-BT one.
+/// * `off` — say nothing, pin nothing.
+///
+/// Advisory by default on purpose: the user chose that headset, and a dictation
+/// tool that silently overrides the system input device is worse than one that
+/// mentions the trade-off once.
+public enum InputDevicePolicySettings: String, CaseIterable, Sendable {
+    case warn, preferBuiltin = "prefer_builtin", off
+
+    public static let key = "input_device_policy"
+
+    public static func policy(_ settings: Settings) -> InputDevicePolicySettings {
+        InputDevicePolicySettings(rawValue: settings.string(key, or: warn.rawValue)) ?? .warn
+    }
+}
+
 /// `history_detail` — whether the per-utterance pipeline triple
 /// (`utterance_detail`) is written alongside each transcript. Same string-key
 /// precedent as above; default TRUE because a triple is the same sensitivity
@@ -88,6 +138,22 @@ public final class SessionController: @unchecked Sendable {
         public var vocabularyRetro: @Sendable () -> Bool
         /// `self._events.get(timeout=0.25)` in the Python run loop.
         public var pollTimeout: TimeInterval
+        /// Voice-triggered snippet expansion (Flow Snippets). Identity by
+        /// default so tests that never constructed a store stay verbatim.
+        public var expandSnippets: @Sendable (String) -> String
+        /// How long to keep the mic open after key-up so the in-flight
+        /// ~100 ms tap and resampler tail are not discarded. Zero in tests
+        /// (and the default) so the state machine stays instantaneous;
+        /// the app sets it from `KeyupGraceSettings` (~120 ms).
+        ///
+        /// Spent in ≤20 ms slices that keep watching the event queue, never as
+        /// one blocking sleep: Esc must still abort inside the grace, and a
+        /// queued press must still be able to cut it short.
+        public var releaseGrace: TimeInterval
+        /// One line about the input device, or nil — shown once per device
+        /// appearance, never per utterance. nil by default, so no wiring that
+        /// omits it ever says anything.
+        public var inputWarning: @Sendable () -> String?
 
         public init(holdDebounceMs: @escaping @Sendable () -> Double = { 150 },
                     isEnabled: @escaping @Sendable () -> Bool = { true },
@@ -95,7 +161,10 @@ public final class SessionController: @unchecked Sendable {
                     levelTickInterval: TimeInterval? = 0.05,
                     reconcileVocabulary: Bool = true,
                     vocabularyRetro: @escaping @Sendable () -> Bool = { true },
-                    pollTimeout: TimeInterval = 0.25) {
+                    pollTimeout: TimeInterval = 0.25,
+                    expandSnippets: @escaping @Sendable (String) -> String = { $0 },
+                    releaseGrace: TimeInterval = 0,
+                    inputWarning: @escaping @Sendable () -> String? = { nil }) {
             self.holdDebounceMs = holdDebounceMs
             self.isEnabled = isEnabled
             self.postProcessOptions = postProcessOptions
@@ -103,6 +172,9 @@ public final class SessionController: @unchecked Sendable {
             self.reconcileVocabulary = reconcileVocabulary
             self.vocabularyRetro = vocabularyRetro
             self.pollTimeout = pollTimeout
+            self.expandSnippets = expandSnippets
+            self.releaseGrace = releaseGrace
+            self.inputWarning = inputWarning
         }
     }
 
@@ -324,7 +396,15 @@ public final class SessionController: @unchecked Sendable {
     // MARK: - transitions
 
     private func begin(at timestamp: Double) {
-        guard config.isEnabled() else { return }
+        guard config.isEnabled() else {
+            // Belt and braces for the R33 prestart: the hotkey hook checks the
+            // same toggle, but it does so on another thread, so a press that
+            // races the menu item off could leave a microphone running with no
+            // utterance to own it. Idempotent — a stop with nothing to stop is
+            // free.
+            audio.stop()
+            return
+        }
         dropDeferred()
 
         // Hot-reload the dictionary on key-down so an edit lands on the very
@@ -395,6 +475,16 @@ public final class SessionController: @unchecked Sendable {
         // a second sense: the cue may never claim a mic that did not open. For
         // a `pill_hidden` user this is the only "it's listening" signal.
         sound?.play(.micOpen)
+        // AFTER `showRecording()`, never between `audio.start()` and it.
+        // `PillModel.transientNotice` only keeps the pill alive on its
+        // in-flight states (recording/finalizing/refining); issued from
+        // `.prewarming` it flips the pill to `.success` — a green flash before
+        // a word is spoken — and the `showRecording()` below would then wipe
+        // the bubble, so the warning would never be seen at all. Here it lands
+        // in the bubble exactly like the dead-mic cue.
+        if let warning = config.inputWarning() {
+            pill?.transientNotice(warning)
+        }
         startLevelTicker()
     }
 
@@ -405,22 +495,30 @@ public final class SessionController: @unchecked Sendable {
 
         if heldMs < debounceMs {
             // Accidental brush — discard everything, write no metrics row.
-            gate?.setRecording(false)
-            audio.stop()
-            runBlocking { [asr] in await asr.cancel() }
-            cancelRefiner()
-            endLiveUtterance(discardingTail: true)
-            // Drained and dropped: a snapshot must never outlive its utterance.
-            _ = context?.finishCapture()
-            setState(.idle)
-            pill?.hide()
+            discardUtterance()
             return
         }
 
         setState(.finalizing)
-        pill?.showFinalizing()
 
+        // The stamp is at TRUE release, before the grace: `release_to_text_ms`
+        // must carry the grace honestly rather than hide it.
         let tRelease = MonotonicClock.now()
+        // The last ~100 ms of speech is still sitting in the tap buffer
+        // when the key comes up. A short grace lets that chunk (and the
+        // speech the user is still finishing) reach the engine before the mic
+        // goes dark. Debounce-abort and Esc above skip this on purpose.
+        if awaitReleaseGrace() == .cancelled {
+            // Esc inside the grace: the same discard the debounce branch runs,
+            // and strictly faster than today's Esc-during-finalize path — the
+            // utterance never reaches the analyzer at all.
+            discardUtterance()
+            return
+        }
+        // The pill only now says "finalizing": for the length of the grace the
+        // microphone is still hot, and a frozen meter under a finalizing label
+        // would be describing a state the session is not in yet.
+        pill?.showFinalizing()
         audio.stop()
         // The capture session's acoustic telemetry, read once it is closed and
         // threaded onto every row this utterance writes: the (peak, floor)
@@ -457,7 +555,7 @@ public final class SessionController: @unchecked Sendable {
             cancelRefiner()
             endLiveUtterance(discardingTail: true)
             setState(.idle)
-            pill?.hide()
+            pill?.showIdle()
             return
         }
 
@@ -466,7 +564,8 @@ public final class SessionController: @unchecked Sendable {
         // ("S-H-A-R-I-Q-U-E" → "Sharifue"). Refine's own letter-run bypass is
         // the safety net, not the detector.
         let raw = result.text
-        let action = corrector?.decide(utterance: raw, previousUtterance: previousUtterance) ?? .none
+        let priorUtterance = previousUtterance
+        let action = corrector?.decide(utterance: raw, previousUtterance: priorUtterance) ?? .none
         var correction = CorrectionApplier.apply(action, to: raw)
         setPreviousUtterance(raw)
 
@@ -508,9 +607,24 @@ public final class SessionController: @unchecked Sendable {
         // Refine was the last cancellable stage; stop emitting Esc now.
         gate?.setRecording(false)
 
-        let text = PostProcess.process(refined,
-                                       options: config.postProcessOptions(),
-                                       corrections: corrections)
+        var options = config.postProcessOptions()
+        options.precedingText = ctx.precedingText ?? ""
+        options.frontmostBundleID = ctx.bundleID ?? ""
+        let processed = PostProcess.processResult(refined,
+                                                 options: options,
+                                                 corrections: corrections)
+        var text = config.expandSnippets(processed.text)
+        // Follow-up "not a pet pill" after the wrong word is already in
+        // the field: rewrite that word and swallow the cue, the same
+        // shape as a spoken-spelling retro-replace.
+        if let pair = SelfCorrection.standaloneNotCorrection(text),
+           SelfCorrection.containsWord(pair.rejected, in: priorUtterance),
+           case .applied(let notice) = applyRetroEdit(target: pair.rejected,
+                                                      replacement: pair.replacement) {
+            text = ""
+            correction.notice = notice
+        }
+        let pressEnter = processed.pressEnter
         let tPost = MonotonicClock.now()
 
         // An Esc pressed WHILE we were finalizing/refining means the user wants
@@ -518,7 +632,22 @@ public final class SessionController: @unchecked Sendable {
         if aiOutcome == .cancelled || events.drainCancel() {
             endLiveUtterance(discardingTail: true)
             setState(.idle)
-            pill?.hide()
+            pill?.showIdle()
+            return
+        }
+
+        if text.isEmpty, pressEnter {
+            endLiveUtterance(discardingTail: true)
+            setState(.inserting)
+            inserter.pressReturn()
+            pill?.flashSuccess()
+            sound?.play(.commit)
+            writeMetrics(heldMs: heldMs, result: result, postMs: (tPost - tAi) * 1000.0,
+                         insertMs: 0, outcome: "paste", releaseToTextMs: nil,
+                         aiMs: (tAi - tAsr) * 1000.0, ai: aiOutcome.rawValue,
+                         audioMs: audioMs, refineDelta: refineDelta, ctx: ctx,
+                         noiseFloor: noiseFloor, firstVoicedMs: firstVoicedMs)
+            setState(.idle)
             return
         }
 
@@ -537,7 +666,7 @@ public final class SessionController: @unchecked Sendable {
                 completeCorrection(correction, retained: retained,
                                    inserted: "", outcome: "correction",
                                    extraTerms: ctx.terms)
-                if correction.notice == nil { pill?.hide() }
+                if correction.notice == nil { pill?.showIdle() }
                 // CONTRACT-DEVIATION: a fourth `outcome` value beyond
                 // paste|type|blocked_secure|error|empty. Logging this as
                 // "empty" would inflate the existing empty-rate metric (50/285
@@ -595,9 +724,20 @@ public final class SessionController: @unchecked Sendable {
         let repressQueued = events.hasPendingPress
 
         if insertion.ok {
+            if pressEnter { inserter.pressReturn() }
             if !deliveredEarly {
                 pill?.flashSuccess()
                 sound?.play(.commit)
+            }
+            // The device-switch case the empty-reason row CANNOT reach: the
+            // engine stopped itself mid-hold, the prefix read cleanly, and the
+            // user is about to accept a truncated sentence under a success
+            // checkmark. The batch rescue cannot fix this one — the post-switch
+            // audio was never captured, so there is nothing to re-read — which
+            // makes saying so the entire remedy. Rides the same
+            // post-delivery notice channel as "Learned X" below.
+            if result.sawConfigurationChange {
+                pill?.transientNotice("Mic changed mid-dictation — check for missing words")
             }
         } else if insertion.blockedSecure {
             // Its own pill state (§2.4): a lock rather than an alarm, held long
@@ -654,7 +794,64 @@ public final class SessionController: @unchecked Sendable {
                            inserted: insertion.ok ? text : "",
                            outcome: insertion.outcome,
                            extraTerms: ctx.terms,
-                           transcriptId: transcriptId)
+                           transcriptId: transcriptId,
+                           commitAnchor: insertion.ok ? insertion.commitAnchor : nil)
+    }
+
+    /// Throw this utterance away and return to idle, leaving no metrics row.
+    ///
+    /// The accidental-brush branch and the Esc-inside-the-grace branch are the
+    /// same discard and must stay the same discard — including
+    /// `context?.finishCapture()` and the live-typing tail, either of which
+    /// leaking would carry a snapshot or a provisional run into the NEXT
+    /// utterance.
+    private func discardUtterance() {
+        stopLevelTicker()
+        gate?.setRecording(false)
+        audio.stop()
+        runBlocking { [asr] in await asr.cancel() }
+        cancelRefiner()
+        endLiveUtterance(discardingTail: true)
+        // Drained and dropped: a snapshot must never outlive its utterance.
+        _ = context?.finishCapture()
+        setState(.idle)
+        pill?.showIdle()
+    }
+
+    /// How a post-release grace ended.
+    enum GraceOutcome: Equatable {
+        /// The full grace elapsed (or there was none).
+        case elapsed
+        /// Esc/cancel arrived — the utterance is to be discarded.
+        case cancelled
+        /// A press is already queued; the next utterance outranks our tail.
+        case preempted
+    }
+
+    /// Longest grace the session will honour, whatever `keyup_grace_ms` says.
+    /// Every millisecond here is added to `release_to_text_ms` for EVERY
+    /// utterance, so a fat-fingered config must not be able to make dictation
+    /// feel broken.
+    static let maxReleaseGrace: TimeInterval = 0.5
+
+    /// Keep the microphone open briefly after key-up.
+    ///
+    /// Not one blocking sleep: the loop watches the event queue in ≤20 ms
+    /// slices so Esc still aborts inside the grace (faster than it can today,
+    /// where it has to wait out finalize), and so a re-press cuts the grace
+    /// short rather than adding 120 ms to the next utterance's wait.
+    @discardableResult
+    func awaitReleaseGrace() -> GraceOutcome {
+        let grace = min(max(config.releaseGrace, 0), SessionController.maxReleaseGrace)
+        guard grace > 0 else { return .elapsed }
+        let deadline = Date().addingTimeInterval(grace)
+        while true {
+            if events.drainCancel() { return .cancelled }
+            if events.hasPendingPress { return .preempted }
+            let remaining = deadline.timeIntervalSinceNow
+            guard remaining > 0 else { return .elapsed }
+            Thread.sleep(forTimeInterval: min(remaining, 0.02))
+        }
     }
 
     private func abort(reason: String) {
@@ -668,7 +865,7 @@ public final class SessionController: @unchecked Sendable {
         _ = context?.finishCapture()
         setState(.idle)
         if reason == "esc" || reason == "cancelled" {
-            pill?.hide()
+            pill?.showIdle()
         } else {
             flashError(reason)
         }
@@ -721,6 +918,12 @@ public final class SessionController: @unchecked Sendable {
         /// the serving rung reported one (the paste rung stamps it before its
         /// restore sleep). nil = delivery coincided with the return.
         var deliveredAt: Double? = nil
+        /// Where this utterance's text starts inside the run its IM session
+        /// committed, when rung 1/2 served it. nil on the paste path, where
+        /// nothing in the field is ours to address. Carried BY VALUE for the
+        /// same reason `inserted`/`outcome` are: by drain time `liveTyping`
+        /// describes a different utterance.
+        var commitAnchor: CommitAnchor? = nil
     }
 
     /// Walk the ladder for real. Rungs 1–2 first when the input method holds a
@@ -739,7 +942,10 @@ public final class SessionController: @unchecked Sendable {
                 // The committed text IS the delivery on this rung and there is
                 // no post-delivery window; notify and return in one breath.
                 onDelivered()
-                return Delivery(ok: true, outcome: tier.rawValue, detail: "", blockedSecure: false)
+                // Read before anything else can commit: this is where the chunk
+                // we just wrote begins inside the session's run.
+                return Delivery(ok: true, outcome: tier.rawValue, detail: "",
+                                blockedSecure: false, commitAnchor: live.lastCommitAnchor)
             case .fallback(let reason):
                 log.info("live typing declined (\(reason, privacy: .public)) — pasting")
             }
@@ -766,11 +972,16 @@ public final class SessionController: @unchecked Sendable {
 
     /// Route a cross-utterance `retroReplace` through the input method. On
     /// `.applied` the returned notice replaces the learn-only one.
-    func applyRetroEdit(target: String, replacement: String) -> RetroEditAttempt {
+    func applyRetroEdit(target: String, replacement: String,
+                        utf16LocationInCommitted: Int? = nil,
+                        anchorGeneration: UInt64? = nil) -> RetroEditAttempt {
         guard let live = liveTyping, live.isEngaged else {
             return .declined(detail: "not_engaged")
         }
-        guard let result = live.applyRetroEdit(replace: target, with: replacement) else {
+        guard let result = live.applyRetroEdit(
+                replace: target, with: replacement,
+                utf16LocationInCommitted: utf16LocationInCommitted,
+                anchorGeneration: anchorGeneration) else {
             // Silence (or a crossed `clientAcquired`): the edit cannot be
             // proven to have landed, which for the caller is a refusal.
             return .declined(detail: "no_reply")
@@ -821,7 +1032,8 @@ public final class SessionController: @unchecked Sendable {
     /// utterance used, and both have moved on by the time it finishes.
     func completeCorrection(_ correction: CorrectionOutcome, retained: RetainedUtterance,
                             inserted: String = "", outcome: String = "",
-                            extraTerms: [String] = [], transcriptId: Int64 = -1) {
+                            extraTerms: [String] = [], transcriptId: Int64 = -1,
+                            commitAnchor: CommitAnchor? = nil) {
         if let learned = correction.learn {
             if correction.learnIsPending {
                 // Quarantined: recorded, excluded from corrections and biasing
@@ -863,7 +1075,8 @@ public final class SessionController: @unchecked Sendable {
                     termHits: reconciliation.termHits,
                     knownTerm: { vocabulary?.isKnownTerm($0) ?? false })
                 : VocabularyRetroPlan()
-            self.scheduleVocabularyRetro(plan, reconciliation: reconciliation, rung: outcome)
+            self.scheduleVocabularyRetro(plan, reconciliation: reconciliation, rung: outcome,
+                                         commitAnchor: commitAnchor)
         }
     }
 
@@ -884,7 +1097,8 @@ public final class SessionController: @unchecked Sendable {
     /// apply — close the books on it immediately.
     private func scheduleVocabularyRetro(_ plan: VocabularyRetroPlan,
                                          reconciliation: VocabularyReconciliation,
-                                         rung: String) {
+                                         rung: String,
+                                         commitAnchor: CommitAnchor? = nil) {
         let hits = reconciliation.termHits.values.reduce(0, +)
         guard !plan.edits.isEmpty else {
             if let refusal = plan.refusal {
@@ -903,7 +1117,7 @@ public final class SessionController: @unchecked Sendable {
                                               rung: rung, applyDetail: "dropped")
         }) { [weak self] in
             self?.applyVocabularyRetro(plan, reconciliation: reconciliation, hits: hits,
-                                       rung: rung)
+                                       rung: rung, commitAnchor: commitAnchor)
         }
     }
 
@@ -918,14 +1132,28 @@ public final class SessionController: @unchecked Sendable {
     func applyVocabularyRetro(_ plan: VocabularyRetroPlan,
                               reconciliation: VocabularyReconciliation,
                               hits: Int,
-                              rung: String) {
+                              rung: String,
+                              commitAnchor: CommitAnchor? = nil) {
         let onInputMethodRung = SessionController.isInputMethodRung(rung)
         var fixed: String?
         var learned: String?
         var declined: String?
-        for edit in plan.edits {
+        // HIGHEST OFFSET FIRST. Every anchor is measured against the committed
+        // record as it stood when the text landed; applying a lower-offset edit
+        // first shifts everything after it whenever `replace` and `with` differ
+        // in length, and the next anchor then names characters that have moved.
+        // Walking backwards means no applied edit can invalidate an anchor that
+        // has not been used yet. (`maxEdits` is 2, so this is one pair today —
+        // stated anyway, because the reason does not depend on the cap.)
+        for edit in plan.edits.sorted(by: { $0.utf16Location > $1.utf16Location }) {
             if onInputMethodRung {
-                switch applyRetroEdit(target: edit.replace, replacement: edit.with) {
+                // Run-relative: where this utterance starts inside the session's
+                // committed run, plus where the block sits inside this utterance.
+                switch applyRetroEdit(target: edit.replace, replacement: edit.with,
+                                      utf16LocationInCommitted: commitAnchor.map {
+                                          $0.utf16Offset + edit.utf16Location
+                                      },
+                                      anchorGeneration: commitAnchor?.generation) {
                 case .applied:
                     if fixed == nil { fixed = edit.with }
                     continue
@@ -986,21 +1214,23 @@ public final class SessionController: @unchecked Sendable {
         pill?.flashError(message)
     }
 
-    /// Pill copy for an utterance that produced nothing. "nothing recognized"
-    /// used to be the answer to every one of these, which told the user with a
-    /// muted microphone exactly what it told the user who never spoke.
+    /// Pill copy for an utterance that produced nothing.
+    ///
+    /// Silence and a clean miss are not faults — Flow fades; we name them
+    /// quietly and leave. A starved mic, a crash or a timeout still alarm,
+    /// because those are ours.
     private func flashEmpty(_ reason: EmptyReason?) {
         switch reason {
         case .starved:
             flashError("Microphone delivered no audio")
-        case .silent:
-            flashError("Didn't hear anything — is the right mic selected?")
+        case .deviceChanged:
+            flashError("Microphone changed — try again")
+        case .silent, .producedNothing, .none:
+            pill?.flashMissed("Didn't catch that")
         case .shortHold:
-            // A fumbled tap is a coaching moment, not a failure — the notice is
-            // the pill's non-error styling.
-            pill?.transientNotice("Hold the key while you speak")
-        case .timedOut, .crashed, .producedNothing, .none:
-            flashError("nothing recognized")
+            pill?.flashMissed("Hold the key while you speak")
+        case .timedOut, .crashed:
+            flashError("Didn't catch that")
         }
     }
 
@@ -1106,7 +1336,13 @@ public final class SessionController: @unchecked Sendable {
             repressQueued: repressQueued,
             // R4: the capture session's acoustic pair, every utterance row.
             noiseFloor: noiseFloor,
-            firstVoicedMs: firstVoicedMs))
+            firstVoicedMs: firstVoicedMs,
+            // Derived here rather than passed by each call site, so EVERY
+            // utterance row carries it — the truncated-but-non-empty rows most
+            // of all, which is the shape the 2026-08-05 log could not express.
+            // Omitted when false: the append-only stream never grows a byte on
+            // the overwhelming majority of rows.
+            configChanged: result.sawConfigurationChange ? true : nil))
     }
 
     // MARK: - level ticker

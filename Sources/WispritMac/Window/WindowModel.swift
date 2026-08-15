@@ -217,6 +217,7 @@ public final class WispritWindowModel: ObservableObject {
     /// Apps the insertion ladder has learned cannot take live text.
     @Published public private(set) var liveTypingFallbacks: [BundleVerdict] = []
     @Published public private(set) var dictionaryRows: [DictionaryRow] = []
+    @Published public private(set) var snippetRows: [SnippetRow] = []
     /// Phase-5 learn proposals awaiting review — §3.4's Pending badge grows a
     /// second population beyond the quarantined dictionary entries.
     @Published public private(set) var learnProposals: [LearnProposalRow] = []
@@ -303,6 +304,7 @@ public final class WispritWindowModel: ObservableObject {
 
     private let settings: Settings
     private let dictionary: DictionaryEditor
+    private let snippets: SnippetStore?
     private let ports: Ports
     private var timer: Timer?
     /// Full probes are expensive; the 2-second tick only does the cheap one and
@@ -335,12 +337,15 @@ public final class WispritWindowModel: ObservableObject {
     /// this window must not compete with them while the key is held.
     private var isDictating = false
 
-    public init(settings: Settings, dictionary: DictionaryEditor, ports: Ports = Ports()) {
+    public init(settings: Settings, dictionary: DictionaryEditor,
+                snippets: SnippetStore? = nil, ports: Ports = Ports()) {
         self.settings = settings
         self.dictionary = dictionary
+        self.snippets = snippets
         self.ports = ports
         reloadSettings()
         reloadDictionary()
+        reloadSnippets()
         // The model is built once per launch, so this is where the
         // time-to-wow clock (R14) sees launches.
         noteLaunchForTimeToWow()
@@ -360,6 +365,7 @@ public final class WispritWindowModel: ObservableObject {
         takeDictationBaselineIfNeeded()
         reloadSettings()
         reloadDictionary()
+        reloadSnippets()
         refreshRecents()
         loadHistory(reset: true)
         refreshHomeStats()
@@ -777,6 +783,47 @@ public final class WispritWindowModel: ObservableObject {
 
     public var dictionaryPath: URL { dictionary.path }
 
+    // MARK: - Snippets
+
+    public struct SnippetRow: Identifiable, Equatable, Sendable {
+        public var trigger: String
+        public var expansion: String
+        public var id: String { trigger.lowercased() }
+    }
+
+    public var hasSnippets: Bool { snippets != nil }
+
+    public func reloadSnippets() {
+        snippetRows = (snippets?.all() ?? []).map {
+            SnippetRow(trigger: $0.trigger, expansion: $0.expansion)
+        }
+    }
+
+    public var filteredSnippetRows: [SnippetRow] {
+        let q = dictionarySearch.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !q.isEmpty else { return snippetRows }
+        return snippetRows.filter {
+            $0.trigger.localizedCaseInsensitiveContains(q)
+                || $0.expansion.localizedCaseInsensitiveContains(q)
+        }
+    }
+
+    @discardableResult
+    public func saveSnippet(original: SnippetRow?, trigger: String, expansion: String) -> Bool {
+        guard let snippets else { return false }
+        if let original, original.trigger.caseInsensitiveCompare(trigger) != .orderedSame {
+            snippets.remove(trigger: original.trigger)
+        }
+        let ok = snippets.upsert(SnippetStore.Snippet(trigger: trigger, expansion: expansion))
+        reloadSnippets()
+        return ok
+    }
+
+    public func deleteSnippet(_ trigger: String) {
+        snippets?.remove(trigger: trigger)
+        reloadSnippets()
+    }
+
     // MARK: - Settings
 
     public func reloadSettings() {
@@ -841,9 +888,13 @@ public final class WispritWindowModel: ObservableObject {
         apply(facts: patched)
     }
 
+    /// The floating bar hides or returns to idle when this flips.
+    public var onPillHiddenChange: ((Bool) -> Void)?
+
     public func setPillHidden(_ value: Bool) {
         pillHidden = value
         settings.set(SettingsKey.pillHidden, value)
+        onPillHiddenChange?(value)
     }
 
     public func setFillerRemoval(_ value: Bool) {

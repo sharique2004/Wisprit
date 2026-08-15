@@ -284,6 +284,29 @@ final class SessionLiveTypingTests: XCTestCase {
         XCTAssertEqual(h.metrics.last?.outcome, "empty")
     }
 
+    // MARK: - cross-utterance "not X Y" restatement
+
+    func testNotRestatementFollowUpFixesTheWordInTheField() {
+        let h = Harness()
+        h.asr.result = UtteranceResult(
+            text: "I want a more graceful UI for the pet itself",
+            engine: "apple_live", finalizeMs: 70)
+        h.utterance()
+        XCTAssertEqual(h.peer.snapshot.document,
+                       "I want a more graceful UI for the pet itself")
+
+        h.asr.result = UtteranceResult(text: "not a pet pill",
+                                       engine: "apple_live", finalizeMs: 40)
+        h.utterance()
+
+        XCTAssertEqual(h.peer.snapshot.document,
+                       "I want a more graceful UI for the pill itself",
+                       "the follow-up cue rewrote the word already in the field")
+        XCTAssertEqual(h.pill.notices, ["Fixed pill"])
+        XCTAssertTrue(h.inserter.inserted.isEmpty)
+        XCTAssertEqual(h.metrics.last?.outcome, "correction")
+    }
+
     // MARK: - cross-utterance retro replace, for real
 
     func testCrossUtteranceRetroReplaceRewritesTheWordInTheField() {
@@ -440,8 +463,8 @@ final class SessionLiveTypingTests: XCTestCase {
         XCTAssertEqual(h.peer.snapshot.document,
                        "We tested InsForge then Wisprit plus Monday morning with the whole team")
         XCTAssertEqual(h.peer.count(of: "apply_edit"), 2)
-        XCTAssertEqual(h.pill.notices, ["Fixed InsForge"],
-                       "one notice per utterance, naming the first thing fixed")
+        XCTAssertEqual(h.pill.notices, ["Fixed Wisprit"],
+                       "one notice per utterance — edits apply highest-offset-first, so the notice names the later block")
     }
 
     func testANewUtteranceDropsAPlanThatHasNotBeenAppliedYet() {
@@ -578,6 +601,34 @@ final class SessionLiveTypingTests: XCTestCase {
         XCTAssertEqual(row?.applied, false)
         XCTAssertNil(row?.applyDetail,
                      "no edit was attempted — the rung is the whole explanation")
+    }
+
+    // MARK: - the anchor the retro pass rides on
+
+    /// The seam between "offset inside the text THIS utterance inserted" (what
+    /// `VocabularyRetroEdit.utf16Location` measures) and "offset inside the run
+    /// the session committed" (what the input method resolves): the difference
+    /// is exactly this anchor, and it is a live value — read it when the commit
+    /// lands and carry it by value, or by drain time it describes a different
+    /// utterance.
+    func testTheCommitAnchorTracksWhereEachUtteranceLandsInTheRun() {
+        let h = Harness()
+        h.asr.result = UtteranceResult(text: "Ping the in forge team.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.utterance()
+        let first = h.peer.snapshot.document
+        XCTAssertEqual(h.live.lastCommitAnchor, CommitAnchor(generation: 501, utf16Offset: 0),
+                       "the first utterance of a session starts the run")
+
+        h.asr.result = UtteranceResult(text: "And the in forge docs.",
+                                       engine: "apple_live", finalizeMs: 70)
+        h.utterance()
+
+        XCTAssertEqual(h.live.lastCommitAnchor,
+                       CommitAnchor(generation: 501, utf16Offset: (first as NSString).length),
+                       "the second starts where the first ended — same session, same run")
+        XCTAssertTrue(h.peer.snapshot.committed.hasPrefix(first),
+                      "and the input method's record really is the two of them concatenated")
     }
 
     func testARetroEditWithNoEngagedInputMethodReportsNotEngaged() {

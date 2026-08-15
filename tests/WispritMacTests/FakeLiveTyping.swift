@@ -33,6 +33,15 @@ final class FakeIMPeer: LiveTypingPeer, @unchecked Sendable {
                                    installedVersion: "2.0.0-dev", stagedVersion: "2.0.0-dev")
     /// `beginSession` answers `clientLost` instead of `clientAcquired`.
     var refuseClient = false
+    /// The input method throws the anchor away and resolves every edit by the
+    /// last occurrence — what a build older than `utf16LocationInCommitted`
+    /// does with the extra JSON key, and what the shipping planner does when
+    /// the offset fails validation. It still echoes where it landed.
+    var ignoresAnchors = false
+    /// The input method answers WITHOUT `appliedUtf16LocationInCommitted` — a
+    /// build older than the echo, which is the app-side mirror's cue to fall
+    /// back to its own backwards search.
+    var echoesAppliedLocation = true
 
     // MARK: observations
 
@@ -65,6 +74,16 @@ final class FakeIMPeer: LiveTypingPeer, @unchecked Sendable {
         return commands.compactMap {
             guard case .updateVolatile(let tail) = $0.command else { return nil }
             return tail
+        }
+    }
+
+    /// Every retro edit the input method was handed, in order — the wire's own
+    /// view of what the app asked for, anchor included.
+    var appliedEdits: [IMEdit] {
+        lock.lock(); defer { lock.unlock() }
+        return commands.compactMap {
+            guard case .applyEdit(let edit) = $0.command else { return nil }
+            return edit
         }
     }
 
@@ -316,17 +335,45 @@ final class FakeIMPeer: LiveTypingPeer, @unchecked Sendable {
             guard !edit.replace.isEmpty else {
                 return .event(.editResult(generation: message.generation, .failed(.emptyEdit)))
             }
-            guard let range = committed.range(of: edit.replace, options: .backwards) else {
+            // `RetroEditPlanner.plan` in miniature, and in the same units it
+            // uses (UTF-16 `NSRange`, not `String.Index`): locate OUR run in
+            // the document by content, resolve the target INSIDE that run —
+            // honouring `utf16LocationInCommitted` only when the record bears
+            // it out, otherwise falling back to the last occurrence — and echo
+            // where the replacement actually landed so the app-side mirror can
+            // follow. The one simplification against the shipping planner: the
+            // first occurrence of the run is taken rather than insisting the
+            // run occur exactly once.
+            let record = committed as NSString
+            let field = document as NSString
+            let target = edit.replace as NSString
+            let run = field.range(of: committed, options: .literal)
+            guard run.location != NSNotFound else {
+                return .event(.editResult(generation: message.generation, .failed(.fieldChanged)))
+            }
+            var inRecord = NSRange(location: NSNotFound, length: 0)
+            if !ignoresAnchors, let anchor = edit.utf16LocationInCommitted,
+               anchor >= 0, anchor <= record.length - target.length,
+               record.substring(with: NSRange(location: anchor, length: target.length))
+                   == edit.replace {
+                inRecord = NSRange(location: anchor, length: target.length)
+            }
+            if inRecord.location == NSNotFound {
+                inRecord = record.range(of: edit.replace, options: [.backwards, .literal])
+            }
+            guard inRecord.location != NSNotFound else {
                 return .event(.editResult(generation: message.generation,
                                           .failed(.targetNotFound)))
             }
-            guard let live = document.range(of: edit.replace, options: .backwards) else {
-                return .event(.editResult(generation: message.generation, .failed(.fieldChanged)))
-            }
-            committed.replaceSubrange(range, with: edit.with)
-            document.replaceSubrange(live, with: edit.with)
-            return .event(.editResult(generation: message.generation,
-                                      .applied(note: "\(edit.replace) → \(edit.with)")))
+            let absolute = NSRange(location: run.location + inRecord.location,
+                                   length: inRecord.length)
+            committed = record.replacingCharacters(in: inRecord, with: edit.with)
+            document = field.replacingCharacters(in: absolute, with: edit.with)
+            return .event(.editResult(
+                generation: message.generation,
+                .applied(note: "\(edit.replace) → \(edit.with)",
+                         appliedUtf16LocationInCommitted: echoesAppliedLocation
+                             ? inRecord.location : nil)))
 
         case .endSession(let commit):
             if commit, !markedTail.isEmpty {

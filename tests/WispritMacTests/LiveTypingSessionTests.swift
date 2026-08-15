@@ -179,6 +179,131 @@ final class LiveTypingSessionTests: XCTestCase {
         XCTAssertEqual(peer.count(of: "apply_edit"), 0)
     }
 
+    // MARK: - anchored retro edits: the occurrence the caller MEANT
+
+    /// The anchor is measured inside the whole committed RUN, not inside one
+    /// utterance, because that is the coordinate system the input method
+    /// resolves in — and a session deliberately spans consecutive utterances.
+    func testTheCommitAnchorNamesWhereEachChunkStartsInTheRun() {
+        let session = makeSession()
+        session.beginUtterance()
+        _ = session.commit("Sharik one. ")
+        XCTAssertEqual(session.lastCommitAnchor, CommitAnchor(generation: 101, utf16Offset: 0))
+        session.endUtterance()
+
+        session.beginUtterance()
+        _ = session.commit("Sharik two.")
+        XCTAssertEqual(session.lastCommitAnchor, CommitAnchor(generation: 101, utf16Offset: 12),
+                       "one session, one run: the second utterance starts where the first ended")
+    }
+
+    /// THE defect, over the app→input-method seam. The user's field holds the
+    /// same word twice; the correction is meant for the FIRST one. Before the
+    /// anchor the wire could not even express that, so the fix always landed on
+    /// the last occurrence — a word the user had just said and meant.
+    func testARetroEditAnchoredAtTheFirstOccurrenceLeavesTheSecondAlone() {
+        let session = makeSession()
+        session.beginUtterance()
+        _ = session.commit("Sharik one. ")
+        let anchor = session.lastCommitAnchor
+        session.endUtterance()
+
+        session.beginUtterance()
+        _ = session.commit("Sharik two.")
+        XCTAssertEqual(peer.snapshot.document, "Sharik one. Sharik two.")
+
+        let result = session.applyRetroEdit(replace: "Sharik", with: "Sharique",
+                                            utf16LocationInCommitted: anchor?.utf16Offset,
+                                            anchorGeneration: anchor?.generation)
+
+        XCTAssertEqual(result?.ok, true)
+        XCTAssertEqual(peer.appliedEdits.last?.utf16LocationInCommitted, 0,
+                       "the offset really crossed the wire")
+        XCTAssertEqual(peer.snapshot.document, "Sharique one. Sharik two.",
+                       "the instance the caller meant; the second is a word the user kept")
+        XCTAssertEqual(session.committedText(for: 101), peer.snapshot.committed,
+                       "and the mirror matches the input method's record byte for byte")
+    }
+
+    /// The un-anchored call is unchanged, and one caller genuinely means it:
+    /// "actually, it's S-H-A-R-I-Q-U-E" is about the most recent mention.
+    func testWithoutAnAnchorTheLastOccurrenceIsStillTheOneThatChanges() {
+        let session = makeSession()
+        session.beginUtterance()
+        _ = session.commit("Sharik one. Sharik two.")
+
+        let result = session.applyRetroEdit(replace: "Sharik", with: "Sharique")
+
+        XCTAssertEqual(result?.ok, true)
+        XCTAssertNil(peer.appliedEdits.last?.utf16LocationInCommitted,
+                     "no opinion is sent, so the input method resolves it the way it always did")
+        XCTAssertEqual(peer.snapshot.document, "Sharik one. Sharique two.")
+        XCTAssertEqual(session.committedText(for: 101), peer.snapshot.committed)
+    }
+
+    /// An offset measured in a session that has since rolled over names
+    /// characters in a record the input method threw away at `beginSession`.
+    /// Dropping it costs the old behaviour; sending it would cost a wrong edit.
+    func testAnAnchorFromAClosedSessionIsDroppedRatherThanUsed() {
+        let session = makeSession()
+        session.beginUtterance()
+        _ = session.commit("Sharik one. ")
+        let stale = session.lastCommitAnchor
+        session.shutdown()
+
+        session.beginUtterance()
+        _ = session.commit("Sharik two. Sharik three.")
+        XCTAssertNotEqual(stale?.generation, session.lastCommitAnchor?.generation,
+                          "the session really did roll over")
+
+        let result = session.applyRetroEdit(replace: "Sharik", with: "Sharique",
+                                            utf16LocationInCommitted: stale?.utf16Offset,
+                                            anchorGeneration: stale?.generation)
+
+        XCTAssertEqual(result?.ok, true)
+        XCTAssertNil(peer.appliedEdits.last?.utf16LocationInCommitted)
+        XCTAssertEqual(peer.snapshot.committed, "Sharik two. Sharique three.",
+                       "degraded to the last occurrence — the status quo, not a wrong guess")
+    }
+
+    /// The input method resolved the target differently from the way we asked
+    /// (an old build, or an anchor its record refused). The mirror follows ITS
+    /// echo, not our request: a mirror that drifts poisons every later anchor
+    /// in the session AND makes the wire-v2 committed-snapshot diff read our
+    /// own fix as an edit the user made.
+    func testTheMirrorFollowsTheInputMethodsEchoNotTheOffsetWeSent() {
+        peer.ignoresAnchors = true
+        let session = makeSession()
+        session.beginUtterance()
+        _ = session.commit("Sharik one. Sharik two.")
+
+        let result = session.applyRetroEdit(replace: "Sharik", with: "Sharique",
+                                            utf16LocationInCommitted: 0, anchorGeneration: 101)
+
+        XCTAssertEqual(result?.appliedUtf16LocationInCommitted, 12,
+                       "it landed on the last occurrence and said so")
+        XCTAssertEqual(peer.snapshot.committed, "Sharik one. Sharique two.")
+        XCTAssertEqual(session.committedText(for: 101), peer.snapshot.committed,
+                       "the mirror moved where the input method moved, not where we asked")
+    }
+
+    /// An input method older than the echo answers without one. The mirror then
+    /// reproduces exactly what that build does internally: the last occurrence.
+    func testAnAbsentEchoFallsBackToTheMirrorsOwnBackwardsSearch() {
+        peer.ignoresAnchors = true
+        peer.echoesAppliedLocation = false
+        let session = makeSession()
+        session.beginUtterance()
+        _ = session.commit("Sharik one. Sharik two.")
+
+        let result = session.applyRetroEdit(replace: "Sharik", with: "Sharique",
+                                            utf16LocationInCommitted: 0, anchorGeneration: 101)
+
+        XCTAssertNil(result?.appliedUtf16LocationInCommitted)
+        XCTAssertEqual(session.committedText(for: 101), peer.snapshot.committed,
+                       "no echo, but the two still agree — both took the last occurrence")
+    }
+
     // MARK: - stale generations
 
     func testAStaleGenerationCanNeverTouchTheField() {

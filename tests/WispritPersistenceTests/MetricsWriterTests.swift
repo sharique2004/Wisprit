@@ -273,6 +273,53 @@ final class MetricsWriterTests: XCTestCase {
         }
     }
 
+    // MARK: config_changed (2026-08-15)
+
+    /// The 2026-08-05 incident's rows carried nothing that separated a mic that
+    /// died mid-hold from a user who said nothing. This is that field, appended
+    /// last of all — after `apply_detail`, the previous tail — and omitted when
+    /// absent, so every row any earlier build wrote is still a byte-prefix.
+    func testConfigChangedAppendsLastAndOmitsWhenAbsent() throws {
+        let with = MetricsRecord(
+            ts: 1.0, heldMs: 2.0, engine: "e", finalizeMs: 3.0, timedOut: false,
+            postMs: 4.0, insertMs: 5.0, outcome: "paste", chars: 6,
+            releaseToTextMs: 7.0, aiMs: 8.0, ai: "applied",
+            emptyReason: "device_changed",
+            peakLevel: 0.5, audioMs: 9.0, rawChars: 10, refineDelta: 11,
+            restoreMs: 1.0, repressQueued: true,
+            noiseFloor: 0.01, firstVoicedMs: 181.27,
+            configChanged: true)
+        guard case .object(let object) = try WispritJSON.parse(with.jsonLine()) else {
+            return XCTFail("not an object")
+        }
+        XCTAssertEqual(object.keys.last, "config_changed", "strictly after every key above it")
+        XCTAssertEqual(object["config_changed"], .bool(true))
+        XCTAssertEqual(object["empty_reason"], .string("device_changed"),
+                       "the empty row's own vocabulary, unchanged")
+
+        let without = MetricsRecord(
+            ts: 1785872035.681684, heldMs: 1468.75, engine: "apple_live",
+            finalizeMs: 1500.9, timedOut: false, postMs: 0.0, insertMs: 0.0,
+            outcome: "empty", chars: 0).jsonLine()
+        XCTAssertEqual(without, Golden.metricsLegacyEmptyRow)
+        XCTAssertFalse(without.contains("config_changed"), "omitted, not null")
+    }
+
+    /// It rides rows WITH text too: a mid-utterance switch truncates silently,
+    /// and that row is the one worth counting.
+    func testConfigChangedRidesADeliveredRow() throws {
+        let row = MetricsRecord(
+            heldMs: 1_200, engine: "apple_live", finalizeMs: 90, timedOut: false,
+            postMs: 1, insertMs: 2, outcome: "paste", chars: 15,
+            configChanged: true).jsonLine()
+        guard case .object(let object) = try WispritJSON.parse(row) else {
+            return XCTFail("not an object")
+        }
+        XCTAssertEqual(object["outcome"], .string("paste"))
+        XCTAssertEqual(object["config_changed"], .bool(true))
+        XCTAssertNil(object["empty_reason"])
+    }
+
     // MARK: the `onboarding` deviation row (R14)
 
     /// One time-to-wow row per fresh install, written through the dedicated

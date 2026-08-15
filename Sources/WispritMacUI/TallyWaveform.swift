@@ -44,6 +44,19 @@ public struct TallyMetrics: Equatable, Sendable {
         barPitch: PillGeometry.barPitch, height: PillGeometry.height,
         peak: PillGeometry.barPeak, floor: PillGeometry.barFloor)
 
+    /// The resting bar.
+    ///
+    /// The listening meter is fifteen 2.5 pt bars because it has to resolve a
+    /// waveform; the resting bar is five dots because it has to resolve
+    /// *nothing* — and at 2.5 pt in a 48 pt capsule that read as an empty pill
+    /// rather than a ready one. 3 pt on a 6 pt pitch is the same instrument at
+    /// the scale idle actually needs: `floor == barWidth` still holds, so they
+    /// are still perfect dots, and the field (27 pt) still sits well inside the
+    /// capsule.
+    public static let pillIdle = TallyMetrics(
+        barCount: PillGeometry.barCountIdle, barWidth: 3, barPitch: 6,
+        height: PillGeometry.height, peak: PillGeometry.barPeak, floor: 3)
+
     /// The onboarding mic test (§4.2 step 3).
     public static let micTest = TallyMetrics(
         barCount: 33, barWidth: 4, barPitch: 9, height: 44, peak: 22, floor: 4)
@@ -77,10 +90,34 @@ public struct TallyMetrics: Equatable, Sendable {
     /// One bar's rect, centred on the vertical midline and growing
     /// symmetrically up and down, with the whole field centred horizontally.
     public func barRect(index: Int, value: Double, count: Int, in size: CGSize) -> CGRect {
+        barRect(index: index, value: value, count: count, in: size, displayScale: 0)
+    }
+
+    /// The same rect, with the horizontal origin snapped to the backing store's
+    /// pixel grid.
+    ///
+    /// Only the **origin** snaps, and deliberately so. Snapping the width would
+    /// round a 2.5 pt bar to 3 px on a 1× display and take the pitch and the
+    /// centred field with it; snapping the height would quantise the waveform
+    /// into 1 pt steps, which is the one dimension the eye is actually reading.
+    /// Moving the origin alone leaves every derived dimension intact and buys
+    /// the whole row a hard left edge on non-Retina and half-Retina scales.
+    ///
+    /// `displayScale <= 0` means "don't", which is what the four-argument
+    /// spelling above passes — the geometry every test asserts is untouched.
+    public func barRect(index: Int, value: Double, count: Int,
+                        in size: CGSize, displayScale: Double) -> CGRect {
         let field = fieldWidth(count: count)
-        let originX = (size.width - field) / 2.0 + Double(index) * barPitch
+        let originX = TallyMetrics.pixelAligned(
+            (size.width - field) / 2.0 + Double(index) * barPitch, scale: displayScale)
         let h = barHeight(value)
         return CGRect(x: originX, y: (size.height - h) / 2.0, width: barWidth, height: h)
+    }
+
+    /// Round a point value onto a backing-store pixel boundary.
+    public static func pixelAligned(_ value: Double, scale: Double) -> Double {
+        guard scale > 0, value.isFinite else { return value }
+        return (value * scale).rounded() / scale
     }
 }
 
@@ -101,6 +138,10 @@ public struct TallyWaveform: View {
     public var levels: [Double]
     public var metrics: TallyMetrics
     public var color: Color
+    /// The backing-store scale, so the bars land on whole pixels at 1× and 2×
+    /// alike. Read from the environment rather than passed, because every call
+    /// site would otherwise have to remember to.
+    @Environment(\.displayScale) private var displayScale
 
     public init(levels: [Double], metrics: TallyMetrics = .pill, color: Color) {
         self.levels = levels
@@ -112,7 +153,8 @@ public struct TallyWaveform: View {
         Canvas(opaque: false, colorMode: .nonLinear, rendersAsynchronously: false) { context, size in
             for (index, value) in levels.enumerated() {
                 let rect = metrics.barRect(index: index, value: value,
-                                           count: levels.count, in: size)
+                                           count: levels.count, in: size,
+                                           displayScale: Double(displayScale))
                 context.fill(Path(roundedRect: rect, cornerRadius: metrics.cornerRadius),
                              with: .color(color.opacity(metrics.barAlpha(value))))
             }

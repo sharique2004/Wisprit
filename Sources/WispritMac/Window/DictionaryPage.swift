@@ -30,6 +30,13 @@ struct DictionaryPage: View {
     @State private var editing: EditTarget?
     @State private var pendingDelete: DictionaryRow?
     @State private var hovered: DictionaryListItem.ID?
+    @State private var editingSnippet: SnippetEdit?
+    @State private var pendingSnippetDelete: WispritWindowModel.SnippetRow?
+
+    private struct SnippetEdit: Identifiable {
+        var row: WispritWindowModel.SnippetRow?
+        var id: String { row?.id ?? "new" }
+    }
 
     /// nil `row` = adding a new term.
     private struct EditTarget: Identifiable {
@@ -53,6 +60,15 @@ struct DictionaryPage: View {
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                if model.hasSnippets {
+                    Button {
+                        editingSnippet = SnippetEdit(row: nil)
+                    } label: {
+                        Label("Add Snippet", systemImage: "text.badge.plus")
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
             }
         } content: {
             ScrollView {
@@ -63,6 +79,9 @@ struct DictionaryPage: View {
                         emptyState
                     } else {
                         list
+                    }
+                    if model.hasSnippets {
+                        snippetsSection
                     }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -86,7 +105,24 @@ struct DictionaryPage: View {
         } message: { row in
             Text("Wisprit will stop correcting misheard spellings of “\(row.term)”.")
         }
-        .onAppear { model.reloadDictionary() }
+        .sheet(item: $editingSnippet) { target in
+            SnippetSheet(original: target.row) { trigger, expansion in
+                model.saveSnippet(original: target.row, trigger: trigger, expansion: expansion)
+            }
+        }
+        .alert("Delete this snippet?",
+               isPresented: Binding(get: { pendingSnippetDelete != nil },
+                                    set: { if !$0 { pendingSnippetDelete = nil } }),
+               presenting: pendingSnippetDelete) { row in
+            Button("Delete", role: .destructive) { model.deleteSnippet(row.trigger) }
+            Button("Cancel", role: .cancel) {}
+        } message: { row in
+            Text("Saying “\(row.trigger)” will no longer insert the saved text.")
+        }
+        .onAppear {
+            model.reloadDictionary()
+            model.reloadSnippets()
+        }
     }
 
     // MARK: - header
@@ -683,6 +719,88 @@ enum DictionaryList {
             ? "Search looks at the term and at every phrase Wisprit mishears it as."
             : "Add the names and jargon speech recognition keeps getting wrong — "
                 + "or spell one out loud mid-sentence and Wisprit will learn it here."
+    }
+}
+
+private extension DictionaryPage {
+    var snippetsSection: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.s8) {
+            Text("Snippets")
+                .font(.headline)
+                .padding(.top, Theme.Space.s16)
+            Text("Say the trigger and Wisprit pastes the saved text — signatures, addresses, links.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            let rows = model.filteredSnippetRows
+            if rows.isEmpty {
+                Text(model.snippetRows.isEmpty
+                     ? "No snippets yet. Add one for anything you say often."
+                     : "No snippets match this search.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, Theme.Space.s8)
+            } else {
+                ForEach(rows) { row in
+                    HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s8) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(row.trigger)
+                                .font(.body.weight(.medium))
+                            Text(row.expansion)
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                        }
+                        Spacer()
+                        Button("Edit") { editingSnippet = SnippetEdit(row: row) }
+                            .buttonStyle(.borderless)
+                            .controlSize(.small)
+                        Button("Delete", role: .destructive) { pendingSnippetDelete = row }
+                            .buttonStyle(.borderless)
+                            .controlSize(.small)
+                    }
+                    .padding(.vertical, Theme.Space.s8)
+                }
+            }
+        }
+    }
+}
+
+private struct SnippetSheet: View {
+    var original: WispritWindowModel.SnippetRow?
+    var onSave: (String, String) -> Bool
+
+    @Environment(\.dismiss) private var dismiss
+    @State private var trigger: String
+    @State private var expansion: String
+
+    init(original: WispritWindowModel.SnippetRow?,
+         onSave: @escaping (String, String) -> Bool) {
+        self.original = original
+        self.onSave = onSave
+        _trigger = State(initialValue: original?.trigger ?? "")
+        _expansion = State(initialValue: original?.expansion ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.s12) {
+            Text(original == nil ? "Add Snippet" : "Edit Snippet")
+                .font(.headline)
+            TextField("Trigger (what you say)", text: $trigger)
+            TextField("Expansion (what Wisprit types)", text: $expansion, axis: .vertical)
+                .lineLimit(3...8)
+            HStack {
+                Spacer()
+                Button("Cancel") { dismiss() }
+                Button("Save") {
+                    if onSave(trigger, expansion) { dismiss() }
+                }
+                .keyboardShortcut(.defaultAction)
+                .disabled(trigger.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                          || expansion.isEmpty)
+            }
+        }
+        .padding(Theme.Space.s16)
+        .frame(minWidth: 360)
     }
 }
 #endif

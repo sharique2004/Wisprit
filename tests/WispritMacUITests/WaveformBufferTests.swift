@@ -11,7 +11,7 @@ final class WaveformBufferTests: XCTestCase {
     // MARK: - shaping
 
     func testShapingConstants() {
-        XCTAssertEqual(WaveformBuffer.levelReference, 0.35)
+        XCTAssertEqual(WaveformBuffer.levelReference, 0.22)
         XCTAssertEqual(WaveformBuffer.gamma, 0.7)
         XCTAssertEqual(WaveformBuffer.quantum, 1.0 / 64.0)
     }
@@ -35,10 +35,10 @@ final class WaveformBufferTests: XCTestCase {
     }
 
     /// The gamma is there to make quiet speech visible: the voiced floor sits
-    /// at 0.02, which is 6% of the reference and would otherwise be invisible.
+    /// at 0.01, which is ~5% of the reference and would otherwise be invisible.
     func testTheQuietEndIsExpanded() {
-        let raw = 0.02 / WaveformBuffer.levelReference
-        XCTAssertGreaterThan(WaveformBuffer.shaped(0.02), raw,
+        let raw = 0.01 / WaveformBuffer.levelReference
+        XCTAssertGreaterThan(WaveformBuffer.shaped(0.01), raw,
                              "a voiced floor must read louder than its linear share")
     }
 
@@ -164,6 +164,55 @@ final class TallyMetricsTests: XCTestCase {
         XCTAssertEqual(m.barHeight(-1), 2.5, "clamped, like every other level")
         XCTAssertEqual(m.barAlpha(0), 0.45, "silence recedes to dim dots")
         XCTAssertEqual(m.barAlpha(1), 1.0, "and speech is full tint")
+    }
+
+    /// The resting bar is the same instrument at the scale idle needs: five
+    /// perfect dots, large enough to read as "ready" rather than as an empty
+    /// capsule, and still comfortably inside the 48 pt bar.
+    func testTheRestingBarIsTheSameInstrumentAtItsOwnScale() {
+        let m = TallyMetrics.pillIdle
+        XCTAssertEqual(m.barCount, PillGeometry.barCountIdle)
+        XCTAssertEqual(m.height, PillGeometry.height, "the capsule never changes height")
+        XCTAssertEqual(m.floor, m.barWidth, "silence is still a perfect dot")
+        XCTAssertGreaterThan(m.barWidth, TallyMetrics.pill.barWidth,
+                             "no waveform to resolve, so the dot can be bigger")
+        XCTAssertLessThan(m.fieldWidth, PillGeometry.widthIdle - 2 * Theme.Space.s8,
+                          "the field has to sit inside the resting bar")
+    }
+
+    // MARK: - pixel alignment (§2.2, crisp at every backing scale)
+
+    /// Only the origin snaps. Rounding the width would take a 2.5 pt bar to
+    /// 3 px on a 1× display and the pitch and centred field with it; rounding
+    /// the height would quantise the waveform into 1 pt steps, which is the one
+    /// dimension the eye is actually reading.
+    func testOnlyTheBarOriginSnapsToThePixelGrid() {
+        let m = TallyMetrics.pill
+        let size = CGSize(width: PillGeometry.widthListening, height: PillGeometry.height)
+        for scale in [1.0, 2.0] {
+            let rect = m.barRect(index: 0, value: 0.5, count: 15, in: size, displayScale: scale)
+            XCTAssertEqual((rect.minX * scale).truncatingRemainder(dividingBy: 1), 0,
+                           accuracy: 1e-9, "origin off the grid at \(scale)×")
+            XCTAssertEqual(rect.width, m.barWidth, "the width is not rounded")
+            XCTAssertEqual(rect.height, m.barHeight(0.5), "nor the height")
+        }
+        // The pitch survives the snap, which is what keeps the field even.
+        let first = m.barRect(index: 0, value: 0, count: 15, in: size, displayScale: 1)
+        let second = m.barRect(index: 1, value: 0, count: 15, in: size, displayScale: 1)
+        XCTAssertEqual(second.minX - first.minX, m.barPitch)
+    }
+
+    /// No scale means no snapping — the geometry every other assertion here
+    /// pins is the unsnapped geometry, and it has not moved.
+    func testTheUnscaledSpellingIsUnchanged() {
+        let m = TallyMetrics.pill
+        let size = CGSize(width: PillGeometry.widthListening, height: PillGeometry.height)
+        XCTAssertEqual(m.barRect(index: 3, value: 0.4, count: 15, in: size),
+                       m.barRect(index: 3, value: 0.4, count: 15, in: size, displayScale: 0))
+        XCTAssertEqual(TallyMetrics.pixelAligned(11.75, scale: 0), 11.75)
+        XCTAssertEqual(TallyMetrics.pixelAligned(11.75, scale: 1), 12)
+        XCTAssertEqual(TallyMetrics.pixelAligned(11.75, scale: 2), 12)
+        XCTAssertEqual(TallyMetrics.pixelAligned(11.6, scale: 2), 11.5)
     }
 
     /// The field is centred, which is where §2.2's 11.75 pt side inset comes

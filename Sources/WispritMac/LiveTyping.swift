@@ -119,6 +119,33 @@ public enum LiveTypingCommit: Sendable, Equatable {
     case fallback(reason: String)
 }
 
+/// Where one utterance's text starts inside the run its IM session committed,
+/// and which session that is.
+///
+/// The retro-correction planner works in offsets into the text IT inserted;
+/// the input method resolves offsets into the whole run the session has
+/// committed, which spans every utterance since `beginSession`. This is the
+/// difference between the two — add it to an in-utterance offset and you have
+/// the run-relative anchor the wire carries.
+///
+/// A nominal type rather than a tuple on purpose: it travels through the
+/// session controller's `Delivery` (which is `Equatable`, and tuples are not)
+/// and through a `@Sendable` closure into a detached task.
+public struct CommitAnchor: Sendable, Equatable {
+    /// The session the offset is measured in. An offset from a session that has
+    /// since rolled over names characters in a record the input method has
+    /// already thrown away, so every consumer checks this first.
+    public var generation: UInt64
+    /// UTF-16 offset of the commit's first character inside the committed run.
+    /// Zero for the first commit of a session.
+    public var utf16Offset: Int
+
+    public init(generation: UInt64, utf16Offset: Int) {
+        self.generation = generation
+        self.utf16Offset = utf16Offset
+    }
+}
+
 /// The slice of live typing the session state machine talks to. A nil port is
 /// the Phase-1 behaviour, unchanged.
 public protocol LiveTypingPort: AnyObject, Sendable {
@@ -137,15 +164,49 @@ public protocol LiveTypingPort: AnyObject, Sendable {
     /// Take the provisional tail back down (cancel, empty result, error).
     func discardTail()
     func commit(_ text: String) -> LiveTypingCommit
+    /// Where the text of the last successful `commit` starts inside the run
+    /// this session has committed, or nil when nothing has been committed yet.
+    ///
+    /// Read it immediately after `commit` returns `.committed` and carry it BY
+    /// VALUE: the retro pass that needs it runs seconds later, off-path, by
+    /// which time this describes some other utterance. `generation` is what
+    /// makes a mis-carried anchor harmless rather than dangerous.
+    var lastCommitAnchor: CommitAnchor? { get }
     /// Retroactive correction over already-committed text. nil = the tier cannot
     /// do it at all, so the caller keeps the learn-and-notice behaviour.
-    func applyRetroEdit(replace: String, with: String) -> IMEditResult?
+    ///
+    /// `utf16LocationInCommitted` names WHICH occurrence to fix, measured from
+    /// the start of the session's committed run (`CommitAnchor.utf16Offset`
+    /// plus the offset inside the utterance). `anchorGeneration` is the session
+    /// it was measured in — the offset is dropped when that is not the open
+    /// one, so a rollover degrades to last-occurrence instead of editing by a
+    /// number that means nothing any more.
+    ///
+    /// Spelled out in full because a protocol requirement cannot carry default
+    /// arguments; `applyRetroEdit(replace:with:)` below is the un-anchored call.
+    func applyRetroEdit(replace: String, with: String,
+                        utf16LocationInCommitted: Int?,
+                        anchorGeneration: UInt64?) -> IMEditResult?
     /// Fn-up bookkeeping. Does NOT close the IM session — idle does.
     func endUtterance()
     /// Called from the session run loop; closes an idle session and deselects.
     func tickIdle()
     /// Quit: commit anything marked, close, deselect, stop listening.
     func shutdown()
+}
+
+public extension LiveTypingPort {
+    /// "Fix the last one you can find" — the shape this seam shipped with.
+    ///
+    /// Kept because one caller genuinely means it: the cross-utterance spoken-
+    /// spelling fix ("actually, it's S-H-A-R-I-Q-U-E") finds its antecedent in
+    /// the PREVIOUS utterance's raw text, where no field offset exists at all,
+    /// and "the most recent mention" is the correct semantic there rather than
+    /// a limitation. Anchoring that path would require inventing an offset.
+    func applyRetroEdit(replace: String, with replacement: String) -> IMEditResult? {
+        applyRetroEdit(replace: replace, with: replacement,
+                       utf16LocationInCommitted: nil, anchorGeneration: nil)
+    }
 }
 
 // MARK: - Configuration
@@ -216,6 +277,12 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
     /// method keeps its record until the next `beginSession` for the same
     /// reason.
     private var committedRecord: (generation: UInt64, text: String)?
+    /// Where the last appended commit starts inside `committedRecord.text` —
+    /// taken BEFORE the append, which is what makes it the anchor for that
+    /// chunk rather than for the one after it. Cleared with the mirror when a
+    /// new session opens; stale values are otherwise fenced off by the
+    /// generation it carries.
+    private var lastAnchor: CommitAnchor?
     /// Wire-v2 snapshot consumers. One peer handler slot exists, so the routes
     /// live here and a single installed router fans out by snapshot kind.
     private var contextRoute: (@Sendable (UInt64, IMContextSnapshot) -> Void)?
@@ -500,7 +567,9 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
         }
     }
 
-    public func applyRetroEdit(replace: String, with replacement: String) -> IMEditResult? {
+    public func applyRetroEdit(replace: String, with replacement: String,
+                               utf16LocationInCommitted: Int?,
+                               anchorGeneration: UInt64?) -> IMEditResult? {
         lock.lock()
         let engaged = currentTier.usesInputMethod && clientAlive
         let g = generation
@@ -517,7 +586,16 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
             return .failed(.noDocumentAccess, note: caps?.bundleID ?? "")
         }
 
-        switch peer.exchange(.applyEdit(generation: g, replace: replace, with: replacement),
+        // The offset is measured inside ONE session's committed run. A session
+        // that rolled over between the commit and this call left that run
+        // behind — the input method reset its record at `beginSession` — so the
+        // number now names characters in a record nobody holds. Omitting it
+        // degrades to last-occurrence, which is the status quo, and is the only
+        // answer that cannot rewrite the wrong word.
+        let anchored = anchorGeneration == g ? utf16LocationInCommitted : nil
+
+        switch peer.exchange(.applyEdit(generation: g, replace: replace, with: replacement,
+                                        utf16LocationInCommitted: anchored),
                              timeout: max(config.commandTimeout, 1.0)) {
         case .event(let message):
             switch message.event {
@@ -527,9 +605,11 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
                     lowerTier(after: result.detail)
                 } else {
                     // The input method rewrote its committed record; the mirror
-                    // follows, or the next `committedSnapshot` would read our
-                    // own fix as somebody's edit.
-                    rewriteCommitted(g, replace: replace, with: replacement)
+                    // follows it — at the echoed location, so the two stay in
+                    // lockstep even when the IM resolved the target
+                    // differently from the way we asked.
+                    rewriteCommitted(g, replace: replace, with: replacement,
+                                     appliedUtf16Location: result.appliedUtf16LocationInCommitted)
                 }
                 touch()
                 return result
@@ -585,8 +665,10 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
                 boundBundleID = caps.bundleID.isEmpty ? config.frontmostBundleID() : caps.bundleID
                 tailIsLive = false
                 // The input method's `beginSession` starts an empty committed
-                // record; the mirror starts empty with it.
+                // record; the mirror starts empty with it, and the anchor into
+                // that record goes with the record.
                 committedRecord = nil
+                lastAnchor = nil
                 lock.unlock()
                 log.info("""
                     live typing session \(g, privacy: .public) open in \
@@ -714,23 +796,62 @@ public final class LiveTypingSession: LiveTypingPort, @unchecked Sendable {
     /// Caller holds `lock`. Appends to the mirror for the session that owns it,
     /// or starts it — the input method's own record accumulates across the
     /// utterances one session spans, and the mirror must accumulate with it.
+    ///
+    /// The anchor is read off the mirror BEFORE the append, under the same lock
+    /// acquisition, so "where this chunk starts" can never be computed against
+    /// a record another thread has already grown.
     private func appendCommittedLocked(_ generation: UInt64, _ text: String) {
         guard !text.isEmpty else { return }
+        let offset: Int
         if var record = committedRecord, record.generation == generation {
+            offset = (record.text as NSString).length
             record.text += text
             committedRecord = record
         } else {
+            offset = 0
             committedRecord = (generation, text)
         }
+        lastAnchor = CommitAnchor(generation: generation, utf16Offset: offset)
     }
 
-    /// Mirror an APPLIED retro edit: backwards-last occurrence, the same
-    /// occurrence rule `RetroEditPlanner` resolves inside the input method.
-    private func rewriteCommitted(_ generation: UInt64, replace: String, with replacement: String) {
+    public var lastCommitAnchor: CommitAnchor? {
         lock.lock(); defer { lock.unlock() }
-        guard var record = committedRecord, record.generation == generation,
-              let range = record.text.range(of: replace, options: .backwards) else { return }
-        record.text.replaceSubrange(range, with: replacement)
+        return lastAnchor
+    }
+
+    /// Mirror an APPLIED retro edit.
+    ///
+    /// The input method echoes where it actually landed, and the mirror
+    /// rewrites exactly there — so the two records stay byte-identical even
+    /// when the IM refused our anchor and resolved the target by its backwards
+    /// fallback. Divergence here is not cosmetic: every later anchor is
+    /// measured against this string, and the wire-v2 `committedSnapshot` diff
+    /// would read Wisprit's own fix as an edit the user made.
+    ///
+    /// Two degradations, in order. An echo whose characters are not what we
+    /// asked to replace is ignored outright — the mirror is already skewed and
+    /// writing into it at a number we cannot verify only makes it worse. An
+    /// ABSENT echo means an input method older than the field, which resolved
+    /// the target by the last occurrence; the backwards search reproduces
+    /// exactly that.
+    private func rewriteCommitted(_ generation: UInt64, replace: String, with replacement: String,
+                                  appliedUtf16Location: Int?) {
+        lock.lock(); defer { lock.unlock() }
+        guard var record = committedRecord, record.generation == generation else { return }
+
+        if let location = appliedUtf16Location {
+            let text = record.text as NSString
+            let length = (replace as NSString).length
+            guard location >= 0, location <= text.length - length,
+                  text.substring(with: NSRange(location: location, length: length)) == replace
+            else { return }
+            record.text = text.replacingCharacters(in: NSRange(location: location, length: length),
+                                                   with: replacement)
+        } else if let range = record.text.range(of: replace, options: .backwards) {
+            record.text.replaceSubrange(range, with: replacement)
+        } else {
+            return
+        }
         committedRecord = record
     }
 

@@ -259,6 +259,45 @@ final class DoctorTests: XCTestCase {
         XCTAssertTrue(check?.detail.contains("password field or an app like Slack") == true)
     }
 
+    // MARK: - audio input device (2026-08-15)
+    //
+    // Warn-only and never gating, the `assetStatus` precedent: a narrowband
+    // headset transcribes, just worse, and calling a healthy install broken over
+    // the user's own device choice would be wrong.
+
+    func testAWidebandInputDeviceIsAGreenInformationalRow() {
+        var facts = green()
+        facts.inputDeviceName = "MacBook Pro Microphone"
+        facts.inputDeviceTransport = "built-in"
+        facts.inputDeviceSampleRateHz = 48_000
+        let report = Doctor.report(from: facts)
+        let check = report.check("Audio input device")
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertEqual(check?.detail, "MacBook Pro Microphone — built-in, 48000 Hz")
+        XCTAssertTrue(report.isReady)
+    }
+
+    func testANarrowbandInputDeviceWarnsAndNamesBothRemedies() {
+        var facts = green()
+        facts.inputDeviceName = "AirPods Pro"
+        facts.inputDeviceTransport = "Bluetooth"
+        facts.inputDeviceSampleRateHz = 16_000
+        facts.inputDeviceNarrowband = true
+        let report = Doctor.report(from: facts)
+        let check = report.check("Audio input device")
+        XCTAssertEqual(check?.mark, .warn)
+        XCTAssertTrue(check?.detail.contains("AirPods Pro — Bluetooth, 16000 Hz") == true)
+        XCTAssertTrue(check?.detail.contains("narrowband HFP") == true)
+        XCTAssertTrue(check?.detail.contains("input_device_policy=prefer_builtin") == true)
+        XCTAssertTrue(report.isReady, "a worse microphone is not a broken install")
+    }
+
+    /// No probe answer, no row: "there is no input device" is a story the
+    /// Microphone row above already tells.
+    func testNoInputDeviceMeansNoRow() {
+        XCTAssertNil(Doctor.report(from: green()).check("Audio input device"))
+    }
+
     // MARK: - speech
 
     func testSpeechFailureIsFatalAndCarriesTheFix() {

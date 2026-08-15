@@ -85,6 +85,14 @@ public struct MetricsRecord: Sendable {
     public var rung: String?         // the utterance's insertion `outcome`, carried onto its retro row
     public var applyDetail: String?  // why a proposed edit did not land:
                                      // IMEditDetail.rawValue | not_engaged | no_reply | dropped
+    // 2026-08-15: the audio hardware was reconfigured under this utterance's
+    // capture (default input changed, or its format did). Utterance rows only,
+    // and only when true — the 2026-08-05 incident's five empty rows carried no
+    // field that separated them from an ordinary silent hold, which is what
+    // made the log unreadable. `true` also appears on rows WITH text: a
+    // mid-utterance switch truncates silently, and that is the shape worth
+    // counting.
+    public var configChanged: Bool?
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
@@ -101,7 +109,8 @@ public struct MetricsRecord: Sendable {
                 onboardMs: Double? = nil, stepsSkipped: Int? = nil,
                 relaunches: Int? = nil,
                 vocabRefusal: String? = nil, rung: String? = nil,
-                applyDetail: String? = nil) {
+                applyDetail: String? = nil,
+                configChanged: Bool? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -138,6 +147,7 @@ public struct MetricsRecord: Sendable {
         self.vocabRefusal = vocabRefusal
         self.rung = rung
         self.applyDetail = applyDetail
+        self.configChanged = configChanged
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -195,6 +205,10 @@ public struct MetricsRecord: Sendable {
         if let vocabRefusal { entry["vocab_refusal"] = .string(vocabRefusal) }
         if let rung { entry["rung"] = .string(rung) }
         if let applyDetail { entry["apply_detail"] = .string(applyDetail) }
+        // 2026-08-15, last of all — the append-only rule once more. Absent on
+        // every row any earlier build could have written, so those stay
+        // byte-for-byte prefixes of this schema.
+        if let configChanged { entry["config_changed"] = .bool(configChanged) }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -244,6 +258,8 @@ public enum MetricsField {
     public static let vocabRefusal = "vocab_refusal"
     public static let rung = "rung"
     public static let applyDetail = "apply_detail"
+    /// The audio hardware reconfigured mid-utterance (2026-08-15).
+    public static let configChanged = "config_changed"
 }
 
 public final class MetricsWriter: @unchecked Sendable {

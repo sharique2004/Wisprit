@@ -175,12 +175,20 @@ final class FakeAudio: AudioPort, @unchecked Sendable {
     var noiseFloorValue: Double?
     var firstVoicedMsValue: Double?
 
+    /// `MonotonicClock` stamps of the most recent start/stop. The keyup grace
+    /// is a duration between two calls, so a test needs the clock the session
+    /// itself uses rather than a wall-clock guess.
+    private var startAt: Double?
+    private var stopAt: Double?
+    var lastStartAt: Double? { lock.lock(); defer { lock.unlock() }; return startAt }
+    var lastStopAt: Double? { lock.lock(); defer { lock.unlock() }; return stopAt }
+
     func start() -> Bool {
-        lock.lock(); startCount += 1; let ok = startSucceeds; lock.unlock()
+        lock.lock(); startCount += 1; startAt = MonotonicClock.now(); let ok = startSucceeds; lock.unlock()
         return ok
     }
 
-    func stop() { lock.lock(); stopCount += 1; lock.unlock() }
+    func stop() { lock.lock(); stopCount += 1; stopAt = MonotonicClock.now(); lock.unlock() }
 
     var noiseFloor: Double? { lock.lock(); defer { lock.unlock() }; return noiseFloorValue }
     var firstVoicedMs: Double? { lock.lock(); defer { lock.unlock() }; return firstVoicedMsValue }
@@ -263,6 +271,12 @@ final class FakeInserter: InsertPort, @unchecked Sendable {
     /// proof that the checkmark landed with the words, not after the restore.
     var pill: FakePill?
     private(set) var pillCallsAtDelivery: [[String]] = []
+
+    private(set) var returnCount = 0
+
+    func pressReturn() {
+        lock.lock(); returnCount += 1; lock.unlock()
+    }
 
     func insert(_ text: String) -> InsertResult { insert(text, onDelivered: {}) }
 
@@ -383,7 +397,11 @@ final class FakePill: PillPort, @unchecked Sendable {
     func transientNotice(_ text: String) {
         lock.lock(); notices.append(text); calls.append("transientNotice"); lock.unlock()
     }
+    func flashMissed(_ message: String) {
+        lock.lock(); notices.append(message); calls.append("flashMissed"); lock.unlock()
+    }
     func hide() { record("hide") }
+    func showIdle() { record("showIdle") }
 
     // The three states §2.4 adds. Recorded separately from `errors` on purpose:
     // `blockedSecure` is a distinct outcome with its own copy and its own
@@ -421,7 +439,9 @@ final class ModelPill: PillPort, @unchecked Sendable {
     func flashSuccess() { lock.lock(); model.flashSuccess(); lock.unlock() }
     func flashError(_ message: String) { lock.lock(); model.flashError(message); lock.unlock() }
     func transientNotice(_ text: String) { lock.lock(); model.transientNotice(text); lock.unlock() }
+    func flashMissed(_ message: String) { lock.lock(); model.flashMissed(message); lock.unlock() }
     func hide() { lock.lock(); model.hide(); lock.unlock() }
+    func showIdle() { lock.lock(); model.showIdle(); lock.unlock() }
     func showPrewarming() { lock.lock(); model.showPrewarming(); lock.unlock() }
     func showRefining() { lock.lock(); model.showRefining(); lock.unlock() }
     func flashBlockedSecure() { lock.lock(); model.flashBlockedSecure(); lock.unlock() }

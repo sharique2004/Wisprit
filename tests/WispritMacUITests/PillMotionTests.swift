@@ -172,4 +172,109 @@ final class PillMotionTests: XCTestCase {
         XCTAssertEqual(PillMotion.collapseProgress(phase: 2, bar: 3, barCount: count), 1)
         XCTAssertEqual(PillMotion.collapseProgress(phase: 1, bar: 0, barCount: 1), 1)
     }
+
+    // MARK: - the arrival (NEW)
+
+    /// The body springs up to meet the panel's fade. It may never overshoot 1:
+    /// the hosting view clips to the panel, so a pill that grew past its own
+    /// frame would have the overshoot sheared off at the sides — which is the
+    /// bug the old hover scale and error shake both had.
+    func testTheArrivalSpringNeverOvershootsItsPanel() {
+        XCTAssertLessThan(PillMotion.appearScale, 1.0)
+        XCTAssertGreaterThan(PillMotion.appearScale, 0.8, "a pop, not a zoom")
+        XCTAssertGreaterThanOrEqual(PillMotion.appearSpringDamping, 0.8,
+                                    "damping under 0.8 would overshoot past 1")
+        XCTAssertLessThan(PillMotion.appearSpringResponse, 0.35,
+                          "the pill has to be there the instant the key goes down")
+    }
+
+    // MARK: - the thinking wave (NEW — `finalizing` / `refining`)
+
+    /// The crest enters off the left edge and leaves off the right, so both
+    /// ends of the loop are a flat row and `repeatForever` has no seam.
+    func testTheThinkingLoopHasNoSeam() {
+        let count = PillGeometry.barCount
+        for index in 0..<count {
+            XCTAssertEqual(PillMotion.thinkingLevel(phase: 0, bar: index, barCount: count), 0,
+                           "bar \(index) at the start of the loop")
+            XCTAssertEqual(PillMotion.thinkingLevel(phase: 1, bar: index, barCount: count), 0,
+                           "bar \(index) at the end of the loop")
+        }
+    }
+
+    /// It travels left to right — the same direction the waveform scrolls, so
+    /// the pill never contradicts itself about which way time is going.
+    func testTheCrestTravelsLeftToRight() {
+        let count = PillGeometry.barCount
+        func peak(_ phase: Double) -> Int {
+            (0..<count)
+                .max { PillMotion.thinkingLevel(phase: phase, bar: $0, barCount: count)
+                     < PillMotion.thinkingLevel(phase: phase, bar: $1, barCount: count) } ?? 0
+        }
+        XCTAssertLessThan(peak(0.25), peak(0.5))
+        XCTAssertLessThan(peak(0.5), peak(0.75))
+    }
+
+    /// A third of full scale, and never more: the wave has to be unmistakably
+    /// *not* speech, or the pill would look like it was still listening.
+    func testTheWaveIsNeverLoudEnoughToPassForSpeech() {
+        XCTAssertLessThanOrEqual(PillMotion.thinkingAmplitude, 0.4)
+        for phase in stride(from: 0.0, through: 1.0, by: 0.02) {
+            for index in 0..<PillGeometry.barCount {
+                let level = PillMotion.thinkingLevel(phase: phase, bar: index,
+                                                     barCount: PillGeometry.barCount)
+                XCTAssertGreaterThanOrEqual(level, 0)
+                XCTAssertLessThanOrEqual(level, PillMotion.thinkingAmplitude)
+            }
+        }
+    }
+
+    /// Mid-loop it is a crest, not a running light: several neighbouring bars
+    /// are lifted at once, which is what makes it read as one wave.
+    func testTheCrestLiftsSeveralBarsAtOnce() {
+        let count = PillGeometry.barCount
+        let lifted = (0..<count).filter {
+            PillMotion.thinkingLevel(phase: 0.5, bar: $0, barCount: count) > 0.01
+        }
+        XCTAssertGreaterThan(lifted.count, 3, "one bar at a time would be a spinner")
+        XCTAssertLessThan(lifted.count, count, "and all of them would be speech")
+        // Contiguous — a wave has no holes in it.
+        XCTAssertEqual(lifted, Array(lifted.first!...lifted.last!))
+    }
+
+    /// Reduce Motion's still frame still says something.
+    ///
+    /// This machine's Reduce Motion setting is a system accessibility
+    /// preference and not ours to flip, so the fallback is pinned here instead:
+    /// at the parked phase the row is a shallow arc — several bars lifted, the
+    /// tallest of them clearly above the dot floor — which is a different
+    /// picture from the flat idle row, with nothing moving. `PillSurface`
+    /// reaches for this same constant rather than a literal, so the assertion
+    /// and the view cannot disagree.
+    func testTheReducedMotionStillFrameIsNotTheIdleDotRow() {
+        let count = PillGeometry.barCount
+        let phase = PillMotion.reducedMotionThinkingPhase
+        let levels = (0..<count).map {
+            PillMotion.thinkingLevel(phase: phase, bar: $0, barCount: count)
+        }
+        XCTAssertGreaterThan(levels.max() ?? 0, PillMotion.thinkingAmplitude * 0.9,
+                             "the parked crest must be near its full height")
+        XCTAssertEqual(levels.filter { $0 == 0 }.count, count - lifted(levels).count)
+        XCTAssertGreaterThan(lifted(levels).count, 3, "a shallow arc, not one bar")
+        // And it is an arc: heights rise to the crest and fall away again.
+        let peak = levels.firstIndex(of: levels.max() ?? 0) ?? 0
+        for index in 1...peak { XCTAssertGreaterThanOrEqual(levels[index], levels[index - 1]) }
+        for index in (peak + 1)..<count {
+            XCTAssertLessThanOrEqual(levels[index], levels[index - 1])
+        }
+    }
+
+    private func lifted(_ levels: [Double]) -> [Int] {
+        levels.enumerated().filter { $0.element > 0 }.map(\.offset)
+    }
+
+    func testDegenerateMetersHaveNoWave() {
+        XCTAssertEqual(PillMotion.thinkingLevel(phase: 0.5, bar: 0, barCount: 1), 0)
+        XCTAssertEqual(PillMotion.thinkingLevel(phase: 0.5, bar: 0, barCount: 0), 0)
+    }
 }

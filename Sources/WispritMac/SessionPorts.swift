@@ -78,6 +78,9 @@ public protocol InsertPort: Sendable {
     /// flashes success (and plays the commit cue) from inside it, so feedback
     /// stops trailing the text it confirms.
     func insert(_ text: String, onDelivered: () -> Void) -> InsertResult
+    /// Flow's trailing "press enter" command — posts Return after the text
+    /// (or alone, when the utterance was only the command).
+    func pressReturn()
 }
 
 public extension InsertPort {
@@ -89,6 +92,8 @@ public extension InsertPort {
         if result.ok { onDelivered() }
         return result
     }
+
+    func pressReturn() {}
 }
 
 /// R11's two cues — mic-open and commit. Deliberately no error cue: the visual
@@ -116,7 +121,13 @@ public protocol PillPort: Sendable {
     func flashSuccess()
     func flashError(_ message: String)
     func transientNotice(_ text: String)
+    /// Empty utterance that is not a fault — silence, a miss, a short tap.
+    /// Default degrades to a notice so older pills never alarm on it.
+    func flashMissed(_ message: String)
     func hide()
+    /// The Flow-style resting bar. Default is `hide()` so an older pill
+    /// still leaves the screen; the shipping pill stays put.
+    func showIdle()
 
     // The three states `docs/design/ui-redesign.md` §2.4 adds. All three are
     // additive with a default implementation, so no conformer breaks and each
@@ -144,6 +155,8 @@ public extension PillPort {
     func showRefining() { showFinalizing() }
     /// The message this state replaced, for a pill that predates it.
     func flashBlockedSecure() { flashError("secure field — press ⌘⌃V to paste") }
+    func flashMissed(_ message: String) { transientNotice(message) }
+    func showIdle() { hide() }
 }
 
 public protocol HistoryPort: Sendable {
@@ -250,6 +263,10 @@ public struct SettingsInserterPort: InsertPort {
             terminalBundleIDs: settings.terminalBundleIDs,
             pasteRestoreDelayMs: Double(settings.pasteRestoreDelayMs)),
                         onDelivered: onDelivered)
+    }
+
+    public func pressReturn() {
+        inserter.pressReturn()
     }
 }
 

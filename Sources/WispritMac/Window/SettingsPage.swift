@@ -415,8 +415,8 @@ struct SettingsPage: View {
 
     private var pill: some View {
         SectionGroup("The pill") {
-            SectionRow("Show the floating pill",
-                       description: "The capsule that shows the level meter while you speak.") {
+            SectionRow("Keep the bar on screen",
+                       description: "A small capsule stays on the desktop, like Flow. It expands while you talk.") {
                 Toggle("", isOn: Binding(get: { !model.pillHidden },
                                          set: { model.setPillHidden(!$0) }))
                     .labelsHidden()

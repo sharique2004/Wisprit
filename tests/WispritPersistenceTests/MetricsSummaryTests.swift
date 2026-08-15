@@ -38,7 +38,7 @@ final class MetricsSummaryTests: XCTestCase {
             // produced_nothing, but the hold was under a second — not unexplained.
             #"{"ts": 1786398000.0, "held_ms": 900.0, "engine": "apple_live", "finalize_ms": 130.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "empty", "chars": 0, "empty_reason": "produced_nothing", "peak_level": 0.0301, "audio_ms": 850.0}"#,
             // produced_nothing, but nothing was ever audible — not unexplained.
-            #"{"ts": 1786398500.0, "held_ms": 2000.0, "engine": "apple_live", "finalize_ms": 140.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "empty", "chars": 0, "empty_reason": "produced_nothing", "peak_level": 0.01, "audio_ms": 1950.0}"#,
+            #"{"ts": 1786398500.0, "held_ms": 2000.0, "engine": "apple_live", "finalize_ms": 140.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "empty", "chars": 0, "empty_reason": "produced_nothing", "peak_level": 0.004, "audio_ms": 1950.0}"#,
             #"{"ts": 1786399000.0, "held_ms": 1200.0, "engine": "apple_live", "finalize_ms": 1500.4, "timed_out": true, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "empty", "chars": 0, "empty_reason": "timed_out", "peak_level": 0.3, "audio_ms": 1150.0}"#,
             #"{"ts": 1786399500.0, "held_ms": 2500.0, "engine": "apple_live", "finalize_ms": 110.0, "timed_out": false, "post_ms": 0.5, "insert_ms": 0.0, "outcome": "correction", "chars": 25}"#,
         ])
@@ -93,9 +93,9 @@ final class MetricsSummaryTests: XCTestCase {
             #"{"ts": 1786399000.0, "held_ms": \#(held), "engine": "apple_live", "finalize_ms": 100.0, "timed_out": false, "post_ms": 0.0, "insert_ms": 0.0, "outcome": "empty", "chars": 0, "empty_reason": "produced_nothing", "peak_level": \#(peak)}"#
         }
         let cases: [(Double, Double, Int)] = [
-            (0.02, 1000.0, 1),      // exactly at both gates: counted
-            (0.0199, 1000.0, 0),
-            (0.02, 999.9, 0),
+            (0.01, 1000.0, 1),      // exactly at both gates: counted
+            (0.0099, 1000.0, 0),
+            (0.01, 999.9, 0),
             (0.5, 5000.0, 1),
         ]
         for (peak, held, expected) in cases {
@@ -334,7 +334,7 @@ final class MetricsSummaryTests: XCTestCase {
     func testTheVoicedThresholdMatchesTheEnginesConstant() {
         // WispritPersistence cannot import WispritEngine; EmptyReasonTests pins
         // the other side of this pair to `SpeechAnalyzerEngine.voicedPeakThreshold`.
-        XCTAssertEqual(MetricsSummary.voicedPeakThreshold, 0.02)
+        XCTAssertEqual(MetricsSummary.voicedPeakThreshold, 0.01)
         XCTAssertEqual(MetricsSummary.shortHoldMs, 1000)
     }
 

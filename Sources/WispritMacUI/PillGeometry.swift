@@ -46,6 +46,12 @@ public enum PillState: String, Equatable, Sendable, CaseIterable {
     /// NEW — the focused app holds Secure Keyboard Entry, so the text is on the
     /// clipboard instead of in the field.
     case blockedSecure
+    /// An utterance that produced nothing — silence, a miss, a short tap.
+    /// Studio body, muted ink, no alarm. Flow just fades; we say so quietly.
+    case missed
+    /// The Flow-style resting bar: a compact capsule that stays on screen
+    /// between utterances. Expands into the waveform the moment you hold.
+    case idle
 }
 
 /// The pill's colours, sourced from `Theme` (§2.7: the `pill.py` calibrated
@@ -58,19 +64,63 @@ public enum PillState: String, Equatable, Sendable, CaseIterable {
 public enum PillPalette {
     private static func dark(_ token: ColorToken) -> PillColor { PillColor(hex: token.dark) }
 
-    /// The body, at 92% (§1.7). No material: vibrancy over an unknown app's
-    /// content is unpredictable and the pill must read on white and on black.
+    /// The body, at 92% (§1.7). This is the **opaque** alpha: what the pill
+    /// wears when there is no blur underneath it (Reduce Transparency), and the
+    /// number that guarantees it reads on white and on black.
     public static let body = dark(Theme.Token.studio)
     public static let bodyAlpha: Double = 0.92
-    /// The error / blocked body.
+    /// The error body.
     public static let alarmBody = dark(Theme.Token.studioAlarm)
     public static let alarmBodyAlpha: Double = 0.94
+    /// The blocked-secure body: warm-black, not red-black. Nothing failed —
+    /// the text is on the clipboard and there is one key to press.
+    public static let attentionBody = dark(Theme.Token.studioAttention)
+
+    // MARK: the material (NEW)
+
+    /// The body alpha when the panel's `NSVisualEffectView` is doing the work
+    /// underneath.
+    ///
+    /// The original note here — "no material: vibrancy over an unknown app's
+    /// content is unpredictable" — was right about vibrancy and wrong about
+    /// blur. A *tinted* blur is not unpredictable: the near-black tint still
+    /// dominates the composite (0.76 of it), so the legibility argument holds
+    /// exactly as before, and what the remaining 24% buys is the one thing a
+    /// flat fill can never have — the desktop moving behind the glass. Flow is
+    /// Electron-flat by necessity; this is the native answer to it.
+    public static let bodyAlphaOverMaterial: Double = 0.76
+    public static let alarmBodyAlphaOverMaterial: Double = 0.86
+
     /// The 1 pt rim: white @ 14%.
     public static let rim = PillColor(1, 1, 1)
     public static let rimAlpha = Theme.Token.studioStroke.alpha
+    /// The rim as a **lit edge** rather than a flat hairline: bright where a
+    /// light above the desktop would catch the top of the capsule, nearly gone
+    /// underneath it.
+    ///
+    /// Same total edge light as the flat 14% it replaces — `(top + bottom) / 2
+    /// == rimAlpha`, and `PillModelTests` holds it there. Redistributing the
+    /// budget rather than spending more of it is the difference between an
+    /// object that is lit and one that is merely outlined.
+    public static let rimTopAlpha: Double = 0.26
+    public static let rimBottomAlpha: Double = 0.02
+    /// Increase Contrast: one solid, unmistakable edge instead of a lit one.
+    public static let rimContrastAlpha: Double = 0.55
+    /// The inner highlight riding just under the top of the rim — the 1 pt that
+    /// makes the body read as a surface with thickness.
+    public static let innerHighlightAlpha: Double = 0.08
+    /// Hovering the resting bar brightens its edge. Deliberately not a scale:
+    /// the hosting view clips to the panel, so a pill that grew on hover was
+    /// having its own lift cut off at the sides.
+    public static let rimHoverBoost: Double = 0.14
+    /// The alarm rim flash — the error's arrival, without a shake.
+    public static let alarmRimAlpha: Double = 0.70
 
     public static let ink = dark(Theme.Token.studioInk)
     public static let muted = dark(Theme.Token.studioMuted)
+    /// Flow's waveform cream (`#FFFFEB`). Idle and silence sit on this,
+    /// not gray — the bar has to read as a cream-on-black capsule.
+    public static let cream = PillColor(hex: 0xFFFFEB)
     public static let hot = dark(Theme.Token.hot)
     public static let critical = dark(Theme.Token.critical)
     public static let attention = dark(Theme.Token.attention)
@@ -90,17 +140,21 @@ public enum PillPalette {
         case .success: return ink
         case .error: return critical
         case .blockedSecure: return attention
-        case .hidden, .prewarming, .finalizing, .refining: return muted
+        case .hidden, .prewarming, .finalizing, .refining, .missed, .idle: return muted
         }
     }
 
     /// Body fill and alpha. The two alarm states swap the near-black body for a
-    /// near-black *red* one, which is the whole reason an error reads as an
-    /// error before its text is parsed.
+    /// *tinted* near-black — red for an error, warm for a block — which is the
+    /// whole reason either one reads correctly before its text is parsed, and
+    /// why they no longer share one body: a secure-input block is an
+    /// instruction, not a failure.
     public static func bodyFill(for state: PillState) -> (color: PillColor, alpha: Double) {
         switch state {
-        case .error, .blockedSecure: return (alarmBody, alarmBodyAlpha)
-        default: return (body, bodyAlpha)
+        case .error: return (alarmBody, alarmBodyAlpha)
+        case .blockedSecure: return (attentionBody, alarmBodyAlpha)
+        case .hidden, .prewarming, .recording, .finalizing, .refining, .success, .missed, .idle:
+            return (body, bodyAlpha)
         }
     }
 }
@@ -112,6 +166,9 @@ public enum PillGeometry {
     public static var radius: Double { height / 2.0 }
     /// The listening panel: aspect 3.43 : 1.
     public static let widthListening: Double = 96.0
+    /// The Flow-style resting bar: compact capsule, five floor dots.
+    public static let widthIdle: Double = 48.0
+    public static let barCountIdle = 5
     /// `committed` contracts to a circle.
     public static let widthCommitted: Double = 28.0
     /// `_BOTTOM_MARGIN` for the default bottom-centre placement — unchanged.
@@ -147,20 +204,20 @@ public enum PillGeometry {
     /// already delivering zeros — so the pill says so while the user can still
     /// act, instead of as a posthumous flash.
     ///
-    /// `deadMicFloor` is the 0.02 voiced floor in its one legitimate job
-    /// (§1.1-T4d): a cheap heuristic whose false negative is harmless, because
-    /// the trigger is amended by engine evidence — a partial suppresses and
-    /// clears the cue, and so does a single voiced tick. The cue fires only
-    /// after *more* than `deadMicTickCount` consecutive sub-floor ticks
-    /// (40 × 50 ms = 2 s), which both reads as "after ~2 s" and keeps the
-    /// 2-second silence window itself render-free — the zero-redraw silence
-    /// invariant is measured over exactly that window.
-    public static let deadMicFloor: Double = 0.02
+    /// `deadMicFloor` is a cheap mute heuristic (§1.1-T4d). Quiet speech
+    /// lives around 0.005–0.015 on the meter, so the floor sits under that
+    /// — a false negative is harmless because a partial or a voiced tick
+    /// still suppresses the cue. The cue fires only after *more* than
+    /// `deadMicTickCount` consecutive sub-floor ticks (40 × 50 ms = 2 s).
+    public static let deadMicFloor: Double = 0.005
     public static let deadMicTickCount = 40
-    public static let deadMicMessage = "No audio — check mic"
+    public static let deadMicMessage = "No sound yet"
     /// The message a `blockedSecure` flash carries when the session does not
     /// supply one.
     public static let blockedSecureMessage = "Secure input — ⌘⌃V to paste"
+    /// Quiet empty-utterance copy. Not an alarm — Flow fades; we name it.
+    public static let missedMessage = "Didn't catch that"
+    public static let shortHoldMessage = "Hold the key while you speak"
     /// Errors get a wider character budget than a live partial: the message is
     /// the whole point of the state (§2.7).
     public static let errorMessageCharacters = 40
@@ -168,11 +225,37 @@ public enum PillGeometry {
     /// Auto-hide delays: `flash_success` 0.6 s, `flash_error` 1.6 s — unchanged.
     public static let successHideDelay: Double = 0.6
     public static let errorHideDelay: Double = 1.6
+    /// A miss fades faster than an alarm — Flow just leaves.
+    public static let missedHideDelay: Double = 0.9
     /// How long a `transientNotice` ("Learned Sharique") stays legible.
     public static let noticeDuration: Double = 1.6
     /// NEW — a secure-input block asks the user to press a key combination, so
     /// it has to outlive an error flash.
     public static let blockedSecureHideDelay: Double = 2.6
+
+    // MARK: - the patience cue (the AUDIT-2026-08-14 "pill copy decision")
+
+    /// How long a wait may run silently before the pill says what it is waiting
+    /// on.
+    ///
+    /// The audit left this open: "a rescued utterance can cost 3 s streaming
+    /// plus a multi-second batch pass before text appears; pill copy for that
+    /// state is a product decision." This is the decision. A normal finalize is
+    /// 200–600 ms, so 1.4 s is comfortably past "it's just working" and well
+    /// short of "it has hung" — the pill grows a quiet line of copy at exactly
+    /// the moment the user starts to wonder, and not one beat sooner.
+    ///
+    /// It costs nothing when it never fires: one scheduled timer per stage,
+    /// cancelled by the next state change, which is the same single-timer
+    /// budget the auto-hides have always used.
+    public static let patienceDelay: Double = 1.4
+    /// The batch rescue is literally a second pass over the same audio, so the
+    /// copy says that. Not "Processing…" (says nothing), not "Almost there"
+    /// (a promise the pill cannot keep) — an honest description of the work.
+    public static let finalizingPatienceMessage = "Taking a second listen"
+    /// Refine's long tail. The user already knows this stage by its sparkles;
+    /// the words only have to say it is still the same stage.
+    public static let refiningPatienceMessage = "Still cleaning up"
 
     /// `setLevel_` clamps with `max(0.0, min(1.0, float(level)))`; NaN is
     /// treated as silence rather than propagating into the frame maths.
@@ -249,8 +332,8 @@ public enum PillTailGeometry {
     /// anything — …"). The alarm states truncate at the tail.
     public static func truncation(for state: PillState) -> PillTailTruncation {
         switch state {
-        case .error, .blockedSecure: return .tail
-        case .hidden, .prewarming, .recording, .finalizing, .refining, .success: return .head
+        case .error, .blockedSecure, .missed: return .tail
+        case .hidden, .prewarming, .recording, .finalizing, .refining, .success, .idle: return .head
         }
     }
 }
@@ -309,6 +392,55 @@ public enum PillMotion {
     public static let hideDuration: Double = 0.16
     public static let hideSink: Double = 3.0
 
+    // MARK: the arrival (NEW)
+
+    /// The capsule springs up from 90% as the panel fades in.
+    ///
+    /// The 90 ms fade + 4 pt rise above is the *panel's* arrival and it stays
+    /// exactly as specified; this is the *body's*, and it is what makes the
+    /// pill feel like an object that came to the desktop rather than a bitmap
+    /// that got switched on. It only ever scales **up to** 1, never past it —
+    /// the hosting view clips to the panel, so overshoot would be sheared off.
+    public static let appearScale: Double = 0.90
+    public static let appearSpringResponse: Double = 0.26
+    public static let appearSpringDamping: Double = 0.82
+
+    // MARK: the thinking wave (NEW — `finalizing` / `refining`)
+
+    /// One crest crossing the dot row, left to right, forever until the stage
+    /// ends. This is the pill's "I am working on it": the same instrument that
+    /// was reacting to the voice a moment ago, now moving under its own power
+    /// at a quarter of the amplitude. No spinner, no second chrome element,
+    /// and — unlike a pulsing dot — it says *which way time is going*.
+    public static let thinkingCycle: Double = 1.5
+    /// Peak height of the crest, as a share of full scale. Low enough that it
+    /// can never be mistaken for speech.
+    public static let thinkingAmplitude: Double = 0.34
+    /// Crest width as a share of the row. Wide enough to move several bars at
+    /// once, so it reads as a wave and not as a running light.
+    public static let thinkingCrestWidth: Double = 0.5
+    /// Where the crest parks under Reduce Motion.
+    ///
+    /// Not zero, and that is the whole point: the contract is "durations
+    /// survive, only motion goes", not "the state stops being legible". A still
+    /// shallow arc across the centre of the row is visibly *not* the flat idle
+    /// dot row, so a user who has turned motion off can still tell at a glance
+    /// that the pill is working — with nothing on screen moving at all.
+    public static let reducedMotionThinkingPhase: Double = 0.5
+
+    // MARK: the commit (NEW)
+
+    /// The check mark draws itself rather than fading in — 220 ms is the
+    /// longest a stroke can take and still feel instantaneous.
+    public static let checkDrawDuration: Double = 0.22
+    /// How long the body and its edge take to cross into (and out of) the alarm
+    /// palette. Replaces the 2 pt horizontal shake, which was both an alarm
+    /// idiom the pill does not want and — because the hosting view clips to the
+    /// panel — a shake that sliced 2 pt off its own capsule on every cycle.
+    /// The edge stays tinted for the life of the state: a held signal is easier
+    /// to read than a flash, and it never startles.
+    public static let alarmRimDuration: Double = 0.20
+
     // MARK: the staggered collapse (§2.4 `finalizing`, §2.5 row 6)
 
     /// 6 ms × index — precomputed here, in the model layer, because the spec's
@@ -336,6 +468,25 @@ public enum PillMotion {
         let clamped = min(1.0, max(0.0, phase))
         let elapsed = clamped * total - collapseDelay(forBar: index)
         return min(1.0, max(0.0, elapsed / collapseBarFall))
+    }
+
+    /// The thinking crest's contribution to one bar, for a global phase 0…1.
+    ///
+    /// Pure and seamless by construction: the crest enters off the left edge
+    /// and leaves off the right, so phase 0 and phase 1 are both a flat row and
+    /// the `repeatForever` loop has no visible seam. Same discipline as the
+    /// collapse — one animatable scalar, one `Canvas`, no per-bar view
+    /// identity.
+    public static func thinkingLevel(phase: Double, bar index: Int, barCount: Int) -> Double {
+        guard barCount > 1, thinkingCrestWidth > 0 else { return 0 }
+        let position = Double(min(max(0, index), barCount - 1)) / Double(barCount - 1)
+        let clamped = min(1.0, max(0.0, phase))
+        let crest = -thinkingCrestWidth / 2 + clamped * (1 + thinkingCrestWidth)
+        let distance = abs(position - crest)
+        guard distance < thinkingCrestWidth / 2 else { return 0 }
+        // cos² — 1 at the crest, exactly 0 at both shoulders, smooth in between.
+        let shaped = cos(.pi * distance / thinkingCrestWidth)
+        return thinkingAmplitude * shaped * shaped
     }
 
     // MARK: the panel-frame decision

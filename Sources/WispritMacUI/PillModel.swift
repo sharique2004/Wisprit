@@ -74,11 +74,18 @@ public struct PillRender: Equatable, Sendable {
 /// keeping the *decision* here and the *timer* in `Pill` is what makes the
 /// state machine testable without a run loop.
 public enum PillDeferredAction: Equatable, Sendable {
-    /// `_schedule_hide` → `orderOut`.
+    /// `_schedule_hide` → `orderOut`. Used when the user hides the bar.
     case hide
+    /// Return to the persistent idle capsule. Success, a miss, and a
+    /// notice settle here — Flow never leaves the desktop.
+    case settle
     /// NEW — drop a `transientNotice` bubble but leave the pill on screen
     /// (used when a notice lands mid-utterance).
     case clearNotice
+    /// NEW — the current stage has outlasted `PillGeometry.patienceDelay`;
+    /// say what it is waiting on. Never hides, never changes state: the only
+    /// thing that fires is a line of copy (AUDIT-2026-08-14's open decision).
+    case patience
 }
 
 /// The pill's behaviour, headless.
@@ -126,6 +133,10 @@ public final class PillModel {
     private var partialSeen = false
     /// Whether the cue tail is currently showing.
     private var deadMicCue = false
+    /// Whether the tail is currently the patience cue ("Taking a second
+    /// listen"). Same styling contract as the dead-mic cue — muted ink, never
+    /// an alarm — which is why both feed one `tailMuted` flag rather than two.
+    private var patienceCue = false
 
     /// The §2.5 staggered-collapse source — see `PillRender.collapseFrom`.
     private var collapseFrom: [Double] = []
@@ -162,11 +173,27 @@ public final class PillModel {
             glyph: glyph,
             totalWidth: totalWidth,
             height: PillGeometry.height,
-            tailMuted: deadMicCue,
+            tailMuted: deadMicCue || patienceCue,
             collapseFrom: collapseFrom)
     }
 
     // MARK: - public API (main thread)
+
+    /// The Flow-style resting bar. Compact cream dots, always on screen
+    /// unless the user hid it. Hold the key and it expands into the meter.
+    public func showIdle() {
+        guard !isSuppressed() else { return }
+        cancelSchedule()
+        level = 0
+        waveform.collapse()
+        clearBubbleState()
+        heldWidth = nil
+        resetDeadMicTracking()
+        collapseFrom = []
+        state = .idle
+        isVisible = true
+        emit()
+    }
 
     /// NEW — the key is down and the accept decision is made, but audio has not
     /// started. Bars at floor, `studioMuted`: the mic is not open yet, so this
@@ -215,7 +242,7 @@ public final class PillModel {
     /// After strictly more than `deadMicTickCount` consecutive sub-floor ticks
     /// (> 2 s) while `.recording`, and only when neither a voiced tick nor a
     /// partial has arrived this utterance, the tail shows a muted notice —
-    /// "No audio — check mic". The first voiced tick or the first partial
+    /// "No sound yet". The first voiced tick or the first partial
     /// clears it (and disarms it for the rest of the utterance: a channel that
     /// has produced evidence is not dead). Returns true when the frame
     /// changed. The cue costs exactly one frame to appear and one to clear —
@@ -279,9 +306,10 @@ public final class PillModel {
         let noticed = PartialTail.notice(text)
         guard !noticed.isEmpty else { return }
         cancelSchedule()
-        // A notice replaces the dead-mic cue on screen (and takes its muted
-        // styling with it); the cue re-fires afterwards if the silence holds.
+        // A notice replaces either live cue on screen (and takes their muted
+        // styling with it); the dead-mic one re-fires if the silence holds.
         deadMicCue = false
+        patienceCue = false
         message = noticed
         bubble = noticed
         bubbleWidth = PillTailGeometry.width(forCharacters: noticed.count)
@@ -289,7 +317,7 @@ public final class PillModel {
         if !inFlight { state = .success }
         isVisible = true
         emit()
-        schedule(PillGeometry.noticeDuration, inFlight ? .clearNotice : .hide)
+        schedule(PillGeometry.noticeDuration, inFlight ? .clearNotice : .settle)
     }
 
     /// `show_finalizing`: level 0, grey bars. The partial tail collapses —
@@ -302,6 +330,7 @@ public final class PillModel {
         waveform.collapse()
         clearBubbleState()
         show(.finalizing)
+        armPatience()
     }
 
     /// NEW — the Apple Intelligence cleanup pass is running. Identical to
@@ -314,6 +343,7 @@ public final class PillModel {
         waveform.collapse()
         clearBubbleState()
         show(.refining)
+        armPatience()
     }
 
     /// `flash_success`: auto-hide after 0.6 s. The panel contracts to a 28 pt
@@ -322,7 +352,7 @@ public final class PillModel {
         clearBubbleState()
         heldWidth = nil
         show(.success)
-        schedule(PillGeometry.successHideDelay, .hide)
+        schedule(PillGeometry.successHideDelay, .settle)
     }
 
     /// `flash_error`: auto-hide after 1.6 s.
@@ -334,6 +364,17 @@ public final class PillModel {
     public func flashError(_ message: String = "") {
         holdWidth()
         showMessageState(.error, message, hideAfter: PillGeometry.errorHideDelay)
+    }
+
+    /// A miss, not a fault: the user spoke too quietly, said nothing, or
+    /// the recognizer returned empty. Studio body, muted ink, floor dots,
+    /// no glyph, no shake — Flow fades; we name it quietly and go.
+    public func flashMissed(_ message: String = PillGeometry.missedMessage) {
+        holdWidth()
+        waveform.collapse()
+        showMessageState(.missed,
+                         message.isEmpty ? PillGeometry.missedMessage : message,
+                         hideAfter: PillGeometry.missedHideDelay)
     }
 
     /// NEW — the focused app holds Secure Keyboard Entry. Distinct from an
@@ -367,11 +408,48 @@ public final class PillModel {
         switch action {
         case .hide:
             hide()
+        case .settle:
+            showIdle()
         case .clearNotice:
             guard !bubble.isEmpty else { return }
             clearBubbleState()
             emit()
+        case .patience:
+            showPatienceCue()
         }
+    }
+
+    /// Arm the patience clock for a stage the user is now waiting on.
+    ///
+    /// `show` has already cancelled whatever was pending, so this rides the
+    /// same one-timer budget every other deferred action uses. A stage that
+    /// finishes first cancels it on its own way out; a `transientNotice` that
+    /// lands mid-wait replaces it, which is right — a notice is newer news.
+    private func armPatience() {
+        guard !isSuppressed() else { return }
+        patienceCue = false
+        schedule(PillGeometry.patienceDelay, .patience)
+    }
+
+    /// The wait outlasted `patienceDelay`: grow a quiet line of copy naming the
+    /// stage. Not a state change and not an alarm — muted ink on the same body,
+    /// and the pill keeps thinking underneath it.
+    ///
+    /// It defers to anything already in the tail: a live notice or a held error
+    /// is information the user asked for, and this is only ever a reassurance.
+    private func showPatienceCue() {
+        guard !isSuppressed(), bubble.isEmpty else { return }
+        let text: String
+        switch state {
+        case .finalizing: text = PillGeometry.finalizingPatienceMessage
+        case .refining: text = PillGeometry.refiningPatienceMessage
+        default: return
+        }
+        patienceCue = true
+        message = text
+        bubble = text
+        bubbleWidth = PillTailGeometry.width(forCharacters: text.count)
+        emit()
     }
 
     // MARK: - internals
@@ -384,6 +462,12 @@ public final class PillModel {
         case .prewarming, .recording, .finalizing, .refining:
             return bubble.isEmpty ? waveform.normalized
                                   : waveform.newest(PillGeometry.barCountCompact)
+        case .missed:
+            // Flow flattens the waveform and leaves. We keep the dots
+            // beside the quiet copy so a miss is not a warning glyph.
+            return waveform.newest(PillGeometry.barCountCompact)
+        case .idle:
+            return waveform.newest(PillGeometry.barCountIdle)
         case .hidden, .success, .error, .blockedSecure:
             return []
         }
@@ -395,7 +479,7 @@ public final class PillModel {
         case .error: return .warning
         case .blockedSecure: return .lock
         case .refining: return .sparkles
-        case .hidden, .prewarming, .recording, .finalizing: return .none
+        case .hidden, .prewarming, .recording, .finalizing, .missed, .idle: return .none
         }
     }
 
@@ -415,6 +499,10 @@ public final class PillModel {
             return max(PillGeometry.blockedSecureMinWidth, max(natural, heldWidth ?? 0))
         case .finalizing, .refining:
             return max(natural, heldWidth ?? 0)
+        case .missed:
+            return max(natural, heldWidth ?? 0)
+        case .idle:
+            return PillGeometry.widthIdle
         case .hidden, .prewarming, .recording:
             return natural
         }
@@ -435,11 +523,14 @@ public final class PillModel {
             let flat = PartialTail.notice(text, maxCharacters: PillGeometry.errorMessageCharacters)
             message = flat
             bubble = flat
-            bubbleWidth = PillTailGeometry.errorWidth(forCharacters: flat.count)
+            bubbleWidth = newState == .missed
+                ? PillTailGeometry.width(forCharacters: flat.count)
+                : PillTailGeometry.errorWidth(forCharacters: flat.count)
             deadMicCue = false
+            patienceCue = false
         }
         show(newState)
-        schedule(hideAfter, .hide)
+        schedule(hideAfter, .settle)
     }
 
     /// `pill.py._show`: no-op while suppressed, otherwise cancel any pending
@@ -460,6 +551,7 @@ public final class PillModel {
         bubbleWidth = 0
         message = ""
         deadMicCue = false
+        patienceCue = false
     }
 
     /// A fresh utterance re-arms the dead-mic cue.

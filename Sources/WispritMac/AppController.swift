@@ -30,6 +30,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
     let settings: Settings
     let dictionary: DictionaryStore
+    let snippets: SnippetStore
     let history: History
     let metrics: MetricsWriter
     let refiner: Refiner
@@ -100,6 +101,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
         self.settings = settings
         let dictionary = DictionaryStore()
         self.dictionary = dictionary
+        let snippets = SnippetStore()
+        self.snippets = snippets
         // `history_detail` is honored HERE, the wiring site: the store takes it
         // as a constructor value on purpose (see `History.detailEnabled`).
         self.history = History(settings: settings,
@@ -135,7 +138,73 @@ public final class AppController: NSObject, NSApplicationDelegate {
                                       finalizeTimeoutMs: Double(settings.finalizeTimeoutMs),
                                       engine: AsrEngineKind(settingsValue: settings.engine))
         let asr = AsrManager(settings: asrSettings, vocabulary: dictionary)
-        let capture = MicCapture(onChunk: { pcm in asr.feed(pcm: pcm) })
+        let capture = MicCapture(onChunk: { pcm in asr.feed(pcm: pcm) },
+                                 // The 2026-08-05 failure class, finally wired
+                                 // to something: the fact used to stop inside
+                                 // MicCapture, where only a log line read it.
+                                 onConfigurationChange: { asr.noteConfigurationChange() })
+        // `prefer_builtin`, and only against a narrowband classic-BT default —
+        // never over a deliberate USB/external choice. Evaluated per `start()`,
+        // so unplugging the headset restores the normal path with no relaunch.
+        capture.preferredDevice = {
+            guard InputDevicePolicySettings.policy(settings) == .preferBuiltin,
+                  let device = InputDeviceProbe.defaultInput(), device.isNarrowband
+            else { return nil }
+            return InputDeviceProbe.builtInInput()
+        }
+        // One notice per device appearance, silenced by `input_device_policy=off`.
+        let narrowbandWarner = NarrowbandWarner(
+            isEnabled: { InputDevicePolicySettings.policy(settings) != .off })
+
+        // R33 — the microphone opens at KEY-DOWN, off the session thread.
+        //
+        // The head-loss defect this closes: `dispatch` only begins a press from
+        // IDLE, so a press arriving while the previous utterance is still
+        // finalizing/refining/inserting waits in the queue — measured 0.7–1.5 s
+        // typically, and up to the batch-rescue budget in the worst case — and
+        // every word spoken in that window was simply never captured (11.6 % of
+        // presses land <3 s after the previous one). These hooks take the mic
+        // out of the pipeline's critical path entirely: arm the retention
+        // buffer, open the input, and let `begin()`'s existing retained-head
+        // replay splice the pre-roll into the analyzer when it finally runs.
+        //
+        // Serial and user-interactive: press and release must stay in FIFO
+        // order (a release-stop overtaking the next press-start would leave the
+        // mic dark for an utterance), and the tap callback must not do this work
+        // itself.
+        let prestartQueue = DispatchQueue(label: "wisprit.mic-prestart", qos: .userInteractive)
+        monitor.onPress = { [weak asr, weak capture] in
+            prestartQueue.async {
+                guard settings.enabled, let asr, let capture else { return }
+                // A mic that is ALREADY running belongs to someone else: either
+                // an utterance still recording (which `armCapture` refuses
+                // anyway), or — if this queue was briefly busy draining the
+                // previous key-up's stop — the session's own `begin()` racing us
+                // to this very press. Arming in that second case would reset a
+                // buffer that is already collecting the utterance's head.
+                guard !capture.isActive else { return }
+                // Arm FIRST, and start the mic ONLY if arming succeeded: an
+                // un-armed prestart would reset the live capture session's R4
+                // telemetry mid-read and would then have its audio discarded by
+                // `startUtterance`. A refusal means an utterance is still
+                // recording — that press degrades to today's behaviour.
+                if asr.armCapture() { _ = capture.start() }
+            }
+        }
+        monitor.onRelease = { [weak asr, weak capture] in
+            prestartQueue.async {
+                guard let asr, let capture else { return }
+                // The privacy invariant, restored for the prestart path: the mic
+                // is live only while the key is down. When a live utterance owns
+                // the capture (`isRecordingUtterance`), the session's own
+                // `finish()` stops it — including its keyup grace, which this
+                // must not cut short. Otherwise this key-up belongs to a QUEUED
+                // press whose `begin()` has not run yet, and nothing else would
+                // close the mic until it does.
+                guard !asr.isRecordingUtterance else { return }
+                capture.stop()
+            }
+        }
 
         // The pill reads nothing itself; settings arrive as closures.
         let pill = Pill(configuration: Pill.Configuration(
@@ -243,7 +312,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
                         ensureSentencePeriod: settings.ensureSentencePeriod,
                         leadingSpace: PostProcessOptions.LeadingSpace(
                             rawValue: settings.leadingSpace) ?? .auto,
-                        emojiCommands: settings.emojiCommands)
+                        emojiCommands: settings.emojiCommands,
+                        pressEnterEnabled: true,
+                        smartFormatting: true)
                 },
                 // Armed unconditionally, and suppressed live inside
                 // `MainThreadPill` instead.
@@ -260,7 +331,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 // Re-read per utterance like every other setting closure here:
                 // switching retro-correction off has to take effect on the next
                 // dictation, not the next launch.
-                vocabularyRetro: { VocabularyRetroSettings.isEnabled(settings) }))
+                vocabularyRetro: { VocabularyRetroSettings.isEnabled(settings) },
+                expandSnippets: { snippets.expand($0) },
+                // One definition of the grace, in `KeyupGraceSettings`.
+                releaseGrace: KeyupGraceSettings.seconds(settings),
+                inputWarning: { narrowbandWarner.warning() }))
 
         super.init()
 
@@ -268,6 +343,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
         let windowModel = WispritWindowModel(
             settings: settings,
             dictionary: DictionaryEditor(store: dictionary),
+            snippets: snippets,
             ports: AppController.makeWindowPorts(history: history,
                                                  settings: settings,
                                                  tierCache: tierCache,
@@ -281,6 +357,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
                                                      self?.runFix(kind)
                                                  }))
         self.windowModel = windowModel
+        windowModel.onPillHiddenChange = { [weak self] hidden in
+            WispritUI.callOnMain {
+                if hidden { self?.pill.hide() } else { self?.pill.showIdle() }
+            }
+        }
         self.windowController = MainWindowController(model: windowModel)
 
         let statusMenu = self.statusMenu!
@@ -824,6 +905,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
         monitor.uninstall()
         events.close()
         history.close()
+        // The clipboard restore is asynchronous now (R33): quitting inside the
+        // custody window would otherwise leave our dictation on the user's
+        // pasteboard permanently, which the old on-thread sleep made impossible.
+        // Bounded by the restore delay (500 ms default).
+        Inserter.drainClipboardCustody()
         instanceLock.release()
         NSApplication.shared.terminate(self)
     }
@@ -901,7 +987,9 @@ final class MainThreadPill: PillPort, @unchecked Sendable {
     func flashSuccess() { onMain { $0.flashSuccess() } }
     func flashError(_ message: String) { onMain { $0.flashError(message) } }
     func transientNotice(_ text: String) { onMain { $0.transientNotice(text) } }
+    func flashMissed(_ message: String) { onMain { $0.flashMissed(message) } }
     func hide() { onMain { $0.hide() } }
+    func showIdle() { onMain { $0.showIdle() } }
     func showPrewarming() { onMain { $0.showPrewarming() } }
     func showRefining() { onMain { $0.showRefining() } }
     func flashBlockedSecure() { onMain { $0.flashBlockedSecure() } }

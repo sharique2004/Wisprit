@@ -153,13 +153,23 @@ public enum Theme {
         /// The error pill's body (§2.4) — not a §1.1 token, but it belongs with
         /// the studio family: same surface, same appearance-independence.
         public static let studioAlarm = ColorToken("studioAlarm", both: 0x2A1416)
+        /// The **blocked-secure** pill's body: the same near-black shifted
+        /// toward `attention` rather than `critical`.
+        ///
+        /// §2.4 gave the two alarm states one body, and looking at them side by
+        /// side says that was one body too few. Nothing failed in a secure-input
+        /// block — the text is on the clipboard and the user has one keystroke
+        /// to press — so a red body is telling them the wrong thing before they
+        /// have read a word of the right thing. Warm-black says "attention",
+        /// which is what the ochre lock and the ochre rim on top of it also say.
+        public static let studioAttention = ColorToken("studioAttention", both: 0x2A2214)
 
         /// Every token, for the invariants `ThemeTests` pins.
         public static let all: [ColorToken] = [
             ground, groundRecessed, surface, surfaceRaised, fillSubtle, fillHover,
             hairline, hairlineStrong, ink, inkSecondary, inkTertiary, inkQuaternary,
             hot, hotDeep, hotText, hotWash, positive, attention, critical,
-            studio, studioInk, studioMuted, studioStroke, studioAlarm,
+            studio, studioInk, studioMuted, studioStroke, studioAlarm, studioAttention,
         ]
 
         /// The mic-orange family. Nothing outside `Theme.hot*(_:)` may name

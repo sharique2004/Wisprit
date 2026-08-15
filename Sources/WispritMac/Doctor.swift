@@ -109,6 +109,17 @@ public struct DoctorFacts: Sendable {
     public var microphone: String = "undetermined"        // granted|denied|undetermined|restricted
     public var secureInputActive: Bool = false
 
+    // Audio input device (2026-08-15). Advisory only — a narrowband headset is
+    // a working microphone, just a worse one, and the row exists so a user
+    // wondering why accuracy dropped can SEE the reason instead of guessing.
+    // Empty name = not gathered (a test-built facts value), never "no device".
+    public var inputDeviceName: String = ""
+    public var inputDeviceTransport: String = ""
+    public var inputDeviceSampleRateHz: Double = 0
+    public var inputDeviceNarrowband: Bool = false
+    /// `input_device_policy`: warn | prefer_builtin | off.
+    public var inputDevicePolicy: String = "warn"
+
     // Speech
     public var transcriberAvailable: Bool = false
     public var speechDetail: String = ""
@@ -256,6 +267,22 @@ public enum Doctor {
                 ? "ACTIVE right now — the hotkey won't fire until it clears "
                   + "(a password field or an app like Slack holds it)"
                 : "not active"))
+
+        // Warn-only and never gating (the `assetStatus` precedent): a narrowband
+        // headset transcribes, just worse, and calling a healthy install broken
+        // over the user's own device choice would be wrong. Omitted entirely
+        // when the probe found nothing — no device is a story the Microphone row
+        // above already tells.
+        if !facts.inputDeviceName.isEmpty {
+            var detail = "\(facts.inputDeviceName) — \(facts.inputDeviceTransport), "
+                + "\(Int(facts.inputDeviceSampleRateHz.rounded())) Hz"
+            if facts.inputDeviceNarrowband {
+                detail += " (narrowband HFP: expect reduced accuracy — pick another mic in "
+                    + "System Settings ▸ Sound, or set input_device_policy=prefer_builtin)"
+            }
+            checks.append(DoctorCheck(
+                facts.inputDeviceNarrowband ? .warn : .ok, "Audio input device", detail))
+        }
 
         // --- speech ----------------------------------------------------------
         //

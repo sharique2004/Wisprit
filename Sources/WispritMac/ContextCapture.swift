@@ -184,13 +184,21 @@ public struct ContextOutcome: Equatable, Sendable {
     /// under the same consent flag as everything else here, and it dies with
     /// this value: nothing downstream stores or logs it.
     public var fieldText: String?
+    /// Text immediately before the caret — Smart Formatting uses this to
+    /// lowercase a mid-sentence insert. Consent-gated like `fieldText`.
+    public var precedingText: String?
+    /// Frontmost bundle id from the snapshot, for messaging-style periods.
+    public var bundleID: String?
 
     public init(status: ContextReadStatus? = nil, terms: [String] = [],
-                captureMs: Double? = nil, fieldText: String? = nil) {
+                captureMs: Double? = nil, fieldText: String? = nil,
+                precedingText: String? = nil, bundleID: String? = nil) {
         self.status = status
         self.terms = terms
         self.captureMs = captureMs
         self.fieldText = fieldText
+        self.precedingText = precedingText
+        self.bundleID = bundleID
     }
 }
 
@@ -418,7 +426,9 @@ public final class ContextCapture: ContextPort, @unchecked Sendable {
         return ContextOutcome(status: .read,
                               terms: candidates.map(\.term),
                               captureMs: arrived.timeIntervalSince(began) * 1000.0,
-                              fieldText: clamped.before + clamped.selected + clamped.after)
+                              fieldText: clamped.before + clamped.selected + clamped.after,
+                              precedingText: clamped.before,
+                              bundleID: snapshot.bundleID)
     }
 
     // MARK: deliveries

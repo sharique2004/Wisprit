@@ -34,6 +34,8 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(PillGeometry.height, 28.0)
         XCTAssertEqual(PillGeometry.radius, 14.0, "a full capsule: h/2")
         XCTAssertEqual(PillGeometry.widthListening, 96.0)
+        XCTAssertEqual(PillGeometry.widthIdle, 48.0)
+        XCTAssertEqual(PillGeometry.barCountIdle, 5)
         XCTAssertEqual(PillGeometry.barCount, 15, "odd, so there is a true centre bar")
         XCTAssertEqual(PillGeometry.barWidth, 2.5)
         XCTAssertEqual(PillGeometry.barPitch, 5.0)
@@ -52,6 +54,7 @@ final class PillModelTests: XCTestCase {
     func testHideDelaysAreUnchangedAndTheNewOneIsLonger() {
         XCTAssertEqual(PillGeometry.successHideDelay, 0.6)
         XCTAssertEqual(PillGeometry.errorHideDelay, 1.6)
+        XCTAssertEqual(PillGeometry.missedHideDelay, 0.9)
         XCTAssertEqual(PillGeometry.noticeDuration, 1.6)
         XCTAssertEqual(PillGeometry.bottomMargin, 90.0)
         XCTAssertEqual(PillGeometry.blockedSecureHideDelay, 2.6,
@@ -88,13 +91,48 @@ final class PillModelTests: XCTestCase {
         }
     }
 
-    func testAlarmStatesSwapTheBody() {
-        for state in [PillState.error, .blockedSecure] {
-            let fill = PillPalette.bodyFill(for: state)
-            XCTAssertEqual(fill.color, PillPalette.alarmBody, "\(state)")
-            XCTAssertEqual(fill.alpha, 0.94)
-        }
+    /// Both alarm states tint the near-black body — and they tint it
+    /// *differently*, which is the point. An error is red because something
+    /// failed; a secure-input block is warm because nothing did, and telling
+    /// the user "failure" before they have read "press ⌘⌃V" is telling them
+    /// the wrong thing first.
+    func testAlarmStatesSwapTheBodyAndABlockIsNotAnError() {
+        let error = PillPalette.bodyFill(for: .error)
+        XCTAssertEqual(error.color, PillPalette.alarmBody)
+        XCTAssertEqual(error.alpha, 0.94)
+
+        let blocked = PillPalette.bodyFill(for: .blockedSecure)
+        XCTAssertEqual(blocked.color, PillPalette.attentionBody)
+        XCTAssertEqual(blocked.alpha, 0.94)
+        XCTAssertNotEqual(blocked.color, error.color, "a block must not read as a failure")
+
         XCTAssertEqual(PillPalette.bodyFill(for: .recording).color, PillPalette.body)
+    }
+
+    /// Over the panel's material the tint has to let some blur through, and
+    /// under Reduce Transparency it has to stop counting on one. Both numbers
+    /// live here so the two layers cannot drift apart.
+    func testTheBodyHasAnOpaqueAlphaAndAGlassOne() {
+        XCTAssertEqual(PillPalette.bodyAlpha, 0.92, "no blur underneath")
+        XCTAssertLessThan(PillPalette.bodyAlphaOverMaterial, PillPalette.bodyAlpha,
+                          "the blur is only visible if the tint lets it through")
+        XCTAssertGreaterThan(PillPalette.bodyAlphaOverMaterial, 0.6,
+                             "…and the tint still has to decide the reading")
+        XCTAssertLessThan(PillPalette.alarmBodyAlphaOverMaterial, PillPalette.alarmBodyAlpha)
+        XCTAssertGreaterThan(PillPalette.alarmBodyAlphaOverMaterial,
+                             PillPalette.bodyAlphaOverMaterial,
+                             "an alarm body carries more of its own colour")
+    }
+
+    /// The rim is a lit edge, not a flat hairline — and the flat value it
+    /// replaced is still the honest average of the two ends.
+    func testTheRimIsLitFromAbove() {
+        XCTAssertGreaterThan(PillPalette.rimTopAlpha, PillPalette.rimBottomAlpha)
+        XCTAssertEqual((PillPalette.rimTopAlpha + PillPalette.rimBottomAlpha) / 2,
+                       PillPalette.rimAlpha, accuracy: 1e-9,
+                       "the §1.2 studioStroke value, spread over the arc")
+        XCTAssertGreaterThan(PillPalette.rimContrastAlpha, PillPalette.rimTopAlpha,
+                             "Increase Contrast gets one solid edge")
     }
 
     /// The five original raw values are frozen — the session's state names and
@@ -105,10 +143,24 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(PillState.finalizing.rawValue, "finalizing")
         XCTAssertEqual(PillState.success.rawValue, "success")
         XCTAssertEqual(PillState.error.rawValue, "error")
-        XCTAssertEqual(PillState.allCases.count, 8, "five original + three new")
+        XCTAssertEqual(PillState.idle.rawValue, "idle")
+        XCTAssertEqual(PillState.allCases.count, 10, "five original + five new")
     }
 
     // MARK: - state transitions
+
+    func testIdleIsACompactPersistentBar() {
+        let (model, sink) = makeModel()
+        model.showIdle()
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertTrue(sink.last.isVisible)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthIdle)
+        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCountIdle))
+        XCTAssertEqual(sink.last.glyph, .none)
+        XCTAssertEqual(sink.last.tint, PillPalette.muted)
+        XCTAssertNotEqual(sink.last.tint, PillPalette.hot)
+        XCTAssertEqual(PillPalette.bodyFill(for: .idle).color, PillPalette.body)
+    }
 
     func testShowRecordingGoesOrangeVisibleAndZeroLevel() {
         let (model, sink) = makeModel()
@@ -140,11 +192,13 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthCommitted,
                        "committed contracts to a circle")
         XCTAssertEqual(sink.scheduled.last?.seconds, 0.6)
-        XCTAssertEqual(sink.scheduled.last?.action, .hide)
+        XCTAssertEqual(sink.scheduled.last?.action, .settle)
 
-        model.fireDeferred(.hide)
-        XCTAssertEqual(model.state, .hidden)
-        XCTAssertFalse(sink.last.isVisible)
+        model.fireDeferred(.settle)
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertTrue(sink.last.isVisible, "Flow stays on the desktop")
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthIdle)
+        XCTAssertEqual(sink.last.glyph, .none)
     }
 
     func testFlashErrorAutoHidesAfterOnePointSix() {
@@ -154,7 +208,7 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(sink.last.tint, PillPalette.critical)
         XCTAssertEqual(sink.last.glyph, .warning)
         XCTAssertEqual(sink.scheduled.last?.seconds, 1.6)
-        XCTAssertEqual(sink.scheduled.last?.action, .hide)
+        XCTAssertEqual(sink.scheduled.last?.action, .settle)
     }
 
     /// `_show` cancels the pending auto-hide before recolouring — a new
@@ -238,7 +292,7 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(sink.last.message, PillGeometry.blockedSecureMessage)
         XCTAssertEqual(sink.last.bubble, PillGeometry.blockedSecureMessage)
         XCTAssertEqual(sink.scheduled.last?.seconds, PillGeometry.blockedSecureHideDelay)
-        XCTAssertEqual(sink.scheduled.last?.action, .hide)
+        XCTAssertEqual(sink.scheduled.last?.action, .settle)
     }
 
     func testAlarmStatesHaveAFloorWidth() {
@@ -271,6 +325,21 @@ final class PillModelTests: XCTestCase {
         XCTAssertTrue(sink.last.message.hasSuffix("…"))
     }
 
+    func testFlashMissedIsQuietNotAnAlarm() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.flashMissed("Didn't catch that")
+        XCTAssertEqual(sink.last.state, .missed)
+        XCTAssertEqual(sink.last.bubble, "Didn't catch that")
+        XCTAssertEqual(sink.last.glyph, .none, "a miss is not a warning triangle")
+        XCTAssertEqual(sink.last.tint, PillPalette.muted)
+        XCTAssertEqual(PillPalette.bodyFill(for: .missed).color, PillPalette.body)
+        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCountCompact),
+                       "the waveform flattens to dots, the way Flow leaves")
+        XCTAssertEqual(sink.scheduled.last?.seconds, PillGeometry.missedHideDelay)
+        XCTAssertEqual(sink.scheduled.last?.action, .settle)
+    }
+
     func testASucceedingUtteranceClearsTheStaleMessage() {
         let (model, _) = makeModel()
         model.flashError("boom")
@@ -288,8 +357,9 @@ final class PillModelTests: XCTestCase {
         // `SessionController.flashEmpty` / `flashError` copy, verbatim.
         let messages = [
             "Microphone delivered no audio",
-            "Didn't hear anything — is the right mic selected?",
-            "nothing recognized",
+            "Microphone changed — try again",
+            "Didn't catch that",
+            "Hold the key while you speak",
             "microphone unavailable",
             "insert failed",
             "paste failed",
@@ -338,7 +408,7 @@ final class PillModelTests: XCTestCase {
     func testAlarmStatesTruncateAtTheTailEverythingElseAtTheHead() {
         for state in PillState.allCases {
             let expected: PillTailTruncation =
-                (state == .error || state == .blockedSecure) ? .tail : .head
+                (state == .error || state == .blockedSecure || state == .missed) ? .tail : .head
             XCTAssertEqual(PillTailGeometry.truncation(for: state), expected, "\(state)")
         }
     }
@@ -430,7 +500,7 @@ final class PillModelTests: XCTestCase {
         model.showRecording()
         model.updateLevel(0.5)          // disarmed for this utterance
         model.showFinalizing()
-        model.fireDeferred(.hide)
+        model.fireDeferred(.settle)
 
         model.showRecording()           // next press
         silentTicks(model, PillGeometry.deadMicTickCount + 1)
@@ -442,6 +512,111 @@ final class PillModelTests: XCTestCase {
         silentTicks(model, PillGeometry.deadMicTickCount * 2)
         XCTAssertEqual(model.bubble, "", "hidden pill: level ticks are diagnostics only")
         XCTAssertEqual(model.state, .hidden)
+    }
+
+    // MARK: - the patience cue (the AUDIT-2026-08-14 pill copy decision)
+
+    /// The audit left this open: a rescued utterance can spend seconds in
+    /// `finalizing` while the batch pass re-transcribes the audio. The pill now
+    /// names the wait instead of sitting there.
+    func testFinalizingArmsThePatienceClock() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.showFinalizing()
+        XCTAssertEqual(sink.scheduled.last?.seconds, PillGeometry.patienceDelay)
+        XCTAssertEqual(sink.scheduled.last?.action, .patience)
+        XCTAssertEqual(model.bubble, "", "the wait itself stays clean")
+    }
+
+    func testPatienceNamesTheStageWithoutChangingIt() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.showFinalizing()
+        model.fireDeferred(.patience)
+        XCTAssertEqual(model.state, .finalizing, "a cue is not a state change")
+        XCTAssertEqual(sink.last.bubble, PillGeometry.finalizingPatienceMessage)
+        XCTAssertEqual(sink.last.message, PillGeometry.finalizingPatienceMessage)
+        XCTAssertTrue(sink.last.tailMuted, "notice styling: muted ink, no alarm body")
+        XCTAssertEqual(sink.last.glyph, .none)
+        XCTAssertEqual(PillPalette.bodyFill(for: .finalizing).color, PillPalette.body)
+        XCTAssertGreaterThan(sink.last.totalWidth, PillGeometry.widthListening,
+                             "the capsule opens for the copy")
+    }
+
+    /// Refine is a different wait and says so — the user is owed the name of
+    /// the stage they are waiting on, not a generic "working".
+    func testRefiningHasItsOwnPatienceCopy() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.showRefining()
+        XCTAssertEqual(sink.scheduled.last?.action, .patience)
+        model.fireDeferred(.patience)
+        XCTAssertEqual(sink.last.bubble, PillGeometry.refiningPatienceMessage)
+        XCTAssertNotEqual(PillGeometry.refiningPatienceMessage,
+                          PillGeometry.finalizingPatienceMessage)
+        XCTAssertEqual(model.state, .refining)
+    }
+
+    /// Both strings have to survive the tail's character budget, or the pill
+    /// would be reassuring the user with an ellipsis.
+    func testPatienceCopyFitsTheTail() {
+        for text in [PillGeometry.finalizingPatienceMessage,
+                     PillGeometry.refiningPatienceMessage] {
+            XCTAssertEqual(PartialTail.notice(text), text, "\"\(text)\" is clipped")
+            let needed = 2 * PillTailGeometry.textInset
+                + Double(text.count) * PillTailGeometry.characterWidth
+            XCTAssertGreaterThanOrEqual(PillTailGeometry.width(forCharacters: text.count), needed)
+        }
+    }
+
+    /// The result landing is what the cue was waiting for, so it takes the cue
+    /// with it — and the settle after it leaves nothing behind.
+    func testAResultClearsThePatienceCue() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.showFinalizing()
+        model.fireDeferred(.patience)
+        XCTAssertFalse(model.bubble.isEmpty)
+
+        model.flashSuccess()
+        XCTAssertEqual(model.bubble, "")
+        XCTAssertFalse(sink.last.tailMuted)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthCommitted)
+    }
+
+    /// It is a reassurance, never a replacement: anything the app actually had
+    /// to say is already in the tail and stays there.
+    func testPatienceDefersToCopyTheAppSupplied() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.transientNotice("Learned Sharique")
+        model.showFinalizing()
+        model.transientNotice("Fixed 2")
+        let frames = sink.frames.count
+        model.fireDeferred(.patience)
+        XCTAssertEqual(sink.frames.count, frames, "an occupied tail emits nothing")
+        XCTAssertEqual(model.bubble, "Fixed 2")
+    }
+
+    func testPatienceNeverFiresOutsideTheWaitingStates() {
+        for enter in [{ (m: PillModel) in m.showRecording() },
+                      { (m: PillModel) in m.showIdle() },
+                      { (m: PillModel) in m.flashSuccess() }] {
+            let (model, sink) = makeModel()
+            enter(model)
+            let frames = sink.frames.count
+            model.fireDeferred(.patience)
+            XCTAssertEqual(sink.frames.count, frames, "\(model.state)")
+            XCTAssertEqual(model.bubble, "")
+        }
+    }
+
+    func testASuppressedPillArmsNoPatienceClock() {
+        let (model, sink) = makeModel(suppressed: { true })
+        model.showFinalizing()
+        XCTAssertFalse(sink.scheduled.contains { $0.action == .patience })
+        model.fireDeferred(.patience)
+        XCTAssertTrue(sink.frames.isEmpty)
     }
 
     // MARK: - the staggered-collapse source (§2.5 row 6, FINAL-PLAN R13)
@@ -508,16 +683,18 @@ final class PillModelTests: XCTestCase {
         model.showRefining()
         model.transientNotice("Learned Sharique")
         model.flashBlockedSecure()
+        model.showIdle()
         XCTAssertTrue(sink.frames.isEmpty, "no frame should be emitted while pill_hidden")
         XCTAssertEqual(model.state, .hidden)
     }
 
-    /// 1:1 with `flash_success`, which calls `_schedule_hide` unconditionally
-    /// even when `_show` no-opped.
-    func testSuppressedFlashStillSchedulesHide() {
+    /// 1:1 with `flash_success`, which arms the settle timer even when
+    /// `_show` no-opped.
+    func testSuppressedFlashStillSchedulesSettle() {
         let (model, sink) = makeModel(suppressed: { true })
         model.flashSuccess()
         XCTAssertEqual(sink.scheduled.last?.seconds, 0.6)
+        XCTAssertEqual(sink.scheduled.last?.action, .settle)
         XCTAssertTrue(sink.frames.isEmpty)
     }
 
@@ -652,7 +829,7 @@ final class PillModelTests: XCTestCase {
 
     // MARK: - transientNotice
 
-    func testNoticeFromIdleIsAFlashThatTakesThePillWithIt() {
+    func testNoticeFromIdleSettlesBackToTheBar() {
         let (model, sink) = makeModel()
         model.transientNotice("Learned Sharique")
         XCTAssertEqual(model.state, .success)
@@ -660,10 +837,11 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(sink.last.bubble, "Learned Sharique")
         XCTAssertEqual(sink.last.glyph, .sparkle, "a notice is a text row, not a check mark")
         XCTAssertEqual(sink.scheduled.last?.seconds, PillGeometry.noticeDuration)
-        XCTAssertEqual(sink.scheduled.last?.action, .hide)
+        XCTAssertEqual(sink.scheduled.last?.action, .settle)
 
-        model.fireDeferred(.hide)
-        XCTAssertEqual(model.state, .hidden)
+        model.fireDeferred(.settle)
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertTrue(sink.last.isVisible)
         XCTAssertEqual(model.bubble, "")
     }
 

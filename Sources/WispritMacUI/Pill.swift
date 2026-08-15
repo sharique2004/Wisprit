@@ -44,6 +44,10 @@ public final class Pill: NSObject, NSWindowDelegate {
     /// The frame the hosted SwiftUI view reads. Built once (§6.3).
     private let box = PillRenderBox()
     private var host: NSHostingView<PillSurface>?
+    /// The glass under the body. Kept as the panel's `contentView` so the
+    /// window shadow is derived from its capsule mask rather than from a
+    /// rectangle (§2.2 — the pill is a capsule all the way down).
+    private var glass: PillGlassView?
     private var deferredTimer: Timer?
     /// Guards `windowDidMove` against our own frame changes — only a user drag
     /// may overwrite the persisted position.
@@ -71,10 +75,15 @@ public final class Pill: NSObject, NSWindowDelegate {
         build()
     }
 
+    deinit {
+        NSWorkspace.shared.notificationCenter.removeObserver(self)
+    }
+
     // MARK: - public state API (main thread)
 
     /// NEW — the key is down, audio has not started. Optional: a session that
     /// never calls it goes straight to `showRecording` exactly as before.
+    public func showIdle() { model.showIdle() }
     public func showPrewarming() { model.showPrewarming() }
     public func showRecording() { model.showRecording() }
     public func updateLevel(_ level: Double) { model.updateLevel(level) }
@@ -87,6 +96,9 @@ public final class Pill: NSObject, NSWindowDelegate {
     public func showRefining() { model.showRefining() }
     public func flashSuccess() { model.flashSuccess() }
     public func flashError(_ message: String = "") { model.flashError(message) }
+    public func flashMissed(_ message: String = PillGeometry.missedMessage) {
+        model.flashMissed(message)
+    }
     /// NEW — Secure Keyboard Entry blocked the insertion; the text is on the
     /// clipboard. Until the session adopts it, `flashError` carries the same
     /// message with the shorter error timing.
@@ -97,6 +109,11 @@ public final class Pill: NSObject, NSWindowDelegate {
 
     /// Current frame — exposed for the integration layer's diagnostics.
     public var currentRender: PillRender { model.render }
+
+    /// Where the panel is, in screen coordinates. Diagnostics only — and the
+    /// one thing `Wisprit pill-demo` needs in order to aim a screenshot at the
+    /// pill instead of at the whole desktop.
+    public var frameOnScreen: CGRect? { panel?.frame }
 
     // MARK: - construction
 
@@ -116,7 +133,7 @@ public final class Pill: NSObject, NSWindowDelegate {
     /// panel cannot be made we keep answering every call and simply draw
     /// nothing, rather than taking dictation down with us.
     private func build() {
-        let frame = NSRect(x: 0, y: 0, width: PillGeometry.widthListening, height: PillGeometry.height)
+        let frame = NSRect(x: 0, y: 0, width: PillGeometry.widthIdle, height: PillGeometry.height)
         let panel = NSPanel(contentRect: frame,
                             styleMask: [.nonactivatingPanel],
                             backing: .buffered,
@@ -129,13 +146,51 @@ public final class Pill: NSObject, NSWindowDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.delegate = self
+        // The pill's ground is always near-black (§1.7), so pin the appearance
+        // rather than inheriting the system's. Two things depend on it: the
+        // `NSVisualEffectView` below picks the dark form of its material, and
+        // the meter's tint crossfade — which resolves `hot` per appearance —
+        // stops reaching for `#F07818` on a Light-mode Mac, where the palette
+        // says plainly that it "goes muddy on near-black".
+        panel.appearance = NSAppearance(named: .darkAqua)
 
+        // Glass under paint. `PillSurface` draws a near-black tint at 76% over
+        // this, so the desktop moves behind the pill and the tint still decides
+        // the reading — the legibility argument the flat fill was defending is
+        // unchanged, and what it buys is the one thing an Electron pill can
+        // never have.
+        //
+        // The two are siblings rather than parent and child on purpose: Reduce
+        // Transparency has to be able to take the glass away without taking the
+        // pill with it, and `isHidden` on a superview hides everything under it.
+        let content = PillPanelView(frame: NSRect(origin: .zero, size: frame.size))
+        let glass = PillGlassView(frame: content.bounds)
         let host = PillHostingView(rootView: PillSurface(box: box))
-        host.frame = frame
-        panel.contentView = host
+        host.frame = content.bounds
+        host.autoresizingMask = [.width, .height]
+        content.addSubview(glass)
+        content.addSubview(host)
+        panel.contentView = content
         self.panel = panel
         self.host = host
+        self.glass = glass
+        applyTransparencyPreference()
+        NSWorkspace.shared.notificationCenter.addObserver(
+            self, selector: #selector(accessibilityDisplayOptionsChanged),
+            name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         restorePosition()
+    }
+
+    /// Reduce Transparency turns the glass off entirely; `PillSurface` reads the
+    /// same system flag through `@Environment(\.accessibilityReduceTransparency)`
+    /// and puts the body back to its opaque 92%, so the two layers can never
+    /// disagree about whether there is a blur to tint.
+    @objc private func accessibilityDisplayOptionsChanged() {
+        MainActor.assumeIsolated { applyTransparencyPreference() }
+    }
+
+    private func applyTransparencyPreference() {
+        glass?.isHidden = NSWorkspace.shared.accessibilityDisplayShouldReduceTransparency
     }
 
     /// `_restore_position`: persisted origin, else bottom-centre of the main
@@ -156,7 +211,7 @@ public final class Pill: NSObject, NSWindowDelegate {
         }
         guard let screen = NSScreen.main else { return }
         let f = screen.frame
-        let origin = NSPoint(x: f.origin.x + (f.size.width - PillGeometry.widthListening) / 2.0,
+        let origin = NSPoint(x: f.origin.x + (f.size.width - PillGeometry.widthIdle) / 2.0,
                              y: f.origin.y + PillGeometry.bottomMargin)
         preferredOrigin = origin
         panel.setFrameOrigin(origin)
@@ -358,6 +413,55 @@ final class PillHostingView<Content: View>: NSHostingView<Content> {
     @available(*, unavailable)
     required init?(coder: NSCoder) {
         fatalError("init(coder:) is not used — the pill is built in code")
+    }
+}
+
+/// The panel's content view: nothing but a transparent tray holding the glass
+/// and the surface, and the same "every mouse-down is a drag" answer.
+final class PillPanelView: NSView {
+    override var mouseDownCanMoveWindow: Bool { true }
+    override var isOpaque: Bool { false }
+}
+
+/// The blur under the body.
+///
+/// `.hudWindow` on `.behindWindow` is the material AppKit uses for its own
+/// floating HUDs, which is exactly what this is; the capsule `maskImage` is
+/// what keeps it from being a rectangle of frosted desktop behind a capsule of
+/// paint — and, because the window shadow is derived from rendered alpha, is
+/// also what keeps the shadow hugging the pill's real silhouette.
+final class PillGlassView: NSVisualEffectView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        material = .hudWindow
+        blendingMode = .behindWindow
+        state = .active
+        isEmphasized = false
+        autoresizingMask = [.width, .height]
+        maskImage = PillGlassView.capsuleMask(height: PillGeometry.height)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) is not used — the pill is built in code")
+    }
+
+    override var mouseDownCanMoveWindow: Bool { true }
+
+    /// A resizable capsule: two end caps and one stretchable point between
+    /// them, so every panel width from 28 to 288 pt gets the same true capsule
+    /// without ever rebuilding the image.
+    static func capsuleMask(height: Double) -> NSImage {
+        let radius = height / 2
+        let size = NSSize(width: radius * 2 + 1, height: height)
+        let image = NSImage(size: size, flipped: false) { rect in
+            NSColor.black.setFill()
+            NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
+            return true
+        }
+        image.capInsets = NSEdgeInsets(top: 0, left: radius, bottom: 0, right: radius)
+        image.resizingMode = .stretch
+        return image
     }
 }
 #endif

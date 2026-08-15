@@ -47,6 +47,13 @@ final class SessionControllerTests: XCTestCase {
              reconcile: Bool = false,
              vocabularyRetro: Bool = true,
              context: FakeContext? = nil,
+             postProcessOptions: @escaping @Sendable () -> PostProcessOptions = { PostProcessOptions() },
+             expandSnippets: @escaping @Sendable (String) -> String = { $0 },
+             // Zero by default, so every timing assertion in this file stays
+             // instantaneous — the grace is opt-in per test, exactly as it is
+             // per install.
+             releaseGrace: TimeInterval = 0,
+             inputWarning: @escaping @Sendable () -> String? = { nil },
              // Swap in a different pill for the tests whose subject is what the
              // bubble renders rather than which calls it received.
              pillPort: (any PillPort)? = nil) {
@@ -71,11 +78,15 @@ final class SessionControllerTests: XCTestCase {
                 configuration: SessionController.Configuration(
                     holdDebounceMs: { debounceMs },
                     isEnabled: { enabled },
+                    postProcessOptions: postProcessOptions,
                     // The ticker and the reconciliation pass both spawn
                     // background work; off here so assertions stay deterministic.
                     levelTickInterval: nil,
                     reconcileVocabulary: reconcile,
-                    vocabularyRetro: { vocabularyRetro }))
+                    vocabularyRetro: { vocabularyRetro },
+                    expandSnippets: expandSnippets,
+                    releaseGrace: releaseGrace,
+                    inputWarning: inputWarning))
             inserter.deferredLabel = { [weak session] in session?.deferredLabel }
         }
 
@@ -107,6 +118,34 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertEqual(h.inserter.inserted, ["hello world"])
         XCTAssertEqual(h.history.added.map(\.text), ["hello world"])
         XCTAssertTrue(h.pill.snapshot().contains("flashSuccess"))
+    }
+
+    func testBacktrackAndPressEnterWhenSmartFormattingIsOn() {
+        let h = Harness(
+            useRefiner: false,
+            postProcessOptions: {
+                PostProcessOptions(pressEnterEnabled: true, smartFormatting: true)
+            })
+        h.asr.result = UtteranceResult(
+            text: "send it to marketing sorry to finance press enter",
+            engine: "apple_live", finalizeMs: 80)
+
+        h.utterance()
+
+        XCTAssertEqual(h.inserter.inserted, ["send it to finance"])
+        XCTAssertEqual(h.inserter.returnCount, 1)
+    }
+
+    func testSnippetExpandsBeforeInsert() {
+        let h = Harness(
+            useRefiner: false,
+            expandSnippets: { $0 == "my address" ? "123 Main Street" : $0 })
+        h.asr.result = UtteranceResult(text: "my address", engine: "apple_live", finalizeMs: 40)
+
+        h.utterance()
+
+        XCTAssertEqual(h.inserter.inserted, ["123 Main Street"])
+        XCTAssertEqual(h.inserter.returnCount, 0)
     }
 
     func testStateSequenceIsIdleRecordingFinalizingInserting() {
@@ -223,7 +262,7 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertTrue(h.inserter.inserted.isEmpty)
         XCTAssertTrue(h.history.added.isEmpty)
         XCTAssertTrue(h.metrics.records.isEmpty, "no metrics row for an accidental brush")
-        XCTAssertTrue(h.pill.snapshot().contains("hide"))
+        XCTAssertTrue(h.pill.snapshot().contains("showIdle"))
         XCTAssertEqual(h.gate.transitions, [true, false])
     }
 
@@ -247,7 +286,7 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertEqual(h.asr.cancelCount, 1)
         XCTAssertEqual(h.refiner.cancelCount, 1)
         XCTAssertTrue(h.inserter.inserted.isEmpty)
-        XCTAssertTrue(h.pill.snapshot().contains("hide"))
+        XCTAssertTrue(h.pill.snapshot().contains("showIdle"))
         XCTAssertTrue(h.pill.errors.isEmpty, "a deliberate cancel is not an error")
     }
 
@@ -258,7 +297,7 @@ final class SessionControllerTests: XCTestCase {
 
         XCTAssertEqual(h.session.state, .idle)
         XCTAssertEqual(h.asr.cancelCount, 1)
-        XCTAssertTrue(h.pill.snapshot().contains("hide"))
+        XCTAssertTrue(h.pill.snapshot().contains("showIdle"))
     }
 
     func testEscQueuedDuringFinalizeAbortsBeforePayingForAI() {
@@ -340,9 +379,10 @@ final class SessionControllerTests: XCTestCase {
 
         XCTAssertTrue(h.inserter.inserted.isEmpty)
         XCTAssertTrue(h.history.added.isEmpty)
-        XCTAssertEqual(h.pill.errors, ["Didn't hear anything — is the right mic selected?"],
-                       "a full second of hold with nothing audible in it is a user who did "
-                       + "not speak, and the pill now says so")
+        XCTAssertEqual(h.pill.errors, [])
+        XCTAssertEqual(h.pill.notices, ["Didn't catch that"],
+                       "a full second of hold with nothing audible in it is a miss, "
+                       + "not an alarm")
         XCTAssertEqual(h.metrics.records.count, 1)
         XCTAssertEqual(h.metrics.last?.outcome, "empty")
         XCTAssertEqual(h.metrics.last?.emptyReason, EmptyReason.silent.rawValue)
@@ -363,23 +403,27 @@ final class SessionControllerTests: XCTestCase {
             (.starved,
              UtteranceResult(text: "", engine: "apple_live", finalizeMs: 1500, starvedInput: true),
              2.0, "Microphone delivered no audio", nil),
+            (.deviceChanged,
+             UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40,
+                             sawConfigurationChange: true),
+             2.0, "Microphone changed — try again", nil),
             (.silent,
              UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40, peakLevel: 0.001),
-             2.0, "Didn't hear anything — is the right mic selected?", nil),
+             2.0, nil, "Didn't catch that"),
             (.shortHold,
              UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40, peakLevel: 0.001),
              0.4, nil, "Hold the key while you speak"),
             (.producedNothing,
              UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40, peakLevel: voiced),
-             2.0, "nothing recognized", nil),
+             2.0, nil, "Didn't catch that"),
             (.timedOut,
              UtteranceResult(text: "", engine: "apple_live", finalizeMs: 1500,
                              timedOut: true, peakLevel: voiced),
-             2.0, "nothing recognized", nil),
+             2.0, "Didn't catch that", nil),
             (.crashed,
              UtteranceResult(text: "", engine: "apple_live", finalizeMs: 12,
                              crashed: true, peakLevel: voiced),
-             2.0, "nothing recognized", nil),
+             2.0, "Didn't catch that", nil),
         ]
 
         for c in cases {
@@ -405,7 +449,8 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertEqual(h.metrics.last?.outcome, "empty")
         XCTAssertNil(h.metrics.last?.emptyReason,
                      "the engine did produce text — nothing about it is unexplained")
-        XCTAssertEqual(h.pill.errors, ["nothing recognized"])
+        XCTAssertEqual(h.pill.errors, [])
+        XCTAssertEqual(h.pill.notices, ["Didn't catch that"])
     }
 
     // MARK: - insertion failures
@@ -474,13 +519,14 @@ final class SessionControllerTests: XCTestCase {
                        "no refine pass, no refining state")
     }
 
-    /// A tap under the debounce writes no metrics row and leaves no pill: the
-    /// prewarm flash must not survive an utterance that never happened.
+    /// A tap under the debounce writes no metrics row and settles the bar
+    /// back to idle: the prewarm flash must not survive an utterance that
+    /// never happened.
     func testASubDebounceTapTakesThePrewarmBackDown() {
         let h = Harness(debounceMs: 150)
         h.utterance(heldSeconds: 0.05)
 
-        XCTAssertEqual(h.pill.snapshot(), ["showPrewarming", "showRecording", "hide"])
+        XCTAssertEqual(h.pill.snapshot(), ["showPrewarming", "showRecording", "showIdle"])
         XCTAssertTrue(h.metrics.records.isEmpty)
     }
 
@@ -577,6 +623,171 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertEqual(h.session.state, .idle)
         XCTAssertEqual(h.audio.startCount, 0)
         XCTAssertEqual(h.asr.beginCount, 0)
+        // R33: the hotkey hook may already have opened the mic on another
+        // thread by the time the toggle is read here, so the disabled path
+        // closes it rather than leaving it running with no utterance to own it.
+        XCTAssertEqual(h.audio.stopCount, 1)
+    }
+
+    // MARK: - R33: the keyup grace
+    //
+    // The tap is installed at 100 ms granularity, so at key-up a uniformly
+    // distributed 0–100 ms of already-captured audio is sitting in it
+    // undelivered — word-final phonemes, every utterance. The grace lets it
+    // (and any speech the user is still finishing) reach the engine before the
+    // mic goes dark. What must survive it: Esc, and a re-press.
+
+    func testTheGraceKeepsTheMicOpenBeforeStopping() {
+        let h = Harness(useRefiner: false, releaseGrace: 0.08)
+        let t0 = MonotonicClock.now()
+
+        h.utterance()
+
+        XCTAssertEqual(h.audio.stopCount, 1)
+        guard let stoppedAt = h.audio.lastStopAt else { return XCTFail("no stop stamp") }
+        XCTAssertGreaterThan(stoppedAt - t0, 0.06, "the mic stayed open for the grace")
+        XCTAssertEqual(h.asr.finalizeCount, 1, "and finalize ran after it, as always")
+        XCTAssertEqual(h.inserter.inserted, ["hello world"])
+    }
+
+    func testZeroGraceIsTodaysOrdering() {
+        let h = Harness(useRefiner: false, releaseGrace: 0)
+        let t0 = MonotonicClock.now()
+
+        h.utterance()
+
+        guard let stoppedAt = h.audio.lastStopAt else { return XCTFail("no stop stamp") }
+        XCTAssertLessThan(stoppedAt - t0, 0.05, "no grace, no wait")
+        XCTAssertEqual(h.audio.stopCount, 1)
+        XCTAssertEqual(h.asr.finalizeCount, 1)
+    }
+
+    /// Esc inside the grace discards the utterance immediately — it never
+    /// reaches the analyzer at all, which is strictly faster than today's
+    /// Esc-during-finalize path.
+    func testEscDuringTheGraceAborts() {
+        let h = Harness(useRefiner: false, releaseGrace: 0.5)
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        h.events.put(HotkeyEvent(.esc))
+        let t0 = MonotonicClock.now()
+
+        h.session.dispatch(HotkeyEvent(.release, ts: 1.0))
+
+        XCTAssertLessThan(MonotonicClock.now() - t0, 0.3, "it does not wait out the grace")
+        XCTAssertEqual(h.asr.cancelCount, 1)
+        XCTAssertEqual(h.asr.finalizeCount, 0, "nothing was transcribed")
+        XCTAssertEqual(h.audio.stopCount, 1)
+        XCTAssertEqual(h.session.state, .idle)
+        XCTAssertEqual(h.inserter.inserted, [])
+        XCTAssertTrue(h.pill.calls.contains("showIdle"))
+        XCTAssertFalse(h.pill.calls.contains("showFinalizing"),
+                       "an aborted utterance never claimed to be finalizing")
+    }
+
+    /// A queued press cuts the grace short: the next utterance outranks this
+    /// one's tail padding. (Its head is safe regardless — the mic for it opens
+    /// at key-down now.)
+    func testAQueuedPressShortCircuitsTheGrace() {
+        let h = Harness(useRefiner: false, releaseGrace: 0.5)
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        h.events.put(HotkeyEvent(.press, ts: 2.0))
+        let t0 = MonotonicClock.now()
+
+        h.session.dispatch(HotkeyEvent(.release, ts: 1.0))
+
+        XCTAssertLessThan(MonotonicClock.now() - t0, 0.3, "the grace gave way")
+        XCTAssertEqual(h.asr.finalizeCount, 1, "and this utterance still completed")
+        XCTAssertEqual(h.inserter.inserted, ["hello world"])
+    }
+
+    /// A config file asking for 5 seconds of grace must not make every
+    /// dictation feel broken.
+    func testTheGraceIsClamped() {
+        let h = Harness(useRefiner: false, releaseGrace: 5.0)
+        XCTAssertEqual(SessionController.maxReleaseGrace, 0.5)
+        let t0 = MonotonicClock.now()
+        h.utterance()
+        XCTAssertLessThan(MonotonicClock.now() - t0, 1.0, "clamped to the ceiling")
+        XCTAssertEqual(h.asr.finalizeCount, 1)
+    }
+
+    /// A brush shorter than the debounce is discarded without paying the grace:
+    /// there is no tail worth keeping on an utterance nobody made.
+    func testTheDebounceDiscardSkipsTheGrace() {
+        let h = Harness(useRefiner: false, debounceMs: 150, releaseGrace: 0.5)
+        let t0 = MonotonicClock.now()
+
+        h.utterance(heldSeconds: 0.05)
+
+        XCTAssertLessThan(MonotonicClock.now() - t0, 0.3)
+        XCTAssertEqual(h.asr.finalizeCount, 0)
+        XCTAssertEqual(h.asr.cancelCount, 1)
+        XCTAssertEqual(h.metrics.records.count, 0, "no row for a brush")
+    }
+
+    // MARK: - R33: the narrowband input warning
+
+    func testTheInputWarningIsShownOnceAndAfterTheMicIsOpen() {
+        let h = Harness(useRefiner: false, inputWarning: { "Bluetooth headset mic is narrowband" })
+
+        h.utterance()
+
+        XCTAssertEqual(h.pill.notices, ["Bluetooth headset mic is narrowband"])
+        guard let noticeIndex = h.pill.calls.firstIndex(of: "transientNotice"),
+              let recordingIndex = h.pill.calls.firstIndex(of: "showRecording")
+        else { return XCTFail("missing pill calls") }
+        // Issued from `.prewarming` the notice would flip the pill to success
+        // and then be wiped by `showRecording`'s bubble clear — invisible.
+        XCTAssertGreaterThan(noticeIndex, recordingIndex,
+                             "the notice lands in the recording bubble, not before it")
+    }
+
+    func testNoWarningMeansNoNotice() {
+        let h = Harness(useRefiner: false)
+        h.utterance()
+        XCTAssertEqual(h.pill.notices, [])
+    }
+
+    // MARK: - R33: the mid-utterance device switch
+
+    /// The dangerous case: the hardware died mid-hold, the prefix read cleanly,
+    /// and the user is about to accept a truncated sentence under a checkmark.
+    func testATruncatedUtteranceSaysSoAndIsCounted() {
+        let h = Harness(useRefiner: false)
+        h.asr.result = UtteranceResult(text: "half a sentence", engine: "apple_live",
+                                       finalizeMs: 90, peakLevel: 0.5,
+                                       sawConfigurationChange: true)
+
+        h.utterance()
+
+        XCTAssertEqual(h.inserter.inserted, ["half a sentence"], "the words we did get still land")
+        XCTAssertTrue(h.pill.calls.contains("flashSuccess"))
+        XCTAssertEqual(h.pill.notices, ["Mic changed mid-dictation — check for missing words"])
+        XCTAssertEqual(h.metrics.records.last?.configChanged, true)
+    }
+
+    /// The empty half of the same fault gets the empty-reason row and its own
+    /// copy — "didn't catch that" would blame the user for a dead microphone.
+    func testAnEmptyAfterADeviceSwitchIsLabelled() {
+        let h = Harness(useRefiner: false)
+        h.asr.result = UtteranceResult(text: "", engine: "apple_live", finalizeMs: 1_500,
+                                       peakLevel: 0.001, sawConfigurationChange: true)
+
+        h.utterance()
+
+        XCTAssertEqual(h.metrics.records.last?.emptyReason, "device_changed")
+        XCTAssertEqual(h.metrics.records.last?.configChanged, true)
+        XCTAssertEqual(h.metrics.records.last?.outcome, "empty")
+        XCTAssertEqual(h.pill.errors, ["Microphone changed — try again"])
+    }
+
+    /// An ordinary utterance grows no field: the append-only stream stays quiet
+    /// on the overwhelming majority of rows.
+    func testAnOrdinaryUtteranceCarriesNoConfigChangedField() {
+        let h = Harness(useRefiner: false)
+        h.utterance()
+        XCTAssertNil(h.metrics.records.last?.configChanged)
+        XCTAssertEqual(h.pill.notices, [])
     }
 
     // MARK: - paste-last

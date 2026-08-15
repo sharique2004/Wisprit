@@ -23,14 +23,15 @@ final class ThemeTests: XCTestCase {
     func testTokenNamesAreUniqueAndComplete() {
         let names = Theme.Token.all.map(\.name)
         XCTAssertEqual(Set(names).count, names.count, "a duplicated token name is a silent override")
-        XCTAssertEqual(Theme.Token.all.count, 24)
+        XCTAssertEqual(Theme.Token.all.count, 25)
     }
 
     /// The pill floats over an unknown app's content, so its family must not
     /// move with the appearance (§1.2).
     func testTheStudioFamilyIsAppearanceIndependent() {
         for token in [Theme.Token.studio, Theme.Token.studioInk, Theme.Token.studioMuted,
-                          Theme.Token.studioStroke, Theme.Token.studioAlarm] {
+                          Theme.Token.studioStroke, Theme.Token.studioAlarm,
+                          Theme.Token.studioAttention] {
             XCTAssertEqual(token.light, token.dark, token.name)
             XCTAssertEqual(token.hex(dark: true), token.hex(dark: false), token.name)
         }

@@ -30,6 +30,8 @@ enum WispritMacMain {
             exit(runHotkeySmoke(arguments: Array(arguments.dropFirst())))
         case "insert":
             exit(runInsertSmoke(arguments: Array(arguments.dropFirst())))
+        case "pill-demo":
+            MainActor.assumeIsolated { PillDemo.run(arguments: Array(arguments.dropFirst())) }
         case "--version", "version":
             print("Wisprit \(WispritVersion.string)")
             exit(0)
@@ -60,6 +62,13 @@ enum WispritMacMain {
           Wisprit bootstrap       create ~/.wisprit and seed config + dictionary
           Wisprit hotkey [secs]   print hotkey events (needs WISPRIT_MANUAL_INPUT=1)
           Wisprit insert "text"   insert text after a 3 s countdown (same gate)
+
+        Development only (hidden — not part of the supported surface):
+
+          Wisprit pill-demo [--shots DIR]
+                                  walk the floating pill through every state on
+                                  synthetic level data; --shots writes one
+                                  screenshot per state
         """
 
     // MARK: - the app

@@ -10,9 +10,9 @@ import Foundation
 ///
 /// Two properties are load-bearing:
 ///
-/// - **Perceptual shaping.** A raw peak of 0.35 is a typical speech peak and
-///   the voiced floor is 0.02, so the interesting signal lives in the bottom
-///   third. `shaped` normalises against the reference and expands the quiet end
+/// - **Perceptual shaping.** A raw peak of 0.22 is a typical speech peak and
+///   the voiced floor is 0.01, so quiet speech still moves the bars. `shaped`
+///   normalises against the reference and expands the quiet end
 ///   with a 0.7 gamma, then quantises to 1/64 — a step small enough to be
 ///   invisible and large enough that mic hiss cannot produce a redraw.
 /// - **Silence is free.** `push` returns `false` once the incoming level and
@@ -20,8 +20,9 @@ import Foundation
 ///   main thread carries the CGEventTap; an idle-but-visible pill must cost
 ///   zero redraws or this redesign makes dictation worse.
 public struct WaveformBuffer: Equatable, Sendable {
-    /// Typical speech peak; the voiced floor is 0.02.
-    public static let levelReference = 0.35
+    /// Typical speech peak. Lower than the old 0.35 so quiet speech
+    /// (0.01–0.04 on the meter) still moves the bars.
+    public static let levelReference = 0.22
     /// Perceptual expansion of the quiet end.
     public static let gamma = 0.7
     /// Below this a push is a no-op.
@@ -71,7 +72,7 @@ public struct WaveformBuffer: Equatable, Sendable {
         return Array(values.suffix(max(0, n)))
     }
 
-    /// `clamp01(pow(clamp01(l / 0.35), 0.7))`, quantised to 1/64.
+    /// `clamp01(pow(clamp01(l / levelReference), 0.7))`, quantised to 1/64.
     ///
     /// NaN and infinity are silence rather than propagating into the frame
     /// maths — the same contract `PillGeometry.clampLevel` has had since the
