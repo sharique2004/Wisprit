@@ -124,6 +124,43 @@ public enum WindowSettings {
         }
     }
 
+    // MARK: - Bluetooth headset mic (`input_device_policy`)
+
+    /// `input_device_policy` — what to do about a narrowband Bluetooth
+    /// microphone. Raw values match `InputDevicePolicySettings` (`warn` |
+    /// `prefer_builtin` | `off`); unknown hand-edits fall back to `warn`
+    /// rather than being rewritten.
+    public enum InputDevicePolicyOption: String, Sendable, Equatable, CaseIterable {
+        case warn
+        case preferBuiltin = "prefer_builtin"
+        case off
+
+        public var label: String {
+            switch self {
+            case .warn: return "Warn once"
+            case .preferBuiltin: return "Prefer built-in mic"
+            case .off: return "Do nothing"
+            }
+        }
+
+        public var explanation: String {
+            switch self {
+            case .warn:
+                return "The first time a narrowband Bluetooth mic appears, Wisprit mentions "
+                    + "the trade-off once."
+            case .preferBuiltin:
+                return "While the default input is a narrowband Bluetooth mic, capture uses "
+                    + "the built-in microphone."
+            case .off:
+                return "Leave the system input alone, and do not warn."
+            }
+        }
+
+        public static func parse(_ raw: String) -> InputDevicePolicyOption {
+            InputDevicePolicyOption(rawValue: raw) ?? .warn
+        }
+    }
+
     // MARK: - History
 
     /// `history_limit` — the four sizes the menu offers.
@@ -173,6 +210,17 @@ public enum WindowSettings {
 
     public static func clampFinalizeTimeout(_ value: Int) -> Int {
         min(max(value, finalizeTimeoutRange.lowerBound), finalizeTimeoutRange.upperBound)
+    }
+
+    // `keyup_grace_ms` — string-keyed, like `ContextSettings`, not in
+    // `Settings.defaults`. 120 ms is `KeyupGraceSettings.defaultMs`; the
+    // session clamps anything over 500, so the slider does too.
+    public static let keyupGraceRange: ClosedRange<Int> = 0...500
+    public static let keyupGraceStep = 10
+    public static let keyupGraceDefault = KeyupGraceSettings.defaultMs
+
+    public static func clampKeyupGrace(_ value: Int) -> Int {
+        min(max(value, keyupGraceRange.lowerBound), keyupGraceRange.upperBound)
     }
 
     // MARK: - Gated sections (§3.6)
@@ -226,9 +274,11 @@ public enum WindowSettings {
     /// Every `Settings.defaults` key the Settings page writes. All of them
     /// already exist there; the page adds none, which is what keeps the on-disk
     /// key order stable for configs written by any build. (The context keys —
-    /// `ContextSettings` — are deliberately NOT here: they follow the
-    /// `LiveTypingSettings` string-key precedent, living outside the
-    /// golden-pinned defaults, and the file preserves keys it does not know.)
+    /// `ContextSettings` — and the engine-feature keys `keyup_grace_ms`,
+    /// `input_device_policy`, `vocabulary_retro` are deliberately NOT here:
+    /// they follow the `LiveTypingSettings` string-key precedent, living
+    /// outside the golden-pinned defaults, and the file preserves keys it
+    /// does not know.)
     public static let writtenKeys = [
         SettingsKey.hotkey,
         SettingsKey.holdDebounceMs,

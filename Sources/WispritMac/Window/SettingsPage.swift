@@ -149,6 +149,31 @@ struct SettingsPage: View {
                     readout("\(model.holdDebounceMs) ms")
                 }
             }
+            SectionRow("Keep listening after release",
+                       description: "Saves the last syllable that would otherwise be cut off "
+                           + "when you let go.") {
+                HStack(spacing: Theme.Space.s8) {
+                    Slider(value: intSlider(model.keyupGraceMs, model.setKeyupGraceMs),
+                           in: range(WindowSettings.keyupGraceRange),
+                           step: Double(WindowSettings.keyupGraceStep))
+                        .frame(width: 160)
+                    readout("\(model.keyupGraceMs) ms")
+                }
+            }
+            SectionRow("Bluetooth headset mic",
+                       description: model.inputDevicePolicy.explanation) {
+                Picker("", selection: binding(model.inputDevicePolicy,
+                                              model.setInputDevicePolicy)) {
+                    ForEach(WindowSettings.InputDevicePolicyOption.allCases, id: \.self) { option in
+                        Text(option.label).tag(option)
+                    }
+                }
+                .labelsHidden()
+                .frame(width: 200)
+            }
+            // `input_gain` — the engine side is being designed in parallel and
+            // will land its own key. Do not invent a live control for it.
+            // SectionRow("Input gain") { … }
             // A language menu is only a choice when there is more than one
             // installed voice; otherwise it is a control with one option.
             if model.facts.installedLocales.count > 1 {
@@ -172,6 +197,12 @@ struct SettingsPage: View {
             SectionRow("Remove filler words",
                        description: "Drops “um”, “uh” and “you know” from what gets inserted.") {
                 Toggle("", isOn: bind(model.fillerRemoval, model.setFillerRemoval))
+                    .labelsHidden()
+            }
+            SectionRow("Correct misheard dictionary terms",
+                       description: "After the words land, replace a dictionary term that "
+                           + "was misheard.") {
+                Toggle("", isOn: bind(model.vocabularyRetro, model.setVocabularyRetro))
                     .labelsHidden()
             }
             SectionRow("End sentences with a period") {

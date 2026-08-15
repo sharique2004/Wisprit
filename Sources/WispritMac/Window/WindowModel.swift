@@ -276,6 +276,9 @@ public final class WispritWindowModel: ObservableObject {
     @Published public private(set) var fillerRemoval = true
     @Published public private(set) var historyEnabled = true
     @Published public private(set) var holdDebounceMs = 150
+    /// `keyup_grace_ms` — how long the mic stays open after key-up so the last
+    /// syllable is not cut off. String-keyed; default 120, clamped 0…500.
+    @Published public private(set) var keyupGraceMs = WindowSettings.keyupGraceDefault
     @Published public private(set) var pasteRestoreDelayMs = 500
     // Surfaced for the first time by the redesigned Settings page (§3.6). Same
     // shape as the ones above: a read-only mirror, one explicit setter, one
@@ -289,6 +292,10 @@ public final class WispritWindowModel: ObservableObject {
     @Published public private(set) var historyLimit = 1000
     @Published public private(set) var finalizeTimeoutMs = 1500
     @Published public private(set) var engine: WindowSettings.EngineOption = .auto
+    /// `input_device_policy` — warn | prefer_builtin | off. String-keyed.
+    @Published public private(set) var inputDevicePolicy: WindowSettings.InputDevicePolicyOption = .warn
+    /// `vocabulary_retro` — on by default. String-keyed.
+    @Published public private(set) var vocabularyRetro = true
     /// The pill has been dragged somewhere. "Reset its position" is disabled
     /// when it has not.
     @Published public private(set) var hasPillPosition = false
@@ -837,6 +844,8 @@ public final class WispritWindowModel: ObservableObject {
         fillerRemoval = settings.fillerRemoval
         historyEnabled = settings.historyEnabled
         holdDebounceMs = WindowSettings.clampHoldDebounce(settings.holdDebounceMs)
+        keyupGraceMs = WindowSettings.clampKeyupGrace(
+            settings.int(KeyupGraceSettings.key, or: KeyupGraceSettings.defaultMs))
         pasteRestoreDelayMs = WindowSettings.clampPasteRestore(settings.pasteRestoreDelayMs)
         locale = settings.locale
         ensureSentencePeriod = settings.ensureSentencePeriod
@@ -848,6 +857,10 @@ public final class WispritWindowModel: ObservableObject {
         historyLimit = WindowSettings.clampHistoryLimit(settings.historyLimit)
         finalizeTimeoutMs = WindowSettings.clampFinalizeTimeout(settings.finalizeTimeoutMs)
         engine = WindowSettings.EngineOption.parse(settings.engine)
+        inputDevicePolicy = WindowSettings.InputDevicePolicyOption.parse(
+            settings.string(InputDevicePolicySettings.key,
+                            or: InputDevicePolicySettings.warn.rawValue))
+        vocabularyRetro = VocabularyRetroSettings.isEnabled(settings)
         hasPillPosition = settings.pillPosition != nil
         contextAwareness = ContextSettings.isEnabled(settings)
         contextDisabledByEnvironment = ContextEnvironment.isDisabled
@@ -911,6 +924,12 @@ public final class WispritWindowModel: ObservableObject {
         let clamped = WindowSettings.clampHoldDebounce(value)
         holdDebounceMs = clamped
         settings.set(SettingsKey.holdDebounceMs, clamped)
+    }
+
+    public func setKeyupGraceMs(_ value: Int) {
+        let clamped = WindowSettings.clampKeyupGrace(value)
+        keyupGraceMs = clamped
+        settings.set(KeyupGraceSettings.key, clamped)
     }
 
     public func setPasteRestoreDelayMs(_ value: Int) {
@@ -997,6 +1016,16 @@ public final class WispritWindowModel: ObservableObject {
     public func setEngine(_ value: WindowSettings.EngineOption) {
         engine = value
         settings.set(SettingsKey.engine, value.rawValue)
+    }
+
+    public func setInputDevicePolicy(_ value: WindowSettings.InputDevicePolicyOption) {
+        inputDevicePolicy = value
+        settings.set(InputDevicePolicySettings.key, value.rawValue)
+    }
+
+    public func setVocabularyRetro(_ value: Bool) {
+        vocabularyRetro = value
+        VocabularyRetroSettings.setEnabled(settings, value)
     }
 
     /// Put the pill back at the default bottom-centre spot. Writing `null` is

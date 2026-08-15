@@ -124,6 +124,11 @@ public protocol PillPort: Sendable {
     /// Empty utterance that is not a fault — silence, a miss, a short tap.
     /// Default degrades to a notice so older pills never alarm on it.
     func flashMissed(_ message: String)
+    /// The marginal-audio miss (2026-08-15): heard, too faint to read, and the
+    /// copy is an instruction rather than a label — so it needs the alarm
+    /// states' width and dwell without their alarm. Default degrades to
+    /// `flashMissed`, which still says a true (if clipped) thing.
+    func flashTooQuiet(_ message: String)
     func hide()
     /// The Flow-style resting bar. Default is `hide()` so an older pill
     /// still leaves the screen; the shipping pill stays put.
@@ -156,6 +161,7 @@ public extension PillPort {
     /// The message this state replaced, for a pill that predates it.
     func flashBlockedSecure() { flashError("secure field — press ⌘⌃V to paste") }
     func flashMissed(_ message: String) { transientNotice(message) }
+    func flashTooQuiet(_ message: String) { flashMissed(message) }
     func showIdle() { hide() }
 }
 

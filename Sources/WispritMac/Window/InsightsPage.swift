@@ -184,6 +184,147 @@ public enum InsightsMapper {
         default: return nil
         }
     }
+
+    static func string(_ row: JSONObject, _ key: String) -> String? {
+        guard case .string(let value)? = row[key] else { return nil }
+        return value
+    }
+
+    /// `true` / `1` — the same 0/1-era boolean `MetricsSummary` accepts.
+    static func isTrue(_ row: JSONObject, _ key: String) -> Bool {
+        switch row[key] {
+        case .bool(let value)?: return value
+        case .int(let value)?: return value != 0
+        default: return false
+        }
+    }
+
+    /// Recovery figures from the same `metrics.log` slice `input` already
+    /// summarized. Rescued count and empty reasons follow `window`; quiet
+    /// speech is always the last 7 days, as the caption names.
+    public static func recovery(rows: [JSONObject],
+                                window: MetricsWindow,
+                                now: Double) -> InsightsRecovery {
+        let summary = MetricsSummary.summarize(rows, window: window, now: now)
+        let rescued = utteranceRows(rows, window: window, now: now)
+            .filter(isRescued).count
+
+        let quietRows = utteranceRows(rows,
+                                      window: MetricsWindow(days: InsightsRecovery.quietSpeechDays),
+                                      now: now)
+        var quiet = 0, sample = 0
+        for row in quietRows {
+            guard let peak = number(row, InsightsRecovery.peakLevelKey) else { continue }
+            sample += 1
+            if peak < InsightsRecovery.quietPeakCeiling { quiet += 1 }
+        }
+
+        return InsightsRecovery(rescued: rescued,
+                                emptyReasons: summary.emptyReasons,
+                                unclassifiedEmpty: summary.unclassifiedEmpty,
+                                quietSpeech: quiet,
+                                quietSpeechSample: sample)
+    }
+
+    /// Utterance rows in `window`, through the same filter `MetricsSummary`
+    /// uses — `vocab_retro` / `edit_observed` / `onboarding` are not holds.
+    static func utteranceRows(_ rows: [JSONObject],
+                              window: MetricsWindow,
+                              now: Double) -> [JSONObject] {
+        MetricsSummary.windowed(rows, in: window, now: now).filter { row in
+            !MetricsSummary.nonUtteranceOutcomes.contains(string(row, "outcome") ?? "")
+        }
+    }
+
+    /// A rescued hold is `engine == apple_batch` or `rescued: true`. Counted
+    /// once when both are set, so a row that carries the flag and the engine
+    /// name is still one utterance.
+    static func isRescued(_ row: JSONObject) -> Bool {
+        string(row, "engine") == InsightsRecovery.appleBatchEngine
+            || isTrue(row, InsightsRecovery.rescuedKey)
+    }
+}
+
+// MARK: - Recovery
+
+/// Rescue / empty-reason / quiet-speech figures for the Insights Recovery
+/// section. Derived from `MetricsSummary` (empty reasons) plus a pass over the
+/// same windowed utterance rows (rescued, peak_level) — the view never parses
+/// `metrics.log`.
+public struct InsightsRecovery: Equatable, Sendable {
+    public static let sectionTitle = "Recovery"
+    public static let rescuedLabel = "Rescued utterances"
+    public static let rescuedDescription =
+        "Holds the batch engine recovered after live speech returned nothing."
+    public static let quietSpeechLabel = "Quiet speech"
+    public static let quietSpeechDescription =
+        "Share of holds in the last 7 days with a peak under 0.12."
+    public static let quietSpeechCaption =
+        "Speak a touch louder or raise input gain for best accuracy"
+    public static let unclassifiedFootnoteSuffix = " — logged before reasons existed"
+
+    /// The batch engine's on-disk name. A rescued hold writes this as `engine`.
+    public static let appleBatchEngine = "apple_batch"
+    public static let rescuedKey = "rescued"
+    public static let peakLevelKey = "peak_level"
+    /// Mid-utterance input switch — `EmptyReason.deviceChanged`.
+    public static let deviceChangedReason = "device_changed"
+    public static let quietPeakCeiling = 0.12
+    public static let quietShareAlarm = 0.20
+    public static let quietSpeechDays: Double = 7
+
+    public var rescued: Int
+    /// Classified `empty_reason` histogram, including `device_changed`. Never
+    /// merged with `unclassifiedEmpty`.
+    public var emptyReasons: [String: Int]
+    public var unclassifiedEmpty: Int
+    /// Last-7-day holds with `peak_level` present and under `quietPeakCeiling`.
+    public var quietSpeech: Int
+    /// Last-7-day holds that recorded `peak_level` at all. Missing is an
+    /// absence, not a quiet hold.
+    public var quietSpeechSample: Int
+
+    public init(rescued: Int = 0,
+                emptyReasons: [String: Int] = [:],
+                unclassifiedEmpty: Int = 0,
+                quietSpeech: Int = 0,
+                quietSpeechSample: Int = 0) {
+        self.rescued = rescued
+        self.emptyReasons = emptyReasons
+        self.unclassifiedEmpty = unclassifiedEmpty
+        self.quietSpeech = quietSpeech
+        self.quietSpeechSample = quietSpeechSample
+    }
+
+    public var quietSpeechShare: Double {
+        InsightsRecovery.share(quietSpeech, of: quietSpeechSample)
+    }
+
+    /// The caption fires only when the share *exceeds* 20%, not at the line.
+    public var showsQuietCaption: Bool {
+        quietSpeechSample > 0 && quietSpeechShare > InsightsRecovery.quietShareAlarm
+    }
+
+    /// Nothing to draw: hide the section rather than a plate of zeros.
+    public var isEmpty: Bool {
+        rescued == 0 && emptyReasons.isEmpty && unclassifiedEmpty == 0
+            && quietSpeechSample == 0
+    }
+
+    public var unclassifiedFootnote: String? {
+        unclassifiedEmpty > 0
+            ? "unclassified \(unclassifiedEmpty)\(Self.unclassifiedFootnoteSuffix)"
+            : nil
+    }
+
+    public static func share(_ part: Int, of total: Int) -> Double {
+        total > 0 ? Double(part) / Double(total) : 0
+    }
+
+    public static func percent(_ fraction: Double) -> String {
+        guard fraction.isFinite else { return "0.0%" }
+        return String(format: "%.1f%%", fraction * 100)
+    }
 }
 
 // MARK: - the page model
@@ -236,6 +377,10 @@ public final class InsightsPageModel {
     /// Nil until the first read lands — the page shows nothing rather than a
     /// window full of zeros it has not verified.
     public private(set) var input: InsightsInput?
+
+    /// Rescue / empty-reason / quiet-speech figures for the Recovery section.
+    /// Same read as `input`; nil until that read lands.
+    public private(set) var recovery: InsightsRecovery?
 
     /// The segmented control. Changing it re-summarizes the rows already in
     /// memory; it never re-reads the file.
@@ -294,11 +439,15 @@ public final class InsightsPageModel {
     }
 
     private func recompute() {
+        let now = ports.now()
         input = InsightsMapper.input(rows: rows,
                                      window: choice.window,
                                      dictionary: dictionary,
-                                     now: ports.now(),
+                                     now: now,
                                      calendar: ports.calendar())
+        recovery = InsightsMapper.recovery(rows: rows,
+                                           window: choice.window,
+                                           now: now)
     }
 }
 
@@ -396,6 +545,9 @@ struct InsightsPage: View {
                     ForEach(Array(grid.enumerated()), id: \.offset) { _, row in
                         gridRow(row)
                     }
+                    if let recovery = insights.recovery, !recovery.isEmpty {
+                        RecoverySection(recovery: recovery)
+                    }
                     if let footer = InsightsModel.footer(from: input) {
                         footerStrip(footer)
                     }
@@ -433,6 +585,72 @@ struct InsightsPage: View {
                 .foregroundStyle(Theme.inkTertiary)
         }
         .padding(.top, Theme.Space.s4)
+    }
+}
+
+/// Rescue count, empty-reason breakdown (including `device_changed`), and the
+/// quiet-speech share. Same `SectionGroup` / `SectionRow` vocabulary as
+/// Settings; machine `empty_reason` keys are mono (§1.4).
+private struct RecoverySection: View {
+    let recovery: InsightsRecovery
+
+    var body: some View {
+        SectionGroup(InsightsRecovery.sectionTitle,
+                     footnote: recovery.unclassifiedFootnote) {
+            if recovery.rescued > 0 {
+                SectionRow(InsightsRecovery.rescuedLabel,
+                           description: InsightsRecovery.rescuedDescription) {
+                    readout("\(recovery.rescued)")
+                }
+            }
+            ForEach(InsightsModel.ranked(recovery.emptyReasons)) { row in
+                HStack(alignment: .center, spacing: Theme.Space.s12) {
+                    Text(row.label)
+                        .font(Theme.font(Theme.Role.mono))
+                        .foregroundStyle(Theme.ink)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    Spacer(minLength: Theme.Space.s16)
+                    readout("\(row.count)")
+                }
+                .frame(minHeight: Theme.Size.rowHeight)
+                .overlay(alignment: .bottom) {
+                    Rectangle()
+                        .fill(Theme.hairline)
+                        .frame(height: 1)
+                }
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("\(row.label) \(row.count)")
+            }
+            if recovery.quietSpeechSample > 0 {
+                SectionRow(InsightsRecovery.quietSpeechLabel,
+                           description: InsightsRecovery.quietSpeechDescription) {
+                    readout(InsightsRecovery.percent(recovery.quietSpeechShare))
+                }
+            }
+            if recovery.showsQuietCaption {
+                Rectangle()
+                    .fill(Theme.hairline)
+                    .frame(height: 1)
+                HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s4) {
+                    Image(systemName: "exclamationmark.triangle")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.critical)
+                    Text(InsightsRecovery.quietSpeechCaption)
+                        .font(Theme.font(Theme.Role.caption))
+                        .foregroundStyle(Theme.critical)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    private func readout(_ value: String) -> some View {
+        Text(value)
+            .font(Theme.font(Theme.Role.mono))
+            .foregroundStyle(Theme.inkSecondary)
+            .monospacedDigit()
     }
 }
 
