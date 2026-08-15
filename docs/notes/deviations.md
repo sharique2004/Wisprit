@@ -509,3 +509,118 @@ be ashamed to hang at your side." → "…and a sword.") and was still `applied`
   `RefineGuards.plausible`; WispritPolish depends on WispritRefine). The tone
   modes are *supposed* to replace content words wholesale, so their bands stay
   the guard.
+
+## Backtrack + Smart Formatting (2026-08-14)
+
+Wispr Flow's cleanup layer is a cloud LLM. Wisprit keeps the deterministic
+path as the source of truth and extends it so the same spoken shapes resolve
+without waiting on Apple Intelligence — and still resolve when refine is off,
+skipped, or implausible.
+
+- **Compatible closed classes.** A bare number may correct a clock time
+  ("at 5 actually 6 pm" → "at 6 pm") and a weekday may correct a relative day
+  ("Friday actually tomorrow" → "tomorrow"). Weekday ↔ clock stays a veto.
+- **Parallel prepositional restatement.** "send it to marketing sorry to
+  finance" → "send it to finance". The repeated preposition is the evidence
+  that makes "sorry" / "actually" safe on arbitrary nouns.
+- **Same-frame restatement** requires a pause ("as a gift, as a present") so
+  two roles listed without hesitation ("as a child as a parent") stay
+  verbatim.
+- **New markers:** "I meant", "wait no"; retract-all "forget that" / "never
+  mind" (utterance-initial idiom readings stay verbatim).
+- **Sandwich-only connectives:** "wait" and "instead" fire only on
+  closed-class pairs ("Thursday wait Friday", "three instead five").
+- **Past-day restatement:** "yesterday" + pause + today/tonight/tomorrow
+  (or the reverse) keeps the later day when the survivor ends the
+  utterance or a prepositional tail. "today, tomorrow and Friday" and
+  "yesterday, tomorrow I'll fly" stay verbatim.
+- **Smart Formatting** (mid-utterance punctuation, numbered lists from
+  sequence+verb, "next line" / "press enter", messaging trailing-period,
+  context-aware mid-sentence casing, Flow punctuation names including
+  tilde / degree / trademark) is gated by `smartFormatting`, default
+  **OFF** in `PostProcessOptions()` so the Python goldens / fuzz stay a
+  differential net. The app opts in. Self-correction is still unconditional.
+  Spoken punctuation runs after emoji so "star emoji" stays a glyph.
+- **Snippets** live in `~/.wisprit/snippets.json` (`SnippetStore`), expanded
+  after postprocess on the session path. Dictionary page edits them.
+- **Release grace:** the app keeps the mic open 120 ms after key-up so the
+  in-flight tap buffer is not clipped. Tests leave the grace at 0.
+- **"Not X Y" restatement.** Same-utterance "the pet itself not a pet
+  pill" → "the pill itself". A follow-up that is only the cue
+  ("not a pet pill") retro-edits the earlier word when live typing
+  still owns the run. Function-word "not" ("I did not go") and
+  "X or not X" ("writing or not writing any code") stay.
+- **Empty pill is a miss, not an alarm.** Silence / produced-nothing /
+  a short hold flash `missed` (studio body, muted ink, flattened dots,
+  no warning glyph). Starved / timeout / crash still alarm.
+- **Persistent Flow bar.** The pill stays on the desktop as a compact
+  idle capsule (48 pt, five cream dots) and expands while you talk.
+  Success / miss / notice settle back to idle instead of hiding.
+  `pill_hidden` still removes it.
+- **Quiet speech.** `voicedPeakThreshold` and the dead-mic floor sit at
+  0.01 / 0.005 so a quiet speaker is not classified as silence and does
+  not get a "no audio" nag while they are still talking.
+- **Term echo.** A distinctive term already in the utterance
+  (HackerRank, InsForge) snaps a later ASR split of itself
+  ("had the rank", "inns forge") back to that spelling. "had the
+  rank of …" stays verbatim.
+- **Verb-form restatement.** "it was given, giving me" → "it was
+  giving me". Needs a be-auxiliary, a pause, and an -ed/-en vs
+  -ing pair that share a stem. "the driver, driving" and "we
+  shipped, shipping tomorrow" stay.
+- **Software-compound twin.** "function for holdback" → "function
+  for rollback" when the utterance is already about a
+  function/method or a HackerRank-style test. A financial
+  holdback stays.
+- **Release grace, R33 shape.** The 120 ms is now `keyup_grace_ms`
+  (`KeyupGraceSettings`, one definition; the app reads it at wiring time)
+  and is spent in ≤20 ms slices instead of one sleep: Esc aborts INSIDE the
+  grace (faster than the old Esc-during-finalize path — the utterance never
+  reaches the analyzer), a queued press cuts it short, and anything over
+  500 ms is clamped. `pill.showFinalizing()` now fires AFTER the grace, so
+  the pill never claims to be finalizing while the mic is still hot.
+- **Converter tail.** `PcmDownconverter.flush()` drains the resampler's
+  end-of-stream tail (240 frames at 48 kHz, 120 at 44.1 kHz — the delta
+  `PcmFormatTests` already pinned as missing) and `MicCapture.stop()`
+  delivers it as a final chunk. Skipped when the session delivered zero
+  bytes, so the wedged-mic "delivered no audio" log survives. The
+  converter is terminal after a flush.
+- **Microphone prestart (R33).** The mic opens on the hotkey tap's own
+  queue at KEY-DOWN, not in `SessionController.begin()`: a press queued
+  behind a busy pipeline used to lose 0.7–1.5 s of speech (worst case the
+  batch-rescue budget). `AsrManager.armCapture()` gates it — it refuses
+  while an utterance is still recording, so the mic is never started
+  un-armed — and `startUtterance()` now PRESERVES an armed retention
+  buffer so the existing head replay splices the pre-roll into the new
+  engine. Key-up stops a prestarted mic (`isRecordingUtterance` false), so
+  "mic live only while the key is held" still holds for the queued press.
+  `MicCapture.start()` is idempotent; `start`/`stop` are serialized.
+- **Clipboard custody is asynchronous (R33; revokes an R6 pin).** The
+  500 ms restore window moved off the session thread onto a static serial
+  custody queue shared by every `Inserter`, with a barrier before the next
+  snapshot and a required drain at quit. Consequences: `insert()`'s paste
+  detail is now `restore scheduled` (the restored / failed / changed-
+  externally strings became log lines), `restore_ms` collapses to ~0 while
+  the field stays, and `repress_queued` — sampled at delivery — is now
+  near-constant false. `InserterTests`' synchronous-restore assertions
+  ("the restore semantics are unchanged") were rewritten around a gated
+  drain; the ordering they pinned is now guaranteed by the queue.
+- **Mid-utterance device switch is visible (2026-08-05, finally).**
+  `MicCapture` reports the reconfiguration to `AsrManager`, which stamps
+  `UtteranceResult.sawConfigurationChange` on the value `finalize()`
+  returns (both the streaming and batch-only paths). It adds one rescue
+  trigger — clean AND non-empty, i.e. a silent truncation; bare
+  `configurationChanged` would batch-transcribe a silent hold and break
+  the b0a763f rule — a `device_changed` empty-reason (after `starved`,
+  before the level clause), a `config_changed` metrics field (appended
+  last, omitted when nil), and a post-delivery pill notice on the
+  NON-empty case, which is the one the rescue cannot fix: the post-switch
+  audio was never captured.
+- **Input device policy.** `input_device_policy` = `warn` (default) |
+  `prefer_builtin` | `off`. Narrowband = classic Bluetooth under 32 kHz
+  (HFP/SCO: CVSD 8 k, mSBC 16 k, the incident's 24 k); Bluetooth LE is
+  deliberately exempt. `warn` shows one pill notice per device appearance,
+  AFTER `showRecording()` (from `.prewarming` the pill would flash success
+  and then wipe the bubble). `prefer_builtin` pins the AUHAL to the
+  built-in input, best-effort, and only while the default input is
+  narrowband classic-BT. `wisprit doctor` gains a warn-only input row.

@@ -831,3 +831,251 @@ battery 0.9485 (3/3 passes identical) — zero violations, zero drift.
 above cell-for-cell (same transcripts — the cache key held, which is itself
 the A-1 provenance property doing its job). `WISPRIT_REHEARSAL=1` battery
 0.9485 against floor 0.8885.
+
+## 2026-08-15T09:54:59Z — tts-samantha/all — apple_live — `refine=off,dict=off`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `0aa75ab` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| final | 54 | 484 | 56 | 11.57% | 7.16% | 0.056 | 0.333 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 31.71% | 0.000 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 18.64% | 0.000 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 12.24% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 5.88% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 19.51% | — | 0.00% |
+| self-correction | 10 | 5.13% | — | 0.00% |
+| long-form | 1 | 16.67% | 0.000 | 0.00% |
+
+## 2026-08-15T09:54:59Z — tts-samantha/all — apple_live — `refine=off,dict=on`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `0aa75ab` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| final | 54 | 484 | 39 | 8.06% | 6.11% | 0.444 | 0.389 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 14.63% | 0.500 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 13.56% | 0.250 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 10.20% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 5.88% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 19.51% | — | 0.00% |
+| self-correction | 10 | 2.56% | — | 0.00% |
+| long-form | 1 | 5.56% | 1.000 | 0.00% |
+
+## 2026-08-15T09:56:35Z — tts-samantha/all — apple_live — `refine=on,dict=off`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `0aa75ab` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 65 | 13.43% | 10.27% | 0.222 | 0.352 | 0.00% |
+| final | 54 | 484 | 44 | 9.09% | 5.60% | 0.222 | 0.389 | 0.00% |
+
+Refine battery: **0.948** (weighted)
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 31.71% | 0.000 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 6.78% | 0.750 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 12.24% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 2.94% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 9.76% | — | 0.00% |
+| self-correction | 10 | 5.13% | — | 0.00% |
+| long-form | 1 | 16.67% | 0.000 | 0.00% |
+
+## 2026-08-15T09:57:04Z — tts-samantha/all — apple_live — `refine=on,dict=on`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `0aa75ab` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 65 | 13.43% | 10.27% | 0.222 | 0.352 | 0.00% |
+| final | 54 | 484 | 30 | 6.20% | 4.98% | 0.556 | 0.426 | 0.00% |
+
+Refine battery: **0.948** (weighted)
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 14.63% | 0.500 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 6.78% | 0.750 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 10.20% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 2.94% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 9.76% | — | 0.00% |
+| self-correction | 10 | 2.56% | — | 0.00% |
+| long-form | 1 | 5.56% | 1.000 | 0.00% |
+
+## 2026-08-15T09:57:13Z — tts-samantha/all — apple_live — `refine=off,dict=off`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `0aa75ab` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| final | 54 | 484 | 56 | 11.57% | 7.16% | 0.056 | 0.333 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 31.71% | 0.000 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 18.64% | 0.000 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 12.24% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 5.88% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 19.51% | — | 0.00% |
+| self-correction | 10 | 5.13% | — | 0.00% |
+| long-form | 1 | 16.67% | 0.000 | 0.00% |
+
+## 2026-08-15T09:57:13Z — tts-samantha/all — apple_live — `refine=off,dict=on`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `0aa75ab` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| final | 54 | 484 | 39 | 8.06% | 6.11% | 0.444 | 0.389 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 14.63% | 0.500 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 13.56% | 0.250 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 10.20% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 5.88% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 19.51% | — | 0.00% |
+| self-correction | 10 | 2.56% | — | 0.00% |
+| long-form | 1 | 5.56% | 1.000 | 0.00% |
+
+## 2026-08-15T09:58:49Z — tts-samantha/all — apple_live — `refine=on,dict=off`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `0aa75ab` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 65 | 13.43% | 10.27% | 0.222 | 0.352 | 0.00% |
+| final | 54 | 484 | 44 | 9.09% | 5.60% | 0.222 | 0.389 | 0.00% |
+
+Refine battery: **0.948** (weighted)
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 31.71% | 0.000 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 6.78% | 0.750 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 12.24% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 2.94% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 9.76% | — | 0.00% |
+| self-correction | 10 | 5.13% | — | 0.00% |
+| long-form | 1 | 16.67% | 0.000 | 0.00% |
+
+## 2026-08-15T09:59:18Z — tts-samantha/all — apple_live — `refine=on,dict=on`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `0aa75ab` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 65 | 13.43% | 10.27% | 0.222 | 0.352 | 0.00% |
+| final | 54 | 484 | 30 | 6.20% | 4.98% | 0.556 | 0.426 | 0.00% |
+
+Refine battery: **0.948** (weighted)
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 14.63% | 0.500 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 6.78% | 0.750 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 10.20% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 2.94% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 9.76% | — | 0.00% |
+| self-correction | 10 | 2.56% | — | 0.00% |
+| long-form | 1 | 5.56% | 1.000 | 0.00% |
