@@ -50,6 +50,31 @@ public final class Inserter: @unchecked Sendable {
         "com.mitchellh.ghostty",
     ]
 
+    /// Where the post-⌘V clipboard custody window is served.
+    ///
+    /// R33: that window is a `sleep(500 ms)` and it used to run on the SESSION
+    /// thread, after delivery — which meant a user who re-pressed the hotkey
+    /// immediately had the microphone held shut for half a second by clipboard
+    /// hygiene that had nothing to do with them. Moving it here keeps the
+    /// semantics (snapshot, wait, restore only if `changeCount` still says the
+    /// write is ours) and takes the wait off the path to the next utterance.
+    ///
+    /// Serial, and STATIC because there is more than one `Inserter`: the window
+    /// paste path builds its own (`AppController.pasteFromWindow`), and two
+    /// instances restoring the pasteboard concurrently is precisely the "it
+    /// pasted my old clipboard" bug. One queue, one custody order, whoever asks.
+    private static let custodyQueue = DispatchQueue(label: "wisprit.clipboard-custody")
+
+    /// Wait out any restore still pending, from any `Inserter`.
+    ///
+    /// Required at quit (`AppController.terminate`): the restore is asynchronous
+    /// now, so a quit inside the custody window would otherwise leave the user's
+    /// clipboard holding our dictation forever — a permanent loss the old
+    /// on-thread sleep made impossible.
+    public static func drainClipboardCustody() {
+        custodyQueue.sync {}
+    }
+
     private let ports: InsertPorts
     private let log = WLog.logger("insert")
 
@@ -146,6 +171,17 @@ public final class Inserter: @unchecked Sendable {
         insert(text, config: configProvider())
     }
 
+    /// Post Return after a successful insert, or alone when the utterance
+    /// was only "press enter". Failures are silent — the text (if any) already
+    /// landed, and a missed Enter is recoverable.
+    public func pressReturn() {
+        do {
+            try ports.postReturn()
+        } catch {
+            log.error("press enter failed: \(String(describing: error), privacy: .public)")
+        }
+    }
+
     // --- typed unicode injection (terminals) ----------------------------------
 
     private func typeUnicode(_ text: String) throws {
@@ -162,6 +198,11 @@ public final class Inserter: @unchecked Sendable {
                                    config: InserterConfig,
                                    bundle: String?,
                                    onDelivered: () -> Void) throws -> InsertResult {
+        // Barrier before the snapshot: if a previous paste's restore is still
+        // pending, the pasteboard currently holds OUR text, not the user's.
+        // Snapshotting through it would capture the dictation and then restore
+        // it later as if it were the user's clipboard.
+        Inserter.custodyQueue.sync {}
         let snapshot = ports.pasteboardSnapshot()
         ports.pasteboardClearContents()
         // Declare both the string type and the transient marker so clipboard
@@ -181,17 +222,34 @@ public final class Inserter: @unchecked Sendable {
         // billed to `release_to_text_ms` or delay the success flash (R6).
         let deliveredAt = MonotonicClock.now()
         onDelivered()
-        ports.sleep(config.effectiveRestoreDelayMs / 1000.0)
 
-        var detail: String
-        if ports.pasteboardChangeCount() == ourChangeCount {
-            detail = ports.pasteboardRestore(snapshot) ? "clipboard restored" : "clipboard restore failed"
-        } else {
-            // Another app (a clipboard manager?) mutated the pasteboard
-            // meanwhile; restoring now would clobber THEIR write.
-            detail = "clipboard changed externally; restore skipped"
-            log.warning("pasteboard changeCount moved during paste window; not restoring")
+        // Custody, off this thread. Everything below the ⌘V is hygiene the user
+        // never waits for, and the caller of this function is the session
+        // thread — the same thread the NEXT utterance needs to open its
+        // microphone on. The delay, the changeCount re-read and the restore all
+        // move together so the decision is still made at the END of the window,
+        // never before it.
+        let delay = config.effectiveRestoreDelayMs / 1000.0
+        let ports = self.ports
+        let log = self.log
+        Inserter.custodyQueue.async {
+            ports.sleep(delay)
+            guard ports.pasteboardChangeCount() == ourChangeCount else {
+                // Another app (a clipboard manager?) mutated the pasteboard
+                // meanwhile; restoring now would clobber THEIR write.
+                log.warning("pasteboard changeCount moved during paste window; not restoring")
+                return
+            }
+            if !ports.pasteboardRestore(snapshot) {
+                log.warning("clipboard restore failed")
+            }
         }
+
+        // CONTRACT-DEVIATION (R33): the detail no longer reports the restore's
+        // OUTCOME, because at return there isn't one yet. The R6-era strings
+        // ("clipboard restored" / "restore failed" / "changed externally") are
+        // now log lines; `restore scheduled` is the honest thing to say here.
+        var detail = "restore scheduled"
         if let bundle { detail = "\(detail) (target \(bundle))" }
         return InsertResult(ok: true, method: .paste, detail: detail,
                             deliveredAtMonotonic: deliveredAt)

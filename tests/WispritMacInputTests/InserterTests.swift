@@ -145,6 +145,13 @@ final class InserterTests: XCTestCase {
     }
 
     // --- clipboard dance --------------------------------------------------------
+    //
+    // R33 moved everything after ⌘V — the delay, the changeCount re-read and the
+    // restore — onto a serial custody queue, so `insert` returns at delivery.
+    // The ORDER is unchanged and still the thing under test; `drainCustody()` is
+    // how a test waits for the second half instead of guessing at a sleep.
+
+    private func drainCustody() { Inserter.drainClipboardCustody() }
 
     func testClipboardCascadeOrderAndRestore() {
         let ports = FakeInsertPorts()
@@ -152,11 +159,20 @@ final class InserterTests: XCTestCase {
         ports.snapshotItems = [[PasteboardEntry(type: "public.utf8-plain-text",
                                                 data: Data("old".utf8))]]
         ports.changeCountScript = [12, 12]   // nobody else touched it
+        // The fake's `sleep` is instantaneous, so without this the custody half
+        // can finish before the assertions below read `ops` — the gate is what
+        // makes "synchronous up to ⌘V" a fact rather than a race.
+        let gate = DispatchSemaphore(value: 0)
+        ports.sleepGate = gate
         let result = Inserter(ports: ports).insert("hello", config: config(delayMs: 500))
 
         XCTAssertTrue(result.ok)
         XCTAssertEqual(result.method, .paste)
-        XCTAssertEqual(result.detail, "clipboard restored (target com.apple.Notes)")
+        // The detail names what is TRUE at return: the restore has not happened
+        // yet, so it can no longer report an outcome (the R6-era
+        // restored/failed/skipped strings are log lines now).
+        XCTAssertEqual(result.detail, "restore scheduled (target com.apple.Notes)")
+        // Everything up to and including the paste is synchronous.
         XCTAssertEqual(ports.ops, [
             .secureProbe,
             .trustProbe,
@@ -167,11 +183,76 @@ final class InserterTests: XCTestCase {
             .setString("hello", type: "public.utf8-plain-text"),
             .changeCount,                                 // ours, AFTER the write
             .commandV,
+        ])
+
+        gate.signal()
+        drainCustody()
+        // …and the custody half runs in the same order it always did, with the
+        // changeCount re-read still at the END of the window, never before it.
+        XCTAssertEqual(Array(ports.ops.suffix(3)), [
             .sleep(0.5),
             .changeCount,                                 // still ours?
             .restore(items: 1),
         ])
         XCTAssertEqual(ports.writtenString, "hello")
+    }
+
+    /// The reason the window moved off the session thread: it used to hold the
+    /// microphone shut for half a second after every dictation.
+    func testInsertReturnsBeforeTheRestoreHasRun() {
+        let ports = FakeInsertPorts()
+        let gate = DispatchSemaphore(value: 0)
+        ports.sleepGate = gate
+
+        let result = Inserter(ports: ports).insert("hello", config: config(delayMs: 500))
+
+        XCTAssertTrue(result.ok, "delivery is complete at return")
+        XCTAssertFalse(ports.ops.contains { if case .restore = $0 { return true } else { return false } },
+                       "the restore has not run — insert() no longer waits for it")
+        gate.signal()
+        drainCustody()
+        XCTAssertTrue(ports.ops.contains(.restore(items: 0)))
+    }
+
+    /// Two pastes in a row: the second must not snapshot a pasteboard that is
+    /// still holding the FIRST one's dictation, or it would "restore" our own
+    /// text as if it were the user's clipboard.
+    func testASecondPasteSnapshotsOnlyAfterTheFirstRestore() {
+        let first = FakeInsertPorts()
+        let gate = DispatchSemaphore(value: 0)
+        first.sleepGate = gate
+        _ = Inserter(ports: first).insert("one", config: config(delayMs: 500))
+
+        let second = FakeInsertPorts()
+        let started = DispatchSemaphore(value: 0)
+        let finished = DispatchSemaphore(value: 0)
+        DispatchQueue.global().async {
+            started.signal()
+            _ = Inserter(ports: second).insert("two", config: self.config(delayMs: 0))
+            finished.signal()
+        }
+        started.wait()
+        // The barrier is holding the second paste: nothing of it has happened.
+        XCTAssertEqual(finished.wait(timeout: .now() + 0.2), .timedOut)
+        XCTAssertFalse(second.ops.contains(.snapshot),
+                       "the second snapshot waits out the first restore")
+
+        gate.signal()
+        XCTAssertEqual(finished.wait(timeout: .now() + 5), .success)
+        XCTAssertTrue(first.ops.contains(.restore(items: 0)))
+        XCTAssertTrue(second.ops.contains(.snapshot))
+        drainCustody()
+    }
+
+    /// A quit inside the custody window must not leave our dictation on the
+    /// user's clipboard forever — the one thing the old on-thread sleep made
+    /// impossible for free.
+    func testDrainClipboardCustodyWaitsOutAPendingRestore() {
+        let ports = FakeInsertPorts()
+        _ = Inserter(ports: ports).insert("hello", config: config(delayMs: 0))
+        Inserter.drainClipboardCustody()
+        XCTAssertTrue(ports.ops.contains(.restore(items: 0)),
+                      "the drain is a barrier, not a hint")
     }
 
     /// The transient marker is what keeps Maccy/Paste out of the user's
@@ -186,6 +267,8 @@ final class InserterTests: XCTestCase {
         XCTAssertEqual(Inserter.transientPasteboardType, "org.nspasteboard.TransientType")
     }
 
+    /// The changeCount guard survives the move: it is still read at the end of
+    /// the window, and a clipboard manager's write still wins.
     func testExternalPasteboardChangeSkipsRestore() {
         let ports = FakeInsertPorts()
         ports.bundleID = "com.apple.Notes"
@@ -194,24 +277,29 @@ final class InserterTests: XCTestCase {
         let result = Inserter(ports: ports).insert("hello", config: config())
 
         XCTAssertTrue(result.ok)
-        XCTAssertEqual(result.detail, "clipboard changed externally; restore skipped (target com.apple.Notes)")
-        XCTAssertFalse(ports.ops.contains { if case .restore = $0 { return true } else { return false } })
+        XCTAssertEqual(result.detail, "restore scheduled (target com.apple.Notes)")
+        drainCustody()
+        XCTAssertFalse(ports.ops.contains { if case .restore = $0 { return true } else { return false } },
+                       "a foreign write still cancels the restore")
     }
 
-    func testFailedRestoreIsReportedButStillOK() {
+    func testFailedRestoreStillLeavesTheInsertSuccessful() {
         let ports = FakeInsertPorts()
         ports.bundleID = "com.apple.Notes"
         ports.restoreSucceeds = false
         let result = Inserter(ports: ports).insert("hello", config: config())
-        XCTAssertTrue(result.ok)
-        XCTAssertEqual(result.detail, "clipboard restore failed (target com.apple.Notes)")
+        XCTAssertTrue(result.ok, "the text landed; custody hygiene cannot fail a delivery")
+        XCTAssertEqual(result.detail, "restore scheduled (target com.apple.Notes)")
+        drainCustody()
+        XCTAssertTrue(ports.ops.contains(.restore(items: 0)), "it was attempted")
     }
 
     func testUnknownFrontmostOmitsTargetSuffix() {
         let ports = FakeInsertPorts()
         ports.bundleID = nil
         let result = Inserter(ports: ports).insert("hello", config: config())
-        XCTAssertEqual(result.detail, "clipboard restored")
+        XCTAssertEqual(result.detail, "restore scheduled")
+        drainCustody()
     }
 
     /// A failed write left the pasteboard empty — the old contents must go back
@@ -234,6 +322,7 @@ final class InserterTests: XCTestCase {
         ports.snapshotItems = []
         let result = Inserter(ports: ports).insert("hello", config: config())
         XCTAssertTrue(result.ok)
+        drainCustody()
         XCTAssertTrue(ports.ops.contains(.restore(items: 0)))
     }
 
@@ -246,6 +335,7 @@ final class InserterTests: XCTestCase {
         ]
         ports.snapshotItems = snapshot
         _ = Inserter(ports: ports).insert("hello", config: config())
+        drainCustody()
         XCTAssertTrue(ports.ops.contains(.restore(items: 2)))
         XCTAssertEqual(ports.restored, snapshot)
     }
@@ -264,6 +354,7 @@ final class InserterTests: XCTestCase {
     func testRestoreDelayComesFromConfig() {
         let ports = FakeInsertPorts()
         _ = Inserter(ports: ports).insert("hello", config: config(delayMs: 120))
+        drainCustody()
         XCTAssertEqual(ports.sleeps, [0.12])
     }
 
@@ -271,6 +362,7 @@ final class InserterTests: XCTestCase {
         for bad: Double? in [nil, -1, -0.001, .nan, .infinity] {
             let ports = FakeInsertPorts()
             _ = Inserter(ports: ports).insert("hello", config: config(delayMs: bad))
+            drainCustody()
             XCTAssertEqual(ports.sleeps, [0.5], "delay \(String(describing: bad))")
         }
         XCTAssertEqual(Inserter.defaultRestoreDelayMs, 500)
@@ -279,6 +371,7 @@ final class InserterTests: XCTestCase {
     func testZeroRestoreDelayIsAllowed() {
         let ports = FakeInsertPorts()
         _ = Inserter(ports: ports).insert("hello", config: config(delayMs: 0))
+        drainCustody()
         XCTAssertEqual(ports.sleeps, [0])
     }
 
@@ -287,9 +380,17 @@ final class InserterTests: XCTestCase {
     /// The core of R6: the delivery hook fires after ⌘V is posted and BEFORE
     /// the restore sleep — the success flash it carries can no longer trail
     /// the pasted text by the length of the custody window.
+    ///
+    /// R33 revokes the second half of R6's pin ("the restore semantics are
+    /// unchanged"): the sleep and the restore now happen on the custody queue,
+    /// so they are asserted after a drain rather than at return. The ORDERING
+    /// this test exists for — hook after ⌘V, strictly before the sleep — is
+    /// unchanged and is now guaranteed by the queue instead of by the stack.
     func testPasteDeliveryHookFiresAfterCommandVAndBeforeTheRestoreSleep() {
         let ports = FakeInsertPorts()
         ports.bundleID = "com.apple.Notes"
+        let gate = DispatchSemaphore(value: 0)
+        ports.sleepGate = gate
         var deliveredCount = 0
         let result = Inserter(ports: ports).insert("hello", config: config(delayMs: 500)) {
             deliveredCount += 1
@@ -300,7 +401,9 @@ final class InserterTests: XCTestCase {
         XCTAssertEqual(deliveredCount, 1)
         XCTAssertNotNil(result.deliveredAtMonotonic,
                         "the paste rung stamps the delivery instant for the metric split")
-        XCTAssertEqual(ports.sleeps, [0.5], "the restore semantics are unchanged")
+        gate.signal()
+        drainCustody()
+        XCTAssertEqual(ports.sleeps, [0.5], "the restore delay itself is unchanged")
         XCTAssertTrue(ports.ops.contains(.restore(items: 0)))
     }
 
@@ -347,6 +450,7 @@ final class InserterTests: XCTestCase {
         _ = inserter.insert("a") { self.config(delayMs: delay) }
         delay = 250
         _ = inserter.insert("b") { self.config(delayMs: delay) }
+        drainCustody()
         XCTAssertEqual(ports.sleeps, [0.1, 0.25])
     }
 

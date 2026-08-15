@@ -35,12 +35,26 @@ public final class AsrManager: @unchecked Sendable {
     private let batch: (any BatchTranscribing)?
     private let vocabularyChannel: VocabularyChannel?
 
+    /// Where this manager is in one utterance's life. It exists because the
+    /// microphone no longer starts and stops in lockstep with `begin`/`finalize`
+    /// (R33 opens it at key-down, possibly while the PREVIOUS utterance is still
+    /// finalizing), so "is a live utterance recording right now" stopped being
+    /// derivable from `primaryStarted` alone.
+    private enum Phase { case idle, recording, finalizing }
+
     private let lock = UnfairLock()
     private var primary: (any AsrEngine)?
     private var primaryStarted = false
     private let retention = PcmRetentionBuffer()
     private var utteranceID: UInt64 = 0
     private var lastRetainedValue = RetainedUtterance(id: 0, pcm: Data())
+    private var phase: Phase = .idle
+    /// The retention buffer is holding the NEXT utterance's pre-roll: audio
+    /// captured between key-down and the `begin()` that will adopt it. The one
+    /// flag that stops `startUtterance()` throwing that pre-roll away.
+    private var captureArmed = false
+    /// The audio hardware was reconfigured under this utterance's capture.
+    private var configurationChanged = false
 
     public init(settings: AsrSettings,
                 vocabulary: (any VocabularySource)? = nil,
@@ -104,25 +118,44 @@ public final class AsrManager: @unchecked Sendable {
     public func feed(pcm: Data) {
         lock.lock()
         retention.append(pcm)
-        let engine = primaryStarted ? primary : nil
+        // `phase == .recording` is the engine hand-off gate, not just
+        // `primaryStarted`: during the previous utterance's `await engine
+        // .finalize()` the started flag is still up (it only drops when
+        // `setPrimary` runs), so a pre-roll chunk for the NEXT utterance would
+        // otherwise be handed to an engine that is mid-finalize. It happens to
+        // be harmless for `SpeechAnalyzerEngine` — its `finalize` takes the
+        // state first, so `feed` no-ops — but that is a private detail of one
+        // engine, and this makes the guarantee hold for every `AsrEngine` and
+        // every test fake.
+        let engine = (primaryStarted && phase == .recording) ? primary : nil
         lock.unlock()
         engine?.feed(pcm: pcm)
     }
 
     public func finalize() async -> UtteranceResult {
-        let retained = detachRetention()
+        let (retained, configChanged) = detachRetention()
+        // The snapshot above legally frees the buffer for the next utterance:
+        // from here a queued press may arm its own pre-roll, and this
+        // utterance's audio is a value nobody can move.
+        setPhase(.finalizing)
 
         if let engine = currentPrimary, primaryIsStarted {
             let result = await engine.finalize()
             setPrimary(nil, started: false)
-            guard Self.needsRescue(result) else { return result }
-            return await rescue(result, pcm: retained.pcm)
+            setPhase(.idle)
+            guard Self.needsRescue(result, configurationChanged: configChanged) else {
+                return Self.stamping(result, configurationChanged: configChanged)
+            }
+            return Self.stamping(await rescue(result, pcm: retained.pcm),
+                                 configurationChanged: configChanged)
         }
 
         // Batch-only path (engine override, or the primary never started).
         setPrimary(nil, started: false)
-        return await runBatch(retained.pcm)
+        setPhase(.idle)
+        let batch = await runBatch(retained.pcm)
             ?? UtteranceResult(text: "", engine: "none", finalizeMs: 0, timedOut: true)
+        return Self.stamping(batch, configurationChanged: configChanged)
     }
 
     public func cancel() async {
@@ -130,7 +163,52 @@ public final class AsrManager: @unchecked Sendable {
         setPrimary(nil, started: false)
         await engine?.cancel()
         retention.reset()
+        lock.lock()
+        phase = .idle
+        // A cancelled utterance takes any armed pre-roll with it: the audio it
+        // held belonged to an utterance the user threw away.
+        captureArmed = false
+        configurationChanged = false
+        lock.unlock()
         clearRetained()
+    }
+
+    /// Open the retention buffer for a pre-roll and say whether the caller may
+    /// start the microphone.
+    ///
+    /// Returns false — and starts nothing — while an utterance is still
+    /// RECORDING (a press landing between key-up and `finalize`'s detach: the
+    /// fast-flick window). That refusal is the whole safety argument for
+    /// starting the mic from the hotkey hook: an un-armed prestart would reset
+    /// the live session's `startedAtNs`/`firstVoicedMs` mid-telemetry-read and
+    /// would then have its pre-roll silently discarded by `startUtterance`.
+    /// The second of two queued presses is refused by `captureArmed` for the
+    /// same reason: one pre-roll, one utterance.
+    @discardableResult
+    public func armCapture() -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        guard phase != .recording, !captureArmed else { return false }
+        // Drops the ≤100 ms tail chunk a just-stopped capture may still have
+        // landed here, so the next utterance's head starts clean.
+        retention.reset()
+        configurationChanged = false
+        captureArmed = true
+        return true
+    }
+
+    /// Is a live utterance recording right now? The microphone's owner: while
+    /// this is true the session thread stops the mic (through `finish`), and
+    /// while it is false a key-up may stop a prestarted one.
+    public var isRecordingUtterance: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return phase == .recording
+    }
+
+    /// The audio hardware reconfigured under the current capture. Called from
+    /// `MicCapture`'s notification observer — lock-only, no I/O.
+    public func noteConfigurationChange() {
+        lock.lock(); configurationChanged = true; lock.unlock()
     }
 
     /// Off-path reconciliation over ONE utterance's audio. Call AFTER the live
@@ -150,22 +228,60 @@ public final class AsrManager: @unchecked Sendable {
     // MARK: - internals
 
     private func startUtterance() {
-        retention.reset()
-        lock.lock(); utteranceID &+= 1; lock.unlock()
+        lock.lock()
+        // An ARMED buffer is this utterance's pre-roll — the audio captured
+        // between key-down and here — and `begin`'s head replay is about to
+        // splice it into the new engine. Resetting it unconditionally (as this
+        // did before R33) is precisely how the head of a re-pressed utterance
+        // used to vanish. The same rule governs the device-change flag: a
+        // reconfiguration during the pre-roll belongs to THIS utterance.
+        let armed = captureArmed
+        if !armed {
+            retention.reset()
+            configurationChanged = false
+        }
+        captureArmed = false
+        phase = .recording
+        utteranceID &+= 1
+        lock.unlock()
     }
 
     /// Take this utterance's audio out of the live buffer in one step. The audio
     /// side has already been stopped by the time finalize runs, so the read and
     /// the reset see the same bytes; what matters is that nothing after this
     /// point can reach the buffer the next `begin()` will refill.
-    private func detachRetention() -> RetainedUtterance {
+    ///
+    /// The device-change flag rides out with it, read inside the same critical
+    /// section: a notification landing a moment later belongs to the next
+    /// utterance's capture and must not be attributed to this one.
+    private func detachRetention() -> (RetainedUtterance, Bool) {
         let pcm = retention.data
         retention.reset()
         lock.lock()
         let retained = RetainedUtterance(id: utteranceID, pcm: pcm)
         lastRetainedValue = retained
+        let changed = configurationChanged
+        configurationChanged = false
         lock.unlock()
-        return retained
+        return (retained, changed)
+    }
+
+    private func setPhase(_ newPhase: Phase) {
+        lock.lock(); phase = newPhase; lock.unlock()
+    }
+
+    /// Stamp the device-change fact on the value the caller is about to see.
+    ///
+    /// Centrally, on the result `finalize` actually returns, and never inside
+    /// `rescue()`/`runBatch()`'s field lists: those construct fresh
+    /// `UtteranceResult`s, and a flag set there would be dropped on whichever
+    /// path did not get the edit.
+    private static func stamping(_ result: UtteranceResult,
+                                 configurationChanged: Bool) -> UtteranceResult {
+        guard configurationChanged else { return result }
+        var stamped = result
+        stamped.sawConfigurationChange = true
+        return stamped
     }
 
     /// A cancelled utterance has no audio to hand anyone — say so rather than
@@ -210,8 +326,19 @@ public final class AsrManager: @unchecked Sendable {
     /// insert nothing — the b0a763f rule, still load-bearing. `peakLevel` is
     /// what makes the distinction possible at all: MEASURED, 3 s of digital
     /// silence yields zero results, exactly like a wedged analyzer does.
-    static func needsRescue(_ result: UtteranceResult) -> Bool {
+    ///
+    /// `configurationChanged` adds one trigger and only one: a clean, NON-empty
+    /// finish over a capture the audio hardware died under. That result is a
+    /// truncation — the engine stopped itself at the switch (2026-08-05) — and
+    /// it is the one shape `needsRescue` could not see, because a prefix that
+    /// reads cleanly looks exactly like a success. The clause is deliberately
+    /// `&& !text.isEmpty`: bare `configurationChanged` would batch-transcribe a
+    /// silent hold and break the b0a763f silence rule, and the empty-and-voiced
+    /// case is already covered by the peak clause above.
+    static func needsRescue(_ result: UtteranceResult,
+                            configurationChanged: Bool = false) -> Bool {
         if result.crashed || result.timedOut || result.producedNothing { return true }
+        if configurationChanged && !result.text.isEmpty { return true }
         return result.text.isEmpty
             && result.peakLevel >= SpeechAnalyzerEngine.voicedPeakThreshold
     }

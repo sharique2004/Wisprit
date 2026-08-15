@@ -19,6 +19,13 @@ public enum EmptyReason: String, Sendable, CaseIterable {
     /// Less than one 100 ms chunk of audio ever reached the analyzer. The
     /// capture side, not the engine, produced the emptiness.
     case starved
+    /// The audio hardware was reconfigured mid-hold (the default input changed,
+    /// or its format did). The engine stopped itself at the switch, so an empty
+    /// result says nothing about the user or the analyzer — the microphone died
+    /// under them. Ranked above `silent` because a dead capture explains an
+    /// empty better than a quiet meter does: the peak this hold measured is the
+    /// peak of the fragment before the switch.
+    case deviceChanged = "device_changed"
     /// Audio arrived but never rose above the voiced threshold across a hold
     /// long enough to speak in: the user did not speak. Benign.
     case silent
@@ -45,6 +52,9 @@ public enum EmptyReason: String, Sendable, CaseIterable {
         if result.crashed { return .crashed }
         if result.timedOut { return .timedOut }
         if result.starvedInput { return .starved }
+        // After starvation (which names the capture side precisely) and before
+        // the level clause (whose evidence the switch invalidated).
+        if result.sawConfigurationChange { return .deviceChanged }
         if result.peakLevel < SpeechAnalyzerEngine.voicedPeakThreshold {
             return heldMs < shortHoldMs ? .shortHold : .silent
         }

@@ -40,6 +40,8 @@ public protocol InsertPorts: AnyObject, Sendable {
     func typeUnicode(_ chunk: String, utf16Units: Int) throws
     /// Post ⌘V (virtual keycode 9 + command flag) to `kCGHIDEventTap`.
     func postCommandV() throws
+    /// Post Return (virtual keycode 36) — Flow's "press enter".
+    func postReturn() throws
     /// Blocking sleep on the calling (session) thread.
     func sleep(_ seconds: Double)
 

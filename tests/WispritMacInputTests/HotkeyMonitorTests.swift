@@ -49,6 +49,75 @@ final class HotkeyMonitorTests: XCTestCase {
         XCTAssertEqual(queue.getNowait()?.kind, .cancel)
     }
 
+    // --- R33: the key-down / key-up hooks ---------------------------------------
+    //
+    // The microphone prestart hangs off these. They bypass the queue on purpose
+    // (the session thread can be seconds deep in the previous utterance), so
+    // what matters is that they fire for exactly the right emits and never
+    // ahead of the enqueue that keeps dictation events in order.
+
+    func testPressHookFiresOnPressEmitsOnly() {
+        let queue = HotkeyEventQueue()
+        let monitor = HotkeyMonitor(queue: queue, trigger: .fn)
+        let presses = Counter()
+        let releases = Counter()
+        monitor.onPress = { presses.bump() }
+        monitor.onRelease = { releases.bump() }
+
+        monitor.apply(HotkeyDecision(emits: [.press]))
+        XCTAssertEqual(presses.value, 1)
+        XCTAssertEqual(releases.value, 0)
+
+        for emit in [HotkeyEventKind.esc, .cancel, .pasteLast] {
+            monitor.apply(HotkeyDecision(emits: [emit]))
+        }
+        monitor.apply(.ignore)
+        XCTAssertEqual(presses.value, 1, "only a press starts a microphone")
+        XCTAssertEqual(releases.value, 0)
+    }
+
+    func testReleaseHookFiresOnReleaseEmits() {
+        let monitor = HotkeyMonitor(queue: HotkeyEventQueue(), trigger: .fn)
+        let releases = Counter()
+        monitor.onRelease = { releases.bump() }
+        monitor.apply(HotkeyDecision(emits: [.release]))
+        XCTAssertEqual(releases.value, 1, "key-up closes a prestarted microphone")
+    }
+
+    /// The hooks are an addition to the queue, never a replacement: the session
+    /// must still see every event, in order, whether or not anything is hooked.
+    func testHooksDoNotDisturbTheQueue() {
+        let queue = HotkeyEventQueue()
+        let monitor = HotkeyMonitor(queue: queue, trigger: .fn)
+        let seen = Counter()
+        monitor.onPress = {
+            // The enqueue happens first, so the session's view of the world is
+            // never behind the hook's.
+            seen.set(queue.count)
+        }
+        monitor.apply(HotkeyDecision(emits: [.press]))
+        XCTAssertEqual(seen.value, 1, "the press was queued before the hook ran")
+        XCTAssertEqual(queue.getNowait()?.kind, .press)
+    }
+
+    /// A monitor with no hooks assigned is exactly the monitor that shipped
+    /// before them.
+    func testUnhookedMonitorStillEnqueues() {
+        let queue = HotkeyEventQueue()
+        HotkeyMonitor(queue: queue, trigger: .fn).apply(HotkeyDecision(emits: [.press, .release]))
+        XCTAssertEqual(queue.getNowait()?.kind, .press)
+        XCTAssertEqual(queue.getNowait()?.kind, .release)
+    }
+
+    /// Minimal thread-safe tally — the hooks are `@Sendable`.
+    final class Counter: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        func bump() { lock.lock(); count += 1; lock.unlock() }
+        func set(_ value: Int) { lock.lock(); count = value; lock.unlock() }
+        var value: Int { lock.lock(); defer { lock.unlock() }; return count }
+    }
+
     func testUninstallWithoutInstallIsANoop() {
         let monitor = HotkeyMonitor(queue: HotkeyEventQueue(), trigger: .fn)
         monitor.uninstall()

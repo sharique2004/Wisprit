@@ -39,7 +39,10 @@ final class DispatchTests: XCTestCase {
         XCTAssertEqual(client.document as String, "Hi Sharique.")
         XCTAssertEqual(events, [
             .clientAcquired(client.capabilities),
-            .editResult(.applied(note: "Sharik → Sharique")),
+            // The applied-location echo survives the payload round trip too —
+            // it is the app-side mirror's only source of truth about where the
+            // input method actually put the correction.
+            .editResult(.applied(note: "Sharik → Sharique", appliedUtf16LocationInCommitted: 3)),
         ])
     }
 

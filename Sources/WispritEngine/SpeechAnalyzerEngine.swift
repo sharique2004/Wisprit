@@ -115,7 +115,7 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
     /// Peak `PcmFormat.level` (RMS × 4, clamped) below which the utterance is
     /// treated as "the user did not speak". Digital silence measures exactly 0
     /// and normal speech 0.1–1.0, so this only has to clear room tone.
-    static let voicedPeakThreshold: Float = 0.02
+    static let voicedPeakThreshold: Float = 0.01
 
     /// Poll slice for the progress-aware finalize wait. Small enough that the
     /// stall detector reacts inside the budget, large enough that a result
@@ -268,7 +268,7 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
     ///   cooldown spike S1 explicitly rejected.
     /// * a non-empty volatile. The meter is a THRESHOLD on a physical signal, so
     ///   a low-gain mic (or a quiet speaker on a distant array) can sit under
-    ///   0.02 while the analyzer is transcribing perfectly well. When the
+    ///   the meter floor while the analyzer is transcribing perfectly well. When the
     ///   analyzer itself emitted words, arguing about the microphone's level is
     ///   absurd: its own output is the better evidence, and requiring the meter
     ///   too meant a quiet user's utterance was dropped with a volatile in hand.

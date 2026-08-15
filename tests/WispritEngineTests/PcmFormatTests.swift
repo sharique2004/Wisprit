@@ -87,6 +87,86 @@ final class PcmFormatTests: XCTestCase {
         XCTAssertEqual(frames, 79_880, "5 s at 16 kHz minus a single 120-frame filter delay")
     }
 
+    // MARK: - end-of-stream flush (the keyup tail)
+    //
+    // The two tests above pin what a streamed conversion LOSES: 240 frames at
+    // 48 kHz, 120 at 44.1 kHz, held inside the converter's resampler at stream
+    // end. `MicCapture.stop()` used to drop that on the floor along with the
+    // undelivered tap buffer — word-final audio, every single utterance.
+
+    func testFlushRecoversTheResamplerTail() {
+        let src = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000,
+                                channels: 1, interleaved: false)!
+        let converter = PcmDownconverter(from: src)!
+        var frames = 0
+        for chunk in 0..<10 {   // the same 1 s the streaming test uses
+            frames += converter.convert(floatBuffer(frames: 4_800, sampleRate: 48_000, hz: 440,
+                                                    phaseOffset: chunk * 4_800)).count / 2
+        }
+        XCTAssertEqual(frames, 15_760, "the streamed total is unchanged")
+        frames += converter.flush().count / 2
+        XCTAssertEqual(Double(frames), 16_000, accuracy: 16,
+                       "flush returns the 240-frame filter delay: a full second of audio")
+    }
+
+    func testFlushRecoversTheResamplerTailAt44k() {
+        let src = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 44_100,
+                                channels: 1, interleaved: false)!
+        let converter = PcmDownconverter(from: src)!
+        var frames = 0
+        for chunk in 0..<50 {   // 5 s
+            frames += converter.convert(floatBuffer(frames: 4_410, sampleRate: 44_100, hz: 440,
+                                                    phaseOffset: chunk * 4_410)).count / 2
+        }
+        XCTAssertEqual(frames, 79_880)
+        frames += converter.flush().count / 2
+        XCTAssertEqual(Double(frames), 80_000, accuracy: 16, "the 120-frame tail at 44.1 kHz")
+    }
+
+    /// The tail is SIGNAL, not padding: it is the last few ms of the last word.
+    func testFlushedTailCarriesSignal() {
+        let src = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000,
+                                channels: 1, interleaved: false)!
+        let converter = PcmDownconverter(from: src)!
+        for chunk in 0..<10 {
+            _ = converter.convert(floatBuffer(frames: 4_800, sampleRate: 48_000, hz: 440,
+                                              phaseOffset: chunk * 4_800))
+        }
+        let tail = converter.flush()
+        XCTAssertFalse(tail.isEmpty)
+        // A 0.5-amplitude sine reads ≈1.0 on the ×4-and-clamp meter even after
+        // the resampler's edge decay; anything over 0.5 is unambiguously audio.
+        XCTAssertGreaterThan(PcmFormat.level(of: tail), 0.5, "real samples, not zeros")
+    }
+
+    /// A passthrough converter holds no filter state, so it has no tail — and
+    /// must not fabricate one.
+    func testFlushOnCanonicalPassthroughIsEmpty() {
+        XCTAssertEqual(PcmDownconverter(from: PcmFormat.canonical)!.flush(), Data())
+    }
+
+    /// The wedged-microphone diagnostic depends on this: if a drain of a
+    /// never-fed converter emitted priming zeros, `deliveredBytes` would go
+    /// non-zero and "microphone delivered no audio" would stop being logged.
+    func testFlushWithoutInputIsEmpty() {
+        let src = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000,
+                                channels: 1, interleaved: false)!
+        XCTAssertEqual(PcmDownconverter(from: src)!.flush(), Data())
+    }
+
+    /// `AVAudioConverter` is terminal after `.endOfStream`. The instance must
+    /// refuse to be reused rather than emit corrupt audio.
+    func testFlushIsTerminal() {
+        let src = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 48_000,
+                                channels: 1, interleaved: false)!
+        let converter = PcmDownconverter(from: src)!
+        _ = converter.convert(floatBuffer(frames: 4_800, sampleRate: 48_000, hz: 440))
+        XCTAssertFalse(converter.flush().isEmpty)
+        XCTAssertEqual(converter.flush(), Data(), "one flush per instance")
+        XCTAssertEqual(converter.convert(floatBuffer(frames: 4_800, sampleRate: 48_000, hz: 440)),
+                       Data(), "and no feeding it afterwards")
+    }
+
     func testDownconverterIsAPassthroughForCanonicalInput() {
         let pcm = sineData(frames: 1_600, hz: 440, sampleRate: 16_000)
         let buffer = PcmFormat.buffer(from: pcm, in: PcmFormat.canonical)!

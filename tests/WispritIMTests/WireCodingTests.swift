@@ -10,6 +10,8 @@ final class WireCodingTests: XCTestCase {
         .updateVolatile(generation: 2, tail: "the quick bro"),
         .commitFinal(generation: 3, text: "The quick brown fox 👋"),
         .applyEdit(generation: 4, replace: "Sharik", with: "Sharique"),
+        .applyEdit(generation: 9, replace: "fox", with: "cat", utf16LocationInCommitted: 2),
+        .applyEdit(generation: 10, replace: "👋", with: "hi", utf16LocationInCommitted: 0),
         .endSession(generation: 5, commit: true),
         .endSession(generation: 6, commit: false),
     ]
@@ -22,6 +24,10 @@ final class WireCodingTests: XCTestCase {
         .clientLost(generation: 2, reason: "deactivateServer"),
         .editResult(generation: 3, .applied(note: "Sharik → Sharique")),
         .editResult(generation: 4, .failed(.fieldChanged, note: "user typed")),
+        .editResult(generation: 9, .applied(note: "fox → cat",
+                                            appliedUtf16LocationInCommitted: 2)),
+        .editResult(generation: 10, .applied(note: "at the very start",
+                                             appliedUtf16LocationInCommitted: 0)),
     ]
 
     private let reads: [IMReadMessage] = [
@@ -177,6 +183,73 @@ final class WireCodingTests: XCTestCase {
                                        kind: .command,
                                        json: Data("not json".utf8))
         XCTAssertThrowsError(try payload.command())
+    }
+
+    // MARK: The retro-edit anchor, in both directions across an update window
+
+    /// An old `WispritIM.app` in `~/Library/Input Methods` and a new app, or
+    /// the reverse: only one of them has the anchor field, and both have to
+    /// keep typing. These two types stand in for the older build's view.
+    private struct LegacyEdit: Codable, Equatable {
+        var replace: String
+        var with: String
+        var occurrence: String
+    }
+
+    private struct LegacyEditResult: Codable, Equatable {
+        var ok: Bool
+        var detail: String
+        var note: String
+    }
+
+    /// OLD APP → NEW IM. The old build has no such property, so it emits
+    /// exactly these bytes: no key at all. Pinning that the key is OMITTED
+    /// rather than written as `null` is what makes this test the old encoder.
+    func testAMessageWithoutAnAnchorOmitsTheKeyAndDecodesToNil() throws {
+        let edit = IMEdit(replace: "Sharik", with: "Sharique")
+        let json = try String(decoding: JSONEncoder().encode(edit), as: UTF8.self)
+        XCTAssertFalse(json.contains("utf16LocationInCommitted"),
+                       "an absent anchor puts nothing on the wire: \(json)")
+
+        let decoded = try JSONDecoder().decode(IMEdit.self, from: Data(json.utf8))
+        XCTAssertNil(decoded.utf16LocationInCommitted, "a missing key is 'no opinion', not an error")
+        XCTAssertEqual(decoded, edit)
+
+        let result = try JSONEncoder().encode(IMEditResult.applied(note: "x"))
+        XCTAssertFalse(String(decoding: result, as: UTF8.self)
+                           .contains("appliedUtf16LocationInCommitted"))
+        XCTAssertNil(try JSONDecoder().decode(IMEditResult.self, from: result)
+                         .appliedUtf16LocationInCommitted)
+    }
+
+    /// NEW APP → OLD IM. The extra key is dropped by a decoder that has never
+    /// heard of it, so the stale input method still applies the edit — by the
+    /// last occurrence, which is the behaviour it always had.
+    func testAnOlderBuildDropsTheAnchorKeyInsteadOfFailingToDecode() throws {
+        let anchored = try JSONEncoder().encode(
+            IMEdit(replace: "fox", with: "cat", utf16LocationInCommitted: 2))
+        XCTAssertEqual(try JSONDecoder().decode(LegacyEdit.self, from: anchored),
+                       LegacyEdit(replace: "fox", with: "cat", occurrence: "last"))
+
+        let echoed = try JSONEncoder().encode(
+            IMEditResult.applied(note: "fox → cat", appliedUtf16LocationInCommitted: 2))
+        XCTAssertEqual(try JSONDecoder().decode(LegacyEditResult.self, from: echoed),
+                       LegacyEditResult(ok: true, detail: "applied", note: "fox → cat"))
+    }
+
+    /// The reason the anchor is a FIELD and not an `Occurrence` case, pinned so
+    /// the next person to want "the first one" does not reach for the enum: a
+    /// raw value an old build cannot represent throws at the door and fails the
+    /// whole `applyEdit` closed on every stale install, while an added optional
+    /// field degrades to the behaviour that build already had. Which is also
+    /// why the write channel does not move.
+    func testTheOccurrenceEnumStaysTheOneCaseOldInputMethodsKnow() {
+        XCTAssertEqual(IMEdit.Occurrence.allCases.map(\.rawValue), ["last"])
+        XCTAssertEqual(WispritIMWire.writeChannelVersion, 1,
+                       "an additive optional field is not an incompatible change")
+        XCTAssertEqual(try? WispritIMPayload(command: .applyEdit(
+            generation: 1, replace: "fox", with: "cat",
+            utf16LocationInCommitted: 2)).wireVersion, 1)
     }
 
     func testEditDetailsAreStableStringsBecauseTheyLandInMetrics() {

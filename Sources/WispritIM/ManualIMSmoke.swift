@@ -163,6 +163,15 @@ public enum ManualIMSmoke {
             ("commit 'jumped over Sharik. '", .commitFinal(generation: generation, text: "jumped over Sharik. ")),
             ("retro-edit Sharik → Sharique",
              .applyEdit(generation: generation, replace: "Sharik", with: "Sharique")),
+            // The anchored case, which is the one you have to WATCH to believe:
+            // "Sharik" now appears twice in the run, and the offset says which.
+            // "The quick brown fox jumped over Sharique. " is 42 UTF-16 units,
+            // so the first of the two below sits at 42 and the second at 54.
+            ("commit 'Sharik one, Sharik two. '",
+             .commitFinal(generation: generation, text: "Sharik one, Sharik two. ")),
+            ("retro-edit the FIRST Sharik (anchor 42)",
+             .applyEdit(generation: generation, replace: "Sharik", with: "Sharique",
+                        utf16LocationInCommitted: 42)),
             ("end (commit)", .endSession(generation: generation, commit: true)),
         ]
 
@@ -178,8 +187,11 @@ public enum ManualIMSmoke {
         emit("\nEvents received:")
         for event in events.all { emit("  \(event.event)") }
         emit("\nCheck the TextEdit window: it should read")
-        emit("  \"The quick brown fox jumped over Sharique. \"")
-        emit("and ⌘Z should remove it a chunk at a time, not a letter at a time.")
+        emit("  \"The quick brown fox jumped over Sharique. Sharique one, Sharik two. \"")
+        emit("Note WHICH of the last two changed: the anchored edit fixed the FIRST")
+        emit("\"Sharik\" and left the second alone. Before the anchor existed the wire")
+        emit("could only say \"the last one\", and this line read \"Sharik one, Sharique two.\"")
+        emit("⌘Z should still remove it a chunk at a time, not a letter at a time.")
         return true
     }
 

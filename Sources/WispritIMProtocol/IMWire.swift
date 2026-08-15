@@ -98,9 +98,10 @@ public struct IMClientCapabilities: Codable, Sendable, Equatable {
 // MARK: - Edits
 
 /// A retroactive correction: "the word you already committed is wrong, here is
-/// the right one". Deliberately expressed as *text*, not as a range — the IM
-/// re-reads the live document and computes the range itself, because any offset
-/// the app cached can be stale by the time it arrives (the user may have typed).
+/// the right one". Deliberately expressed as *text*, not as a document range —
+/// the IM re-reads the live document and computes the range itself, because any
+/// document offset the app cached can be stale by the time it arrives (the user
+/// may have typed).
 public struct IMEdit: Codable, Sendable, Equatable {
     public enum Occurrence: String, Codable, Sendable, Equatable, CaseIterable {
         /// The last occurrence inside the text THIS session committed.
@@ -110,11 +111,39 @@ public struct IMEdit: Codable, Sendable, Equatable {
     public var replace: String
     public var with: String
     public var occurrence: Occurrence
+    /// WHICH occurrence the app meant, as a UTF-16 offset into the run this
+    /// session committed — never into the document, which the app cannot see.
+    ///
+    /// One IM session deliberately spans consecutive utterances, so a word
+    /// appearing twice inside its committed run is the ordinary case, and
+    /// `.last` alone cannot express "the first one". The caller knows the exact
+    /// position (the vocabulary planner computes it to slice `replace` out of
+    /// the inserted text); this is the field that stops it being thrown away.
+    ///
+    /// CONTRACT: a HINT, never an instruction. The input method validates it
+    /// against its own committed record and falls back to the backwards search
+    /// when it does not hold — the app-side mirror can skew, and a stale number
+    /// must degrade to today's behaviour rather than rewrite the wrong words.
+    /// nil = no opinion, resolve by `occurrence`.
+    ///
+    /// WIRE COMPATIBILITY — why an optional FIELD and not a new `Occurrence`
+    /// case. Commands cross as JSON inside `WispritIMPayload`, so an added key
+    /// is dropped by an older decoder and a missing key decodes to nil
+    /// (synthesized `decodeIfPresent`): additive fields are compatible in both
+    /// directions. A new enum RAW VALUE is not — it throws inside a stale
+    /// `WispritIM.app` still sitting in `~/Library/Input Methods` and fails the
+    /// whole `applyEdit` closed, on every old install, during the update
+    /// window. An old input method therefore ignores this and edits the last
+    /// occurrence, which is the status quo rather than a new failure — which is
+    /// why `writeChannelVersion` stays 1.
+    public var utf16LocationInCommitted: Int?
 
-    public init(replace: String, with: String, occurrence: Occurrence = .last) {
+    public init(replace: String, with: String, occurrence: Occurrence = .last,
+                utf16LocationInCommitted: Int? = nil) {
         self.replace = replace
         self.with = with
         self.occurrence = occurrence
+        self.utf16LocationInCommitted = utf16LocationInCommitted
     }
 }
 
@@ -153,15 +182,32 @@ public struct IMEditResult: Codable, Sendable, Equatable {
     public var detail: IMEditDetail
     /// Optional human note for the log (never shown in the field).
     public var note: String
+    /// Where the replacement ACTUALLY happened, as a UTF-16 offset into the
+    /// input method's committed record — the echo the app's mirror rewrites at.
+    ///
+    /// It exists because the offset the app sent is only a hint: when the IM
+    /// refuses it and falls back to the last occurrence, a mirror that rewrote
+    /// itself at the sent offset would silently diverge from the IM's record,
+    /// poisoning every later anchor in the session AND making the wire-v2
+    /// `committedSnapshot` diff read Wisprit's own fix as a user edit.
+    ///
+    /// nil on every failure, and on a success from an input method older than
+    /// this field — in which case the app falls back to its own backwards
+    /// search, which is exactly what that build did internally.
+    public var appliedUtf16LocationInCommitted: Int?
 
-    public init(ok: Bool, detail: IMEditDetail, note: String = "") {
+    public init(ok: Bool, detail: IMEditDetail, note: String = "",
+                appliedUtf16LocationInCommitted: Int? = nil) {
         self.ok = ok
         self.detail = detail
         self.note = note
+        self.appliedUtf16LocationInCommitted = appliedUtf16LocationInCommitted
     }
 
-    public static func applied(note: String = "") -> IMEditResult {
-        IMEditResult(ok: true, detail: .applied, note: note)
+    public static func applied(note: String = "",
+                               appliedUtf16LocationInCommitted: Int? = nil) -> IMEditResult {
+        IMEditResult(ok: true, detail: .applied, note: note,
+                     appliedUtf16LocationInCommitted: appliedUtf16LocationInCommitted)
     }
 
     public static func failed(_ detail: IMEditDetail, note: String = "") -> IMEditResult {
@@ -259,9 +305,12 @@ public struct IMCommandMessage: IMWireMessage, Equatable {
     public static func applyEdit(generation: UInt64,
                                  replace: String,
                                  with: String,
-                                 occurrence: IMEdit.Occurrence = .last) -> IMCommandMessage {
+                                 occurrence: IMEdit.Occurrence = .last,
+                                 utf16LocationInCommitted: Int? = nil) -> IMCommandMessage {
         IMCommandMessage(generation: generation,
-                         command: .applyEdit(IMEdit(replace: replace, with: with, occurrence: occurrence)))
+                         command: .applyEdit(IMEdit(replace: replace, with: with,
+                                                    occurrence: occurrence,
+                                                    utf16LocationInCommitted: utf16LocationInCommitted)))
     }
 
     public static func endSession(generation: UInt64, commit: Bool) -> IMCommandMessage {

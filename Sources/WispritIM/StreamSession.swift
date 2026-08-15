@@ -380,14 +380,20 @@ public final class IMStreamSession {
         switch plan {
         case .abort(let detail):
             return failure(generation, detail, note: "\(edit.replace) → \(edit.with)")
-        case .replace(let range, let text, let newCommitted, let newRange):
+        case .replace(let range, let text, let newCommitted, let newRange, let appliedLocation):
             guard client.insertText(text, replacement: range) else {
                 return failure(generation, .noClient, note: "insertText refused")
             }
             committedText = newCommitted
             committedRange = newRange
             lastDetail = .applied
-            return .editResult(generation: generation, .applied(note: "\(edit.replace) → \(edit.with)"))
+            // Echo where it landed, not where we were asked to land: when the
+            // anchor was refused and the backwards fallback resolved the
+            // target, this is the only way the app's mirror can stay
+            // byte-identical to `committedText`.
+            return .editResult(generation: generation,
+                               .applied(note: "\(edit.replace) → \(edit.with)",
+                                        appliedUtf16LocationInCommitted: appliedLocation))
         }
     }
 

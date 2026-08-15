@@ -64,7 +64,7 @@ final class EmptyReasonTests: XCTestCase {
         run([
             Case(name: "held long, said nothing", peak: 0, heldMs: 2_000, expected: .silent),
             Case(name: "fumbled tap", peak: 0, heldMs: 400, expected: .shortHold),
-            Case(name: "room tone under the threshold", peak: 0.0199, heldMs: 2_000,
+            Case(name: "room tone under the threshold", peak: 0.009, heldMs: 2_000,
                  expected: .silent),
             Case(name: "exactly at the hold boundary is not short", peak: 0,
                  heldMs: 1_000, expected: .silent),
@@ -76,7 +76,7 @@ final class EmptyReasonTests: XCTestCase {
     /// The residue: nothing benign applies, so the engine ate real speech.
     func testAudibleSpeechWithACleanFinishIsTheDefect() {
         run([
-            Case(name: "at the voiced threshold", peak: 0.02, heldMs: 2_000,
+            Case(name: "at the voiced threshold", peak: 0.01, heldMs: 2_000,
                  expected: .producedNothing),
             Case(name: "normal speech", peak: 0.41, heldMs: 3_500,
                  expected: .producedNothing),
@@ -105,12 +105,58 @@ final class EmptyReasonTests: XCTestCase {
                        .producedNothing)
     }
 
+    // MARK: device change (2026-08-05)
+
+    /// The five empty rows of the incident: the hardware reconfigured mid-hold,
+    /// the engine stopped itself, and every one of them logged as an ordinary
+    /// silent user. `device_changed` is what makes them readable.
+    func testAChangedDeviceExplainsAnEmptyBetterThanSilenceDoes() {
+        let switched = UtteranceResult(text: "", engine: "apple_live", finalizeMs: 1_500,
+                                       peakLevel: 0.001, sawConfigurationChange: true)
+        XCTAssertEqual(EmptyReason.classify(result: switched, heldMs: 2_400), .deviceChanged,
+                       "the peak this hold measured is the peak of the fragment before the switch")
+    }
+
+    /// Ordering: a crash, a timeout and starvation each explain the emptiness
+    /// completely on their own, so they still outrank it.
+    func testStarvationAndEngineFailuresOutrankTheDeviceChange() {
+        func result(_ mutate: (inout UtteranceResult) -> Void) -> UtteranceResult {
+            var r = UtteranceResult(text: "", engine: "apple_live", finalizeMs: 100,
+                                    peakLevel: 0.4, sawConfigurationChange: true)
+            mutate(&r)
+            return r
+        }
+        XCTAssertEqual(EmptyReason.classify(result: result { $0.crashed = true }, heldMs: 2_000), .crashed)
+        XCTAssertEqual(EmptyReason.classify(result: result { $0.timedOut = true }, heldMs: 2_000), .timedOut)
+        XCTAssertEqual(EmptyReason.classify(result: result { $0.starvedInput = true }, heldMs: 2_000), .starved)
+    }
+
+    /// A short fumbled tap over a device switch is still the switch's story:
+    /// the mic died, and telling the user to "hold the key while you speak"
+    /// would be advice about the wrong problem.
+    func testTheDeviceChangeOutranksTheLevelClauseBothWays() {
+        let quiet = UtteranceResult(text: "", engine: "apple_live", finalizeMs: 90,
+                                    peakLevel: 0, sawConfigurationChange: true)
+        XCTAssertEqual(EmptyReason.classify(result: quiet, heldMs: 400), .deviceChanged)
+        XCTAssertEqual(EmptyReason.classify(result: quiet, heldMs: 4_000), .deviceChanged)
+    }
+
+    /// Nothing to explain: a result WITH text is not an empty, however the
+    /// hardware behaved. (What that case needs is the truncation notice on the
+    /// delivered path, not an empty-reason row.)
+    func testATruncatedButNonEmptyResultIsNotClassified() {
+        let truncated = UtteranceResult(text: "half a sentence", engine: "apple_live",
+                                        finalizeMs: 90, peakLevel: 0.5,
+                                        sawConfigurationChange: true)
+        XCTAssertNil(EmptyReason.classify(result: truncated, heldMs: 2_000))
+    }
+
     // MARK: on-disk vocabulary
 
     func testRawValuesAreTheOnDiskVocabulary() {
         XCTAssertEqual(EmptyReason.allCases.map(\.rawValue),
-                       ["timed_out", "crashed", "starved", "silent",
-                        "short_hold", "produced_nothing"])
+                       ["timed_out", "crashed", "starved", "device_changed",
+                        "silent", "short_hold", "produced_nothing"])
     }
 
     func testDefaultedFieldsKeepEveryOlderConstructionSiteHonest() {

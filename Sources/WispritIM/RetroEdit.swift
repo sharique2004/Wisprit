@@ -20,7 +20,13 @@ public struct IMDocumentWindow: Sendable, Equatable {
 public enum RetroEditPlan: Sendable, Equatable {
     /// Apply exactly one `insertText:replacementRange:` over an absolute range,
     /// and then remember this as the session's committed text.
-    case replace(range: NSRange, text: String, newCommitted: String, newCommittedRange: NSRange)
+    ///
+    /// `appliedUtf16LocationInCommitted` is where the replacement lands
+    /// *relative to the committed run* — the value that travels back to the app
+    /// so its mirror rewrites the same characters this plan does, whether the
+    /// anchor was honoured or the backwards fallback resolved it.
+    case replace(range: NSRange, text: String, newCommitted: String, newCommittedRange: NSRange,
+                 appliedUtf16LocationInCommitted: Int)
     /// Do nothing. The caller reports the reason and the app falls back to a
     /// non-destructive path (learn the term, tell the user) rather than guessing
     /// at a range and mangling the user's writing.
@@ -35,6 +41,15 @@ public enum RetroEditPlan: Sendable, Equatable {
 /// Every plan therefore starts from a fresh read and only proceeds when the text
 /// this session committed is still findable, unambiguously, in the live document.
 /// Anything less certain aborts.
+///
+/// WHICH occurrence is a separate question from WHERE the run is, and it has
+/// its own rule. `edit.utf16LocationInCommitted` names the instance the caller
+/// meant, measured inside our own committed run; it is honoured only when the
+/// record still bears it out, and otherwise the pre-anchor last-occurrence
+/// search resolves the target. One session spans consecutive utterances, so a
+/// word occurring twice in that run is ordinary — before the anchor existed,
+/// an edit meant for the FIRST "fox" in "a fox saw a fox" could only ever
+/// rewrite the second.
 public enum RetroEditPlanner {
 
     public static func plan(edit: IMEdit,
@@ -60,10 +75,17 @@ public enum RetroEditPlanner {
         // 2. Where is the word to fix, inside our own run only? Correcting text
         //    the user typed themselves is never our business.
         let target = edit.replace as NSString
-        let found: NSRange
-        switch edit.occurrence {
-        case .last:
-            found = haystack.range(of: target as String, options: [.backwards, .literal], range: ownedRel)
+        var found = anchored(edit, target: target, committed: committed, ownedRel: ownedRel)
+        if found.location == NSNotFound {
+            // No anchor, or an anchor the record does not bear out. Either way
+            // the pre-anchor rule stands: the last occurrence inside our run.
+            // Degrading here is deliberate — a wrong-but-plausible offset must
+            // cost the user the old behaviour, not a mangled sentence.
+            switch edit.occurrence {
+            case .last:
+                found = haystack.range(of: target as String, options: [.backwards, .literal],
+                                       range: ownedRel)
+            }
         }
         guard found.location != NSNotFound else { return .abort(.targetNotFound) }
 
@@ -75,7 +97,44 @@ public enum RetroEditPlanner {
         let newRange = NSRange(location: window.base + ownedRel.location,
                                length: (newCommitted as NSString).length)
         return .replace(range: absolute, text: edit.with,
-                        newCommitted: newCommitted, newCommittedRange: newRange)
+                        newCommitted: newCommitted, newCommittedRange: newRange,
+                        appliedUtf16LocationInCommitted: relativeToCommitted.location)
+    }
+
+    /// Resolve `edit.utf16LocationInCommitted` against the run we located, or
+    /// `NSNotFound` when there is no anchor or the anchor is not borne out.
+    ///
+    /// Validation is against `committed` — our own record — rather than against
+    /// the document, and that is sufficient because `ownedRel` is an EXACT
+    /// content match of `committed` in the fresh window: those bytes are
+    /// identical by construction, so a run-relative offset that holds in the
+    /// record holds in the window. The divergences that could break it are all
+    /// already handled upstream. The user typing outside our run only moves
+    /// `ownedRel.location`, and the offset is relative to it. The user typing
+    /// INSIDE our run makes `locate` return `.gone` and the plan aborts
+    /// `.fieldChanged` before this is ever consulted; duplicating the run
+    /// returns `.ambiguous` and aborts likewise.
+    ///
+    /// What this catches instead is app-side skew: a mirror that drifted from
+    /// the input method's record hands us a number that names the wrong
+    /// characters, and comparing the substring is what turns that into a
+    /// fallback rather than into a rewrite of a word the user meant to keep.
+    private static func anchored(_ edit: IMEdit,
+                                 target: NSString,
+                                 committed: String,
+                                 ownedRel: NSRange) -> NSRange {
+        guard let location = edit.utf16LocationInCommitted else {
+            return NSRange(location: NSNotFound, length: 0)
+        }
+        let record = committed as NSString
+        // Written as a subtraction rather than `location + target.length <=
+        // record.length` because `location` arrives off the wire and could be
+        // anything; this cannot overflow.
+        guard location >= 0, location <= record.length - target.length,
+              record.substring(with: NSRange(location: location, length: target.length))
+                  == edit.replace
+        else { return NSRange(location: NSNotFound, length: 0) }
+        return NSRange(location: ownedRel.location + location, length: target.length)
     }
 
     /// Where the run this session committed sits in a freshly read window — or

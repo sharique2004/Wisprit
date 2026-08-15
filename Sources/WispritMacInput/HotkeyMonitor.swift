@@ -102,6 +102,22 @@ public final class HotkeyMonitor: @unchecked Sendable {
     /// missing-Input-Monitoring signature. UI hops to the main thread itself.
     public var onGhostTap: (() -> Void)?
 
+    /// Key-down / key-up, straight off the tap, ahead of the queue.
+    ///
+    /// R33's microphone prestart is why these exist: the session thread can be
+    /// seconds deep in the previous utterance when a press lands, and a press
+    /// that has to wait for it loses its head. These hooks bypass the queue
+    /// entirely so the mic can open at key-down and close at key-up regardless
+    /// of what the pipeline is doing — the ORDER of dictation events is still
+    /// the queue's job and is untouched.
+    ///
+    /// They run on the event-tap callback thread, which must stay fast: the
+    /// bodies do nothing but hop to a serial queue (a slow callback is what
+    /// earns `kCGEventTapDisabledByTimeout`). Deliberately not wired to the
+    /// watchdog, whose `watchdogTick` only ever emits `.cancel`.
+    public var onPress: (@Sendable () -> Void)?
+    public var onRelease: (@Sendable () -> Void)?
+
     public func uninstall() {
         watchdogStop.signal()
         if let tap {
@@ -148,6 +164,10 @@ public final class HotkeyMonitor: @unchecked Sendable {
         for kind in decision.emits {
             queue.put(HotkeyEvent(kind, ts: ts))
         }
+        // After the enqueue, so the ordering the session sees is never behind
+        // the hook's view of the world.
+        if decision.emits.contains(.press) { onPress?() }
+        if decision.emits.contains(.release) { onRelease?() }
     }
 
     // --- watchdog -------------------------------------------------------------

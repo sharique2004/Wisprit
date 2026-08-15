@@ -190,6 +190,101 @@ final class AsrRescueTests: XCTestCase {
         XCTAssertFalse(AsrManager.needsRescue(
             UtteranceResult(text: "all good", engine: "apple_live", finalizeMs: 40, peakLevel: 0.9)))
     }
+
+    // MARK: - the device-switch trigger (2026-08-05)
+
+    /// The one shape `needsRescue` could not see: a clean, non-empty finish
+    /// over a capture the hardware died under. It reads like a success and is a
+    /// truncation.
+    func testACleanResultOverAChangedDeviceIsRescued() {
+        let clean = UtteranceResult(text: "half a sentence", engine: "apple_live",
+                                    finalizeMs: 80, peakLevel: 0.6)
+        XCTAssertFalse(AsrManager.needsRescue(clean), "unchanged without the flag")
+        XCTAssertTrue(AsrManager.needsRescue(clean, configurationChanged: true))
+    }
+
+    /// The b0a763f silence rule outranks it: a silent hold over a device switch
+    /// is still a silent hold, and a silent push-to-talk inserts nothing.
+    func testSilenceIsStillExemptWhenTheDeviceChanged() {
+        let silent = UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40, peakLevel: 0)
+        XCTAssertFalse(AsrManager.needsRescue(silent, configurationChanged: true))
+    }
+
+    /// Empty-and-voiced was already a trigger and stays one — the new clause
+    /// adds a case, it does not replace any.
+    func testTheVoicedEmptyClauseIsUnaffected() {
+        let loudEmpty = UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40, peakLevel: 0.5)
+        XCTAssertTrue(AsrManager.needsRescue(loudEmpty))
+        XCTAssertTrue(AsrManager.needsRescue(loudEmpty, configurationChanged: true))
+    }
+
+    /// End to end through the manager: the flag reaches the policy AND the
+    /// result, on the path that rescues.
+    func testAConfigurationChangeDrivesTheBatchPassAndIsStamped() async {
+        let (manager, batch) = manager(
+            .init(text: "hello", engine: "apple_live", finalizeMs: 80, peakLevel: 0.6),
+            batchText: "hello world again")
+        await manager.begin { _ in }
+        manager.feed(pcm: pcm())
+        manager.noteConfigurationChange()
+        let result = await manager.finalize()
+
+        XCTAssertEqual(batch.calls, 1, "the truncation is re-read")
+        XCTAssertEqual(result.text, "hello world again", "more words wins, as always")
+        XCTAssertTrue(result.sawConfigurationChange,
+                      "stamped on the value the caller sees, not lost inside rescue()")
+    }
+
+    /// The stamp is independent of the arbitration: a batch pass that reads
+    /// LESS still leaves the streaming text standing, and the flag still rides.
+    func testTheFlagIsStampedEvenWhenTheRescueIsDeclined() async {
+        let (manager, batch) = manager(
+            .init(text: "one two three", engine: "apple_live", finalizeMs: 80, peakLevel: 0.6),
+            batchText: "one")
+        await manager.begin { _ in }
+        manager.feed(pcm: pcm())
+        manager.noteConfigurationChange()
+        let result = await manager.finalize()
+
+        XCTAssertEqual(batch.calls, 1)
+        XCTAssertEqual(result.text, "one two three", "the rescue may add words, never lose them")
+        XCTAssertTrue(result.sawConfigurationChange)
+    }
+
+    /// The flag belongs to ONE utterance: it is consumed at detach and reset by
+    /// the next `begin`, so a switch can never be attributed to the utterance
+    /// after it.
+    func testTheFlagDoesNotLeakIntoTheNextUtterance() async {
+        let (manager, batch) = manager(
+            .init(text: "hello", engine: "apple_live", finalizeMs: 80, peakLevel: 0.6),
+            batchText: "hello world again")
+        await manager.begin { _ in }
+        manager.feed(pcm: pcm())
+        manager.noteConfigurationChange()
+        _ = await manager.finalize()
+        XCTAssertEqual(batch.calls, 1)
+
+        await manager.begin { _ in }
+        manager.feed(pcm: pcm())
+        let second = await manager.finalize()
+        XCTAssertEqual(batch.calls, 1, "no second batch pass — the flag was consumed")
+        XCTAssertFalse(second.sawConfigurationChange)
+    }
+
+    /// The batch-only path (engine override) stamps it too — the flag must not
+    /// depend on which path built the result.
+    func testTheBatchOnlyPathAlsoCarriesTheFlag() async {
+        let batch = CountingBatch(text: "from the retained audio")
+        let manager = AsrManager(settings: AsrSettings(engine: .mlxWhisper),
+                                 primaryFactory: { _ in FakeAsrEngine(script: .init()) },
+                                 batch: FilteredBatchTranscriber(batch))
+        await manager.begin { _ in }
+        manager.feed(pcm: pcm())
+        manager.noteConfigurationChange()
+        let result = await manager.finalize()
+        XCTAssertEqual(result.text, "from the retained audio")
+        XCTAssertTrue(result.sawConfigurationChange)
+    }
 }
 
 /// The rescue budget is generous by design, and the shape of that generosity is

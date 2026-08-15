@@ -13,6 +13,7 @@ final class FakeInsertPorts: InsertPorts, @unchecked Sendable {
         case frontmost
         case type(String, units: Int)
         case commandV
+        case returnKey
         case sleep(Double)
         case snapshot
         case clear
@@ -28,6 +29,7 @@ final class FakeInsertPorts: InsertPorts, @unchecked Sendable {
             case .frontmost: return "frontmost"
             case .type(let s, let u): return "type(\(s), \(u))"
             case .commandV: return "commandV"
+            case .returnKey: return "returnKey"
             case .sleep(let s): return "sleep(\(s))"
             case .snapshot: return "snapshot"
             case .clear: return "clear"
@@ -51,6 +53,10 @@ final class FakeInsertPorts: InsertPorts, @unchecked Sendable {
     var changeCountScript: [Int] = [7, 7]
     var typeError: Error?
     var postVError: Error?
+    /// Block inside `sleep` until signalled. R33 moved the clipboard restore to
+    /// a custody queue, so "did `insert` return before the restore ran?" is a
+    /// real question now, and this is how a test asks it without a wall clock.
+    var sleepGate: DispatchSemaphore?
 
     // Observations.
     private let lock = NSLock()
@@ -83,7 +89,16 @@ final class FakeInsertPorts: InsertPorts, @unchecked Sendable {
         if let postVError { throw postVError }
     }
 
-    func sleep(_ seconds: Double) { record(.sleep(seconds)) }
+    func postReturn() throws {
+        record(.returnKey)
+    }
+
+    /// Gated BEFORE the record, so a held gate leaves `ops`/`sleeps` describing
+    /// exactly what happened before the custody window opened.
+    func sleep(_ seconds: Double) {
+        sleepGate?.wait()
+        record(.sleep(seconds))
+    }
 
     func pasteboardSnapshot() -> [PasteboardItemSnapshot] {
         record(.snapshot)

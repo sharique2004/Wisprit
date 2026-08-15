@@ -12,6 +12,8 @@ public enum KeyCodes {
     public static let rightOption: Int64 = 61
     public static let escape: Int64 = 53
     public static let ansiV: Int64 = 9
+    /// `kVK_Return` — Flow's "press enter" command.
+    public static let returnKey: Int64 = 36
 }
 
 /// `CGEventFlags` bit values. Duplicated as raw constants for the same reason

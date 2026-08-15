@@ -53,15 +53,29 @@ public struct UtteranceResult: Sendable, Equatable {
     /// "the streaming engine failed" and "the user lost their words" separable —
     /// before it, the two were the same row.
     public var rescued: Bool
+    /// The audio hardware was reconfigured under this utterance's capture —
+    /// the default input changed, or its format did (2026-08-05).
+    ///
+    /// `AVAudioEngine` stops itself on such a change and keeps the old formats,
+    /// so the tap stops delivering: whatever this result says, it describes the
+    /// audio up to the switch and nothing after it. That makes a NON-empty
+    /// result the dangerous case — a clean, plausible, silently truncated
+    /// sentence — which is why this is stamped on every result rather than only
+    /// on the empty ones. Appended last and defaulted, so every existing
+    /// construction site (the eval runner, the fakes, `rescue()`) still compiles
+    /// and still means what it did.
+    public var sawConfigurationChange: Bool
 
     public init(text: String, engine: String, finalizeMs: Double,
                 timedOut: Bool = false, crashed: Bool = false,
                 starvedInput: Bool = false, peakLevel: Float = 0,
-                producedNothing: Bool = false, rescued: Bool = false) {
+                producedNothing: Bool = false, rescued: Bool = false,
+                sawConfigurationChange: Bool = false) {
         self.text = text; self.engine = engine; self.finalizeMs = finalizeMs
         self.timedOut = timedOut; self.crashed = crashed
         self.starvedInput = starvedInput; self.peakLevel = peakLevel
         self.producedNothing = producedNothing; self.rescued = rescued
+        self.sawConfigurationChange = sawConfigurationChange
     }
 }
 

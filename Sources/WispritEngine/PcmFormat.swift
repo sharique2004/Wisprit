@@ -148,6 +148,15 @@ public enum PcmFormat {
 public final class PcmDownconverter {
     private let source: AVAudioFormat
     private let converter: AVAudioConverter?
+    /// `AVAudioConverter` is terminal after `.endOfStream`: feeding it again is
+    /// undefined. One flush per instance, and `convert` goes quiet afterwards.
+    private var flushed = false
+    /// Safety cap on the drain loop. The real tail is 240 frames at 48 kHz and
+    /// 120 at 44.1 kHz — one chunk of headroom is already 6× that — so this
+    /// bound is unreachable in correct operation and exists only so a converter
+    /// that answered `.haveData` with zero frames cannot spin the session
+    /// thread, which is what calls this (from `MicCapture.stop`).
+    private static let flushIterationCap = 10
 
     public init?(from source: AVAudioFormat) {
         self.source = source
@@ -159,8 +168,45 @@ public final class PcmDownconverter {
         }
     }
 
+    /// The resampler's held-back tail, at end of stream.
+    ///
+    /// The filter delay this recovers is the same 240 frames (15 ms at 48 kHz;
+    /// 120 / 7.5 ms at 44.1 kHz) that `PcmFormatTests` already pins as MISSING
+    /// from a streamed conversion: 10 × 100 ms of 48 kHz input yields 15,760 of
+    /// 16,000 frames, and until now the remainder died with the converter when
+    /// `MicCapture.stop()` set it to nil. It is word-final audio — the end of
+    /// the last syllable the user spoke — so it is worth one call.
+    ///
+    /// The "roomy output buffer drops pending input" hazard documented on
+    /// `outputCapacity` does not apply here: at flush time there is no pending
+    /// input to drop, only filter state to push out.
+    public func flush() -> Data {
+        guard let converter, !flushed else { return Data() }
+        flushed = true
+        var out = Data()
+        for _ in 0..<Self.flushIterationCap {
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: PcmFormat.canonical,
+                                                frameCapacity: PcmFormat.chunkFrames) else { break }
+            var error: NSError?
+            let status = converter.convert(to: buffer, error: &error) { _, status in
+                // No more input will ever arrive; this is the whole point.
+                status.pointee = .endOfStream
+                return nil
+            }
+            if error != nil { break }
+            if buffer.frameLength > 0 { out.append(PcmFormat.int16Data(from: buffer)) }
+            guard status == .haveData else { break }
+            if out.count >= Int(PcmFormat.chunkFrames) * PcmFormat.bytesPerFrame { break }
+        }
+        return out
+    }
+
     /// Converted bytes for this buffer, or empty on a conversion error.
     public func convert(_ buffer: AVAudioPCMBuffer) -> Data {
+        // Terminal after a flush: the converter has been told the stream ended
+        // and must not be fed again (a future refactor that reused the instance
+        // would otherwise corrupt audio silently).
+        guard !flushed else { return Data() }
         guard let converter else { return PcmFormat.int16Data(from: buffer) }
         let ratio = PcmFormat.sampleRate / source.sampleRate
         let capacity = PcmFormat.outputCapacity(inputFrames: buffer.frameLength, ratio: ratio)

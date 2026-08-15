@@ -71,6 +71,17 @@ public final class SystemInsertPorts: InsertPorts, @unchecked Sendable {
         }
     }
 
+    public func postReturn() throws {
+        for isDown in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: nil,
+                                      virtualKey: CGKeyCode(KeyCodes.returnKey),
+                                      keyDown: isDown) else {
+                throw InsertPortError.eventCreationFailed
+            }
+            event.post(tap: .cghidEventTap)
+        }
+    }
+
     public func sleep(_ seconds: Double) {
         guard seconds > 0 else { return }
         Thread.sleep(forTimeInterval: seconds)

@@ -103,11 +103,78 @@ final class StreamSessionTests: XCTestCase {
 
         let event = session.handle(.applyEdit(generation: generation, replace: "Sharik", with: "Sharique"))
 
-        XCTAssertEqual(event?.event, .editResult(IMEditResult.applied(note: "Sharik → Sharique")))
+        XCTAssertEqual(event?.event, .editResult(IMEditResult.applied(
+            note: "Sharik → Sharique", appliedUtf16LocationInCommitted: 3)))
         XCTAssertEqual(client.document as String, "Hi Sharique, welcome.")
         XCTAssertEqual(session.committedText, "Hi Sharique, welcome.")
         XCTAssertEqual(client.ops.last, .insert("Sharique", replacement: NSRange(location: 3, length: 6)),
                        "one absolute-range replacement, not backspaces")
+    }
+
+    /// The wrong-instance defect, through the real planner and a real document
+    /// model. One session spans consecutive utterances, so two commits put the
+    /// same word in the field twice — and until the anchor existed, a
+    /// correction aimed at the FIRST could only ever rewrite the second.
+    func testAnAnchoredEditFixesTheFirstOccurrenceAcrossTwoCommits() {
+        let client = FakeClient()
+        let session = makeSession(client)
+        session.handle(.commitFinal(generation: generation, text: "Sharik one. "))
+        session.handle(.commitFinal(generation: generation, text: "Sharik two."))
+
+        let event = session.handle(.applyEdit(generation: generation, replace: "Sharik",
+                                              with: "Sharique", utf16LocationInCommitted: 0))
+
+        XCTAssertEqual(client.document as String, "Sharique one. Sharik two.",
+                       "the first is corrected and the second is left exactly as it was")
+        XCTAssertEqual(session.committedText, "Sharique one. Sharik two.")
+        XCTAssertEqual(event?.event, .editResult(IMEditResult.applied(
+            note: "Sharik → Sharique", appliedUtf16LocationInCommitted: 0)))
+    }
+
+    /// …and the second occurrence is still reachable, by its own anchor. The
+    /// anchor is a choice between real instances, not a bias toward the front.
+    func testTheSecondCommitsOccurrenceIsReachableByItsOwnAnchor() {
+        let client = FakeClient()
+        let session = makeSession(client)
+        session.handle(.commitFinal(generation: generation, text: "Sharik one. "))
+        session.handle(.commitFinal(generation: generation, text: "Sharik two."))
+
+        session.handle(.applyEdit(generation: generation, replace: "Sharik",
+                                  with: "Sharique", utf16LocationInCommitted: 12))
+
+        XCTAssertEqual(client.document as String, "Sharik one. Sharique two.")
+        XCTAssertEqual(session.committedText, "Sharik one. Sharique two.")
+    }
+
+    /// No anchor, no change of behaviour: the last occurrence, and an echo
+    /// saying so — which is what keeps the app's mirror in step even here.
+    func testAnUnanchoredEditStillTakesTheLastOccurrenceAndEchoesWhereItLanded() {
+        let client = FakeClient()
+        let session = makeSession(client)
+        session.handle(.commitFinal(generation: generation, text: "Sharik one. Sharik two."))
+
+        let event = session.handle(.applyEdit(generation: generation,
+                                              replace: "Sharik", with: "Sharique"))
+
+        XCTAssertEqual(client.document as String, "Sharik one. Sharique two.")
+        XCTAssertEqual(event?.event, .editResult(IMEditResult.applied(
+            note: "Sharik → Sharique", appliedUtf16LocationInCommitted: 12)))
+    }
+
+    /// An offset the record does not bear out — an app-side mirror that drifted
+    /// — costs the user the old behaviour, not a rewrite of the wrong word, and
+    /// the echo tells the app where the fallback actually put it.
+    func testAnOffsetTheRecordDoesNotBearOutDegradesToTheLastOccurrence() {
+        let client = FakeClient()
+        let session = makeSession(client)
+        session.handle(.commitFinal(generation: generation, text: "Sharik one. Sharik two."))
+
+        let event = session.handle(.applyEdit(generation: generation, replace: "Sharik",
+                                              with: "Sharique", utf16LocationInCommitted: 4))
+
+        XCTAssertEqual(client.document as String, "Sharik one. Sharique two.")
+        XCTAssertEqual(event?.event, .editResult(IMEditResult.applied(
+            note: "Sharik → Sharique", appliedUtf16LocationInCommitted: 12)))
     }
 
     func testRetroEditNeverTouchesTextTheUserTypedThemselves() {
