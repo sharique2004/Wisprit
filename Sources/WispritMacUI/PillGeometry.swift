@@ -203,6 +203,11 @@ public enum PillGeometry {
     /// target. The bar field cannot fit inside it, so the resting dots are
     /// gone — rest is a bare glass sliver, and `idle → prewarming` became a
     /// real expansion rather than Flow's colour crossfade.
+    ///
+    /// The *panel* does not shrink to this. Idle hover used to resize the
+    /// `NSPanel` 36×10 → 96×28 around a moving origin, which slid the frame
+    /// out from under the cursor, toggled `onHover`, and looped. The window
+    /// stays at listening size; this is only the drawn capsule inside it.
     public static let widthMini: Double = 36.0
     public static let heightMini: Double = 10.0
     /// Recording chrome: Cancel (X) and confirm (✓) beside the ten-bar field.
@@ -283,6 +288,14 @@ public enum PillGeometry {
     /// Errors get a wider character budget than a live partial: the message is
     /// the whole point of the state (§2.7).
     public static let errorMessageCharacters = 40
+
+    /// Idle HUD fade: after this much idle (not recording, not hovered, not
+    /// dragging) the pill goes fully transparent so it is not a distraction.
+    /// 3 s sits in the 2–4 s band of macOS overlay chrome — past "I'm still
+    /// looking at it", short of "why is that still there". The panel stays
+    /// on screen as an invisible hit target; hover wakes it. Not a hide:
+    /// `isVisible` stays true and the panel is not ordered out.
+    public static let idleHideDelay: Double = 3.0
 
     /// Auto-hide delays: `flash_success` 0.6 s, `flash_error` 1.6 s — unchanged.
     public static let successHideDelay: Double = 0.6
@@ -567,6 +580,24 @@ public enum PillMotion {
     /// scale: the hosting view clips to the panel, so anything that grows past
     /// the capsule has its own pop sheared off at the sides.
     public static let noticeRimPop: Double = 0.18
+
+    // MARK: idle presence (HUD fade)
+
+    /// Fade the glass and the surface, never the panel frame. Short enough
+    /// to feel like a HUD getting out of the way, long enough not to pop.
+    /// Reduce Motion snaps (duration 0).
+    public static let presenceDuration: Double = 0.28
+
+    /// Mouse-exited is delayed this long, then re-tested against the panel
+    /// frame. Filters a tracking-area flicker if one still lands; enter is
+    /// instant.
+    public static let hoverExitHysteresis: Double = 0.08
+
+    /// Reduce Motion snaps the HUD fade; durations of real motion elsewhere
+    /// survive. Presence is opacity-only, so the reduced form is a cut.
+    public static func presenceFadeDuration(reduceMotion: Bool) -> Double {
+        reduceMotion ? 0 : presenceDuration
+    }
 
     // MARK: orientation morph & empty-state wiggle
 

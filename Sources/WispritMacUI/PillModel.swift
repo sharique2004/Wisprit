@@ -62,6 +62,9 @@ public struct PillRender: Equatable, Sendable {
     public var isHovered: Bool
     /// Empty/nothing-heard wiggle in flight — no error chrome.
     public var isShaking: Bool
+    /// Idle HUD: fully transparent but still on screen as a hit target.
+    /// Distinct from `isVisible` / `.hidden`, which order the panel out.
+    public var isDormant: Bool
     /// Wispr Flow hover/recording affordances.
     public var hoverChrome: PillHoverChrome
 
@@ -70,7 +73,7 @@ public struct PillRender: Equatable, Sendable {
         bars: [], bubble: "", bubbleWidth: 0, message: "", glyph: .none,
         totalWidth: PillGeometry.widthListening, height: PillGeometry.height,
         tailMuted: false, axis: .horizontal, dockEdge: nil,
-        isHovered: false, isShaking: false, hoverChrome: .none)
+        isHovered: false, isShaking: false, isDormant: false, hoverChrome: .none)
 
     /// Whether the only thing that moved between two frames is the meter.
     ///
@@ -110,6 +113,9 @@ public enum PillDeferredAction: Equatable, Sendable {
     /// say what it is waiting on. Never hides, never changes state: the only
     /// thing that fires is a line of copy (AUDIT-2026-08-14's open decision).
     case patience
+    /// Idle HUD: fade to fully transparent after `idleHideDelay`. The panel
+    /// stays ordered front as a hit target; hover clears this.
+    case idleHide
 }
 
 /// The pill's behaviour, headless.
@@ -170,6 +176,10 @@ public final class PillModel {
     private var hovered = false
     /// Empty-utterance wiggle. Distinct from `.error`: no red, no copy.
     private var shaking = false
+    /// Fully transparent idle HUD; the panel is still a hit target.
+    private var dormant = false
+    /// Pointer drag owns the frame — stay visible until drop.
+    private var dragging = false
     private var axis: PillAxis = .horizontal
     private var dockEdge: PillScreenEdge?
 
@@ -210,6 +220,7 @@ public final class PillModel {
             dockEdge: dockEdge,
             isHovered: hovered,
             isShaking: shaking,
+            isDormant: dormant,
             hoverChrome: hoverChrome)
     }
 
@@ -226,9 +237,11 @@ public final class PillModel {
         heldWidth = nil
         resetDeadMicTracking()
         shaking = false
+        dormant = false
         state = .idle
         isVisible = true
         emit()
+        armIdleHide()
     }
 
     /// NEW — the key is down and the accept decision is made, but audio has not
@@ -330,12 +343,38 @@ public final class PillModel {
 
     /// Pointer entered or left the capsule. Idle hover expands into the
     /// waveform bar Flow shows on hover; recording chrome does not depend on
-    /// it (Cancel/Stop are the recording affordance, always).
+    /// it (Cancel/Stop are the recording affordance, always). Hover also
+    /// wakes a dormant idle pill. The panel hit frame does not change.
     public func setHovered(_ hovering: Bool) {
-        guard hovered != hovering else { return }
+        let woke = hovering && dormant
+        let changed = hovered != hovering || woke
         hovered = hovering
-        guard isVisible, state == .idle, !shaking else { return }
-        emit()
+        if hovering {
+            dormant = false
+            if state == .idle, !shaking { cancelSchedule() }
+        }
+        guard changed, isVisible else { return }
+        if state == .idle, !shaking {
+            emit()
+            if !hovering { armIdleHide() }
+        } else if woke {
+            emit()
+        }
+    }
+
+    /// Pointer drag owns the frame. Stay visible for the grab; the idle
+    /// hide timer resumes on drop.
+    public func setDragging(_ isDragging: Bool) {
+        guard dragging != isDragging else { return }
+        dragging = isDragging
+        if isDragging {
+            let woke = dormant
+            dormant = false
+            if state == .idle { cancelSchedule() }
+            if woke { emit() }
+        } else {
+            armIdleHide()
+        }
     }
 
     /// Reorient from a drag. No-op when nothing changed, so the 60 Hz drag
@@ -454,6 +493,7 @@ public final class PillModel {
         heldWidth = nil
         resetDeadMicTracking()
         hovered = false
+        dormant = false
         guard !isSuppressed() else {
             schedule(PillMotion.shakeDuration, .settle)
             return
@@ -478,6 +518,7 @@ public final class PillModel {
         heldWidth = nil
         resetDeadMicTracking()
         shaking = false
+        dormant = false
         emit()
     }
 
@@ -495,6 +536,8 @@ public final class PillModel {
             emit()
         case .patience:
             showPatienceCue()
+        case .idleHide:
+            goDormant()
         }
     }
 
@@ -644,6 +687,7 @@ public final class PillModel {
         guard !isSuppressed() else { return }
         cancelSchedule()
         shaking = false
+        dormant = false
         state = newState
         isVisible = true
         emit()
@@ -676,6 +720,20 @@ public final class PillModel {
     private func collapseMeter() {
         synth.reset()
         barValues = [Double](repeating: 0, count: PillGeometry.barCount)
+    }
+
+    private func goDormant() {
+        guard isVisible, state == .idle, !hovered, !shaking, !dragging, !dormant else { return }
+        dormant = true
+        emit()
+    }
+
+    /// Only when the pill is a resting sliver nobody is using. Other
+    /// deferred actions (settle, patience, error hide) own the one-timer
+    /// budget while they are in flight.
+    private func armIdleHide() {
+        guard isVisible, state == .idle, !hovered, !shaking, !dragging, !dormant else { return }
+        schedule(PillGeometry.idleHideDelay, .idleHide)
     }
 
     private func schedule(_ seconds: Double, _ action: PillDeferredAction) {

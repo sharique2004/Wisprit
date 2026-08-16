@@ -97,6 +97,8 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(PillGeometry.bottomMargin, 90.0)
         XCTAssertEqual(PillGeometry.blockedSecureHideDelay, 2.6,
                        "a keystroke instruction has to outlive an error flash")
+        XCTAssertEqual(PillGeometry.idleHideDelay, 3.0,
+                       "idle HUD fade: 3 s, in the 2–4 s native overlay band")
     }
 
     func testClampLevelStillTreatsNaNAsSilence() {
@@ -271,6 +273,9 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthMini,
                        "the settle lands on the mini sliver, not the capsule")
         XCTAssertEqual(sink.last.glyph, .none)
+        XCTAssertFalse(sink.last.isDormant)
+        XCTAssertEqual(sink.scheduled.last?.action, .idleHide,
+                       "idle rest arms the HUD fade")
     }
 
     /// The processing frame: one look for both waiting states, widened for the
@@ -1017,15 +1022,89 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(sink.last.bars, [])
 
         model.setHovered(true)
-        XCTAssertEqual(sink.last.hoverChrome, .idle)
-        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening)
-        XCTAssertEqual(sink.last.height, PillGeometry.height)
-        XCTAssertEqual(sink.last.bars.count, PillGeometry.barCount)
-        XCTAssertTrue(sink.last.bars.allSatisfy { $0 == 0 }, "cream dots at floor")
+        let expanded = sink.last
+        XCTAssertEqual(expanded.hoverChrome, .idle)
+        XCTAssertEqual(expanded.totalWidth, PillGeometry.widthListening)
+        XCTAssertEqual(expanded.height, PillGeometry.height)
+        XCTAssertEqual(expanded.bars.count, PillGeometry.barCount)
+        XCTAssertTrue(expanded.bars.allSatisfy { $0 == 0 }, "cream dots at floor")
 
         model.setHovered(false)
         XCTAssertEqual(sink.last.hoverChrome, .none)
         XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthMini)
+        XCTAssertEqual(PillPlacement.hitSize(for: sink.last),
+                       PillPlacement.hitSize(for: expanded),
+                       "hover must not resize the window hit frame")
+    }
+
+    func testIdleHoverDoesNotOscillateTheSettledSize() {
+        let (model, sink) = makeModel()
+        model.showIdle()
+        model.setHovered(true)
+        let expanded = sink.last
+        for hover in [false, true, false, true, false, true] {
+            model.setHovered(hover)
+        }
+        XCTAssertTrue(sink.last.isHovered)
+        XCTAssertEqual(sink.last.totalWidth, expanded.totalWidth)
+        XCTAssertEqual(sink.last.height, expanded.height)
+        XCTAssertEqual(sink.last.hoverChrome, .idle)
+        XCTAssertEqual(PillPlacement.hitSize(for: sink.last), PillPlacement.hitSize(for: expanded))
+    }
+
+    func testIdleAutoHidesAfterTheDelayAndHoverWakesIt() {
+        let (model, sink) = makeModel()
+        model.showIdle()
+        XCTAssertFalse(sink.last.isDormant)
+        XCTAssertTrue(sink.last.isVisible)
+        XCTAssertEqual(sink.scheduled.last?.seconds, PillGeometry.idleHideDelay)
+        XCTAssertEqual(sink.scheduled.last?.action, .idleHide)
+
+        model.fireDeferred(.idleHide)
+        XCTAssertTrue(sink.last.isDormant)
+        XCTAssertTrue(sink.last.isVisible, "dormant is a fade, not an order-out")
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthMini)
+
+        model.setHovered(true)
+        XCTAssertFalse(sink.last.isDormant)
+        XCTAssertEqual(sink.last.hoverChrome, .idle)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening)
+    }
+
+    func testRecordingDoesNotAutoHide() {
+        let (model, sink) = makeModel()
+        model.showIdle()
+        model.showRecording()
+        XCTAssertFalse(sink.last.isDormant)
+        XCTAssertEqual(model.state, .recording)
+        model.fireDeferred(.idleHide)
+        XCTAssertFalse(sink.last.isDormant, "a stray idleHide must not fade a live session")
+        XCTAssertEqual(sink.last.state, .recording)
+        XCTAssertEqual(sink.last.hoverChrome, .recording)
+    }
+
+    func testErrorStaysVisibleThroughItsOwnHideTimer() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.flashError("mic failed")
+        XCTAssertFalse(sink.last.isDormant)
+        XCTAssertEqual(sink.scheduled.last?.action, .settle)
+        model.fireDeferred(.idleHide)
+        XCTAssertFalse(sink.last.isDormant)
+        XCTAssertEqual(sink.last.state, .error)
+    }
+
+    func testDraggingPreventsIdleHideAndResumesTheTimerOnDrop() {
+        let (model, sink) = makeModel()
+        model.showIdle()
+        model.setDragging(true)
+        XCTAssertFalse(sink.last.isDormant)
+        model.fireDeferred(.idleHide)
+        XCTAssertFalse(sink.last.isDormant, "a drag must not fade mid-grab")
+        model.setDragging(false)
+        XCTAssertEqual(sink.scheduled.last?.action, .idleHide)
+        model.fireDeferred(.idleHide)
+        XCTAssertTrue(sink.last.isDormant)
     }
 
     func testRecordingAlwaysShowsCancelAndConfirmChrome() {

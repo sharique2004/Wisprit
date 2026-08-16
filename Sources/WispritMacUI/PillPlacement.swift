@@ -81,6 +81,45 @@ public enum PillPlacement {
             : CGSize(width: long, height: short)
     }
 
+    /// Window size for a render. Idle rest draws a 36×10 sliver *inside* the
+    /// listening-size panel so hover can expand the capsule without moving
+    /// the window origin under the cursor — that origin-shift was the hover
+    /// jiggle. Every other state sizes the panel to the drawn capsule.
+    public static func hitSize(for render: PillRender) -> CGSize {
+        if render.state == .idle && !render.isShaking {
+            return panelSize(long: PillGeometry.widthListening,
+                             short: PillGeometry.height,
+                             axis: render.axis)
+        }
+        return panelSize(long: render.totalWidth, short: render.height, axis: render.axis)
+    }
+
+    /// Drawn capsule inside `panel`, pinned to the docked edge so growth
+    /// runs toward the screen centre. Free-floating stays centred.
+    public static func visualFrame(in panel: CGSize, visual: CGSize,
+                                   edge: PillScreenEdge?) -> CGRect {
+        let x: Double
+        let y: Double
+        switch edge {
+        case .left:
+            x = 0
+            y = (panel.height - visual.height) / 2
+        case .right:
+            x = panel.width - visual.width
+            y = (panel.height - visual.height) / 2
+        case .top:
+            x = (panel.width - visual.width) / 2
+            y = panel.height - visual.height
+        case .bottom:
+            x = (panel.width - visual.width) / 2
+            y = 0
+        case nil:
+            x = (panel.width - visual.width) / 2
+            y = (panel.height - visual.height) / 2
+        }
+        return CGRect(x: x, y: y, width: visual.width, height: visual.height)
+    }
+
     /// The origin a horizontal listening-width pill would have if it shared
     /// `frame`'s centre. This is the `[x, y]` `pill_position` has always
     /// stored; keeping it means a version that can stand up still restores

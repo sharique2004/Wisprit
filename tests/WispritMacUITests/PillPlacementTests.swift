@@ -109,4 +109,70 @@ final class PillPlacementTests: XCTestCase {
         XCTAssertLessThanOrEqual(clamped.maxY, visible.maxY - 8)
         XCTAssertEqual(clamped.size, overflowing.size)
     }
+
+    func testIdleHitSizeStaysAtListeningSizeWhetherHoveredOrNot() {
+        var rest = PillRender.collapsed
+        rest.isVisible = true
+        rest.state = .idle
+        rest.totalWidth = PillGeometry.widthMini
+        rest.height = PillGeometry.heightMini
+        let hit = PillPlacement.hitSize(for: rest)
+        XCTAssertEqual(hit, CGSize(width: PillGeometry.widthListening, height: PillGeometry.height))
+
+        var hovered = rest
+        hovered.isHovered = true
+        hovered.totalWidth = PillGeometry.widthListening
+        hovered.height = PillGeometry.height
+        XCTAssertEqual(PillPlacement.hitSize(for: hovered), hit)
+
+        rest.axis = .vertical
+        rest.dockEdge = .left
+        XCTAssertEqual(PillPlacement.hitSize(for: rest),
+                       CGSize(width: PillGeometry.height, height: PillGeometry.widthListening))
+    }
+
+    func testCollapsedVisualSitsInsideTheIdleHitFrame() {
+        let edges: [PillScreenEdge?] = [nil, .top, .bottom, .left, .right]
+        for edge in edges {
+            var render = PillRender.collapsed
+            render.isVisible = true
+            render.state = .idle
+            render.axis = edge?.axis ?? .horizontal
+            render.dockEdge = edge
+            render.totalWidth = PillGeometry.widthMini
+            render.height = PillGeometry.heightMini
+            let hit = PillPlacement.hitSize(for: render)
+            let visual = PillPlacement.panelSize(
+                long: render.totalWidth, short: render.height, axis: render.axis)
+            let rect = PillPlacement.visualFrame(in: hit, visual: visual, edge: edge)
+            XCTAssertTrue(CGRect(origin: .zero, size: hit).contains(rect),
+                          "visual must stay inside hit for \(String(describing: edge))")
+        }
+    }
+
+    func testVisualFramePinsToTheDockedEdge() {
+        let panel = CGSize(width: 96, height: 28)
+        let visual = CGSize(width: 36, height: 10)
+        let bottom = PillPlacement.visualFrame(in: panel, visual: visual, edge: .bottom)
+        XCTAssertEqual(bottom.minY, 0)
+        XCTAssertEqual(bottom.midX, panel.width / 2, accuracy: 0.01)
+
+        let top = PillPlacement.visualFrame(in: panel, visual: visual, edge: .top)
+        XCTAssertEqual(top.maxY, panel.height)
+        XCTAssertEqual(top.midX, panel.width / 2, accuracy: 0.01)
+
+        let side = CGSize(width: 28, height: 96)
+        let sliver = CGSize(width: 10, height: 36)
+        let left = PillPlacement.visualFrame(in: side, visual: sliver, edge: .left)
+        XCTAssertEqual(left.minX, 0)
+        XCTAssertEqual(left.midY, side.height / 2, accuracy: 0.01)
+
+        let right = PillPlacement.visualFrame(in: side, visual: sliver, edge: .right)
+        XCTAssertEqual(right.maxX, side.width)
+        XCTAssertEqual(right.midY, side.height / 2, accuracy: 0.01)
+
+        let free = PillPlacement.visualFrame(in: panel, visual: visual, edge: nil)
+        XCTAssertEqual(free.midX, panel.width / 2, accuracy: 0.01)
+        XCTAssertEqual(free.midY, panel.height / 2, accuracy: 0.01)
+    }
 }

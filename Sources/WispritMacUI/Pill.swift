@@ -100,6 +100,11 @@ public final class Pill: NSObject, NSWindowDelegate {
     /// Origin captured when a wiggle starts, so interrupting it cannot leave
     /// the panel a few points off the user's spot.
     private var shakeBaseOrigin: CGPoint?
+    /// Debounces mouse-exited so a tracking-area rebuild cannot collapse
+    /// hover mid-expand.
+    private var hoverExitWork: DispatchWorkItem?
+    private var dormantGlobalMonitor: Any?
+    private var dormantLocalMonitor: Any?
 
     public init(configuration: Configuration = Configuration()) {
         self.config = configuration
@@ -203,7 +208,11 @@ public final class Pill: NSObject, NSWindowDelegate {
         // Transparency has to be able to take the glass away without taking the
         // pill with it, and `isHidden` on a superview hides everything under it.
         let content = PillPanelView(frame: NSRect(origin: .zero, size: frame.size))
+        content.onHover = { [weak self] hovering in
+            MainActor.assumeIsolated { self?.handlePanelHover(hovering) }
+        }
         let glass = PillGlassView(frame: content.bounds)
+        glass.autoresizingMask = []
         let host = PillHostingView(rootView: PillSurface(box: box))
         // Frame-driven, never content-driven. `PillSurface` fills whatever it
         // is given (see its `body`), so an `NSHostingView` that still consults
@@ -231,7 +240,7 @@ public final class Pill: NSObject, NSWindowDelegate {
 
     private func wireSurface() {
         box.onHover = { [weak self] hovering in
-            MainActor.assumeIsolated { self?.model.setHovered(hovering) }
+            MainActor.assumeIsolated { self?.handlePanelHover(hovering) }
         }
         box.onStart = { [weak self] in
             MainActor.assumeIsolated { self?.config.onStart() }
@@ -311,13 +320,13 @@ public final class Pill: NSObject, NSWindowDelegate {
         model.setPlacement(axis: place.axis, edge: place.edge)
     }
 
-    /// The panel frame for this render. Growth is centred on the user's
-    /// dragged position (the canonical listening-width origin), then clamped
-    /// to the visible work area so the Dock and menu bar are never covered.
+    /// The panel frame for this render. Idle keeps the listening-size hit
+    /// target so hover can grow the drawn capsule without moving the window
+    /// under the cursor. Growth of other states is centred on the user's
+    /// dragged position, then clamped to the visible work area.
     /// During a drag the cursor owns the centre via `grabFraction`.
     private func placedFrame(for render: PillRender) -> CGRect {
-        let size = PillPlacement.panelSize(
-            long: render.totalWidth, short: render.height, axis: render.axis)
+        let size = PillPlacement.hitSize(for: render)
         if isDragging, let mouse = dragMouse {
             var frame = CGRect(x: mouse.x - grabFraction.x * size.width,
                                y: mouse.y - grabFraction.y * size.height,
@@ -332,8 +341,9 @@ public final class Pill: NSObject, NSWindowDelegate {
         }
         let center = CGPoint(x: anchor.x + PillGeometry.widthListening / 2,
                              y: anchor.y + PillGeometry.height / 2)
-        var frame = PillPlacement.frame(
-            center: center, long: render.totalWidth, short: render.height, axis: render.axis)
+        var frame = CGRect(x: center.x - size.width / 2,
+                           y: center.y - size.height / 2,
+                           width: size.width, height: size.height)
         if let screen = screen(for: center) {
             frame = PillPlacement.clamp(frame, to: screen.visibleFrame)
         }
@@ -386,18 +396,21 @@ public final class Pill: NSObject, NSWindowDelegate {
         // caps to the clip — the pill spends the whole animation as a slab.
         // Feeding the live width back is what makes the two exact.
         //
-        // It writes `box.render` at the display's rate, which sounds expensive
-        // and is not: this only ever runs during a state transition. The 20 Hz
-        // level path changes no width, so it never comes through here.
-        // Feed the live panel size back in the model's long/short vocabulary.
-        // Horizontal pills: long = width. Vertical pills: long = height.
-        // Updating only `totalWidth` from `size.width` was right when the
-        // capsule never stood up; a vertical morph would otherwise draw a
-        // 96 pt-tall capsule inside a still-short window (or the reverse).
+        // Idle rest is the exception: the panel stays at listening size and
+        // the drawn sliver is smaller. Inflating the capsule to the travelling
+        // window would undo that and reintroduce the hover jiggle.
         if frameAnimations > 0 {
-            syncDrawnSize(from: size, into: appliedRender)
+            let targetHit = PillPlacement.hitSize(for: appliedRender)
+            let targetVisual = PillPlacement.panelSize(
+                long: appliedRender.totalWidth, short: appliedRender.height,
+                axis: appliedRender.axis)
+            let fillsPanel = abs(targetVisual.width - targetHit.width) < 0.5
+                && abs(targetVisual.height - targetHit.height) < 0.5
+            if fillsPanel {
+                syncDrawnSize(from: size, into: appliedRender)
+            }
         }
-        glass?.refreshMask()
+        layoutGlass(for: box.render, animate: false)
         panel.invalidateShadow()
     }
 
@@ -421,8 +434,7 @@ public final class Pill: NSObject, NSWindowDelegate {
         appliedRender = render
 
         let target = placedFrame(for: render)
-        let previousSize = PillPlacement.panelSize(
-            long: previous.totalWidth, short: previous.height, axis: previous.axis)
+        let previousSize = PillPlacement.hitSize(for: previous)
 
         // The bypass. It still owes the `.none` arm's two non-drawing duties —
         // the frame correction and the order front/out — because those are
@@ -433,6 +445,7 @@ public final class Pill: NSObject, NSWindowDelegate {
                 setFrameDirect(panel, host, target)
             }
             if render.isVisible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
+            finishApply(from: previous, to: render, animatesFrame: false)
             return
         }
 
@@ -444,6 +457,7 @@ public final class Pill: NSObject, NSWindowDelegate {
             setFrameDirect(panel, host, target)
             if render.isVisible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
             lastShaking = render.isShaking
+            finishApply(from: previous, to: render, animatesFrame: false)
             return
         }
 
@@ -456,6 +470,7 @@ public final class Pill: NSObject, NSWindowDelegate {
             if render.isVisible { panel.orderFrontRegardless() }
             beginShake()
             lastShaking = true
+            finishApply(from: previous, to: render, animatesFrame: false)
             return
         }
         if !render.isShaking && lastShaking {
@@ -503,12 +518,19 @@ public final class Pill: NSObject, NSWindowDelegate {
             }
 
         case .resize, .contract:
-            // Start the drawn capsule where the *window* is, not where it is
-            // going: `windowDidResize` takes over from the first step, but the
-            // first step has not happened yet, and one frame of slab is still
-            // a frame of slab.
+            // Growing: follow the window so a wide capsule is never clipped
+            // to a slab. Shrinking to idle: the target visual is the mini
+            // sliver inside a listening-size hit frame — write that now so
+            // the capsule is not inflated to the travelling window.
             if change.animatesFrame {
-                syncDrawnSize(from: panel.frame.size, into: render)
+                let targetHit = PillPlacement.hitSize(for: render)
+                let grows = targetHit.width > panel.frame.width + 0.5
+                    || targetHit.height > panel.frame.height + 0.5
+                if grows {
+                    syncDrawnSize(from: panel.frame.size, into: render)
+                } else {
+                    box.render = render
+                }
             } else {
                 box.render = render
             }
@@ -535,8 +557,8 @@ public final class Pill: NSObject, NSWindowDelegate {
 
         case .none:
             // A state change that moved nothing the panel owns — the tint
-            // crossfade at the end of `prewarming`, a glyph swap, a message.
-            // (A level tick never gets here: the meter sink took it above.)
+            // crossfade at the end of `prewarming`, a glyph swap, a message,
+            // idle hover (hit frame is stable), or the idle HUD fade.
             // Never touch the frame while an animation is in flight — the
             // animator already owns the target, and a direct `setFrame` would
             // snap the width mid-spring.
@@ -551,6 +573,7 @@ public final class Pill: NSObject, NSWindowDelegate {
                 panel.orderOut(nil)
             }
         }
+        finishApply(from: previous, to: render, animatesFrame: change.animatesFrame)
     }
 
     /// Map a live panel size onto `PillRender.totalWidth` / `height` so the
@@ -617,6 +640,7 @@ public final class Pill: NSObject, NSWindowDelegate {
                     // Hand the logical render back: the live width above is a
                     // travelling value, not the truth about the frame.
                     self.box.render = self.appliedRender
+                    self.layoutGlass(for: self.appliedRender, animate: false)
                     self.glass?.refreshMask()
                     panel.invalidateShadow()
                 }
@@ -635,6 +659,150 @@ public final class Pill: NSObject, NSWindowDelegate {
         let render = appliedRender
         box.render = render
         setFrameDirect(panel, host, placedFrame(for: render))
+        host.alphaValue = 1
+        glass?.alphaValue = 1
+        panel.hasShadow = true
+        removeDormantProbe()
+    }
+
+    // MARK: - hover, presence, glass
+
+    /// Hover enter is instant. Exit waits a beat and re-checks the panel
+    /// frame so a tracking-area rebuild cannot collapse the capsule under
+    /// the cursor.
+    private func handlePanelHover(_ hovering: Bool) {
+        hoverExitWork?.cancel()
+        hoverExitWork = nil
+        if hovering {
+            model.setHovered(true)
+            return
+        }
+        let work = DispatchWorkItem { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.hoverExitWork = nil
+                if self.mouseIsOverPanel() {
+                    self.model.setHovered(true)
+                    return
+                }
+                self.model.setHovered(false)
+            }
+        }
+        hoverExitWork = work
+        DispatchQueue.main.asyncAfter(
+            deadline: .now() + PillMotion.hoverExitHysteresis, execute: work)
+    }
+
+    private func mouseIsOverPanel() -> Bool {
+        guard let panel else { return false }
+        return panel.frame.contains(NSEvent.mouseLocation)
+    }
+
+    private func finishApply(from previous: PillRender, to render: PillRender,
+                             animatesFrame: Bool) {
+        guard render.isVisible else {
+            removeDormantProbe()
+            return
+        }
+        let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        syncPresence(render, reduceMotion: reduce)
+        let visualChanged = previous.totalWidth != render.totalWidth
+            || previous.height != render.height
+            || previous.dockEdge != render.dockEdge
+            || previous.axis != render.axis
+        layoutGlass(for: box.render, animate: !reduce && !animatesFrame && visualChanged)
+    }
+
+    /// Fade glass + surface, not the panel. A window at `alphaValue == 0`
+    /// stops receiving mouse events, which would make a dormant pill
+    /// un-wakeable. The panel stays at 1; only paint goes away.
+    private func syncPresence(_ render: PillRender, reduceMotion: Bool) {
+        guard let panel, let host else { return }
+        let target: CGFloat = render.isDormant ? 0 : 1
+        panel.hasShadow = !render.isDormant
+        if render.isDormant {
+            installDormantProbe()
+        } else {
+            removeDormantProbe()
+        }
+        if abs(host.alphaValue - target) < 0.01,
+           abs((glass?.alphaValue ?? target) - target) < 0.01 {
+            return
+        }
+        let duration = PillMotion.presenceFadeDuration(reduceMotion: reduceMotion)
+        if duration == 0 {
+            host.alphaValue = target
+            glass?.alphaValue = target
+            panel.invalidateShadow()
+            return
+        }
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(
+                name: render.isDormant ? .easeIn : .easeOut)
+            host.animator().alphaValue = target
+            glass?.animator().alphaValue = target
+        }, completionHandler: { [weak self] in
+            MainActor.assumeIsolated { self?.panel?.invalidateShadow() }
+        })
+    }
+
+    private func layoutGlass(for render: PillRender, animate: Bool) {
+        guard let panel, let glass else { return }
+        let visual = PillPlacement.panelSize(
+            long: render.totalWidth, short: render.height, axis: render.axis)
+        let frame = PillPlacement.visualFrame(
+            in: panel.frame.size, visual: visual, edge: render.dockEdge)
+        if animate, glass.frame != frame {
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = PillMotion.widthDuration
+                context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                context.allowsImplicitAnimation = true
+                glass.animator().frame = frame
+            }, completionHandler: { [weak self] in
+                MainActor.assumeIsolated {
+                    self?.glass?.refreshMask()
+                    self?.panel?.invalidateShadow()
+                }
+            })
+        } else {
+            glass.frame = frame
+            glass.refreshMask()
+        }
+    }
+
+    /// A fully transparent window does not get tracking-area events from the
+    /// window server. While dormant, probe the pointer against the panel
+    /// frame so hover can still wake the HUD.
+    private func installDormantProbe() {
+        guard dormantGlobalMonitor == nil else { return }
+        dormantGlobalMonitor = NSEvent.addGlobalMonitorForEvents(
+            matching: [.mouseMoved, .leftMouseDragged]) { [weak self] _ in
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { self?.probeDormantPointer() }
+            }
+        }
+        dormantLocalMonitor = NSEvent.addLocalMonitorForEvents(
+            matching: [.mouseMoved, .leftMouseDragged]) { [weak self] event in
+            MainActor.assumeIsolated { self?.probeDormantPointer() }
+            return event
+        }
+    }
+
+    private func removeDormantProbe() {
+        if let dormantGlobalMonitor {
+            NSEvent.removeMonitor(dormantGlobalMonitor)
+        }
+        if let dormantLocalMonitor {
+            NSEvent.removeMonitor(dormantLocalMonitor)
+        }
+        dormantGlobalMonitor = nil
+        dormantLocalMonitor = nil
+    }
+
+    private func probeDormantPointer() {
+        guard appliedRender.isDormant, mouseIsOverPanel() else { return }
+        model.setHovered(true)
     }
 
     // MARK: - deferred actions (`_schedule_hide` / `_cancel_hide_timer`)
@@ -661,6 +829,7 @@ public final class Pill: NSObject, NSWindowDelegate {
         guard let panel else { return }
         if !isDragging {
             isDragging = true
+            model.setDragging(true)
             dragStartCanonical = preferredOrigin ?? PillPlacement.canonicalOrigin(for: panel.frame)
             dragStartAxis = appliedRender.axis
             dragStartEdge = appliedRender.dockEdge
@@ -681,6 +850,7 @@ public final class Pill: NSObject, NSWindowDelegate {
             let target = placedFrame(for: appliedRender)
             if let host {
                 setFrameDirect(panel, host, target)
+                layoutGlass(for: appliedRender, animate: false)
             }
         }
     }
@@ -688,6 +858,7 @@ public final class Pill: NSObject, NSWindowDelegate {
     private func endDrag(commit: Bool) {
         removeEscapeMonitor()
         guard isDragging, let panel, let host else {
+            if isDragging { model.setDragging(false) }
             isDragging = false
             dragMouse = nil
             return
@@ -711,6 +882,7 @@ public final class Pill: NSObject, NSWindowDelegate {
         let target = placedFrame(for: appliedRender)
         setFrameDirect(panel, host, target)
         suppressFrameAnimation = false
+        model.setDragging(false)
     }
 
     private func installEscapeMonitor() {
@@ -829,9 +1001,40 @@ final class PillHostingView<Content: View>: NSHostingView<Content> {
 
 /// The panel's content view: a transparent tray holding the glass and the
 /// surface. Drag is tracked in SwiftUI and forwarded to `Pill`.
+///
+/// The full bounds are the hover hit target — including pixels the capsule
+/// does not paint — so idle expand cannot lose the pointer into click-through
+/// padding, and a dormant (opacity-0) pill can still be woken.
 final class PillPanelView: NSView {
+    var onHover: ((Bool) -> Void)?
+    private var tracking: NSTrackingArea?
+
     override var mouseDownCanMoveWindow: Bool { false }
     override var isOpaque: Bool { false }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let tracking { removeTrackingArea(tracking) }
+        let area = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self, userInfo: nil)
+        addTrackingArea(area)
+        tracking = area
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHover?(true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHover?(false)
+    }
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard bounds.contains(point) else { return nil }
+        return super.hitTest(point) ?? self
+    }
 }
 
 /// The blur under the body.
@@ -848,7 +1051,7 @@ final class PillGlassView: NSVisualEffectView {
         blendingMode = .behindWindow
         state = .active
         isEmphasized = false
-        autoresizingMask = [.width, .height]
+        autoresizingMask = []
         maskImage = PillGlassView.capsuleMask(size: frameRect.size)
     }
 

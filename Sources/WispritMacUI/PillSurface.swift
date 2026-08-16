@@ -86,7 +86,6 @@ public struct PillSurface: View {
     /// The toast's edge-light pop: a notice landing brightens the rim for
     /// 133 ms, which is Wispr's own toast pop timing on our own chrome.
     @State private var noticePop = false
-    @State private var hovered = false
 
     public init(box: PillRenderBox) {
         self.box = box
@@ -94,29 +93,33 @@ public struct PillSurface: View {
 
     public var body: some View {
         let render = box.render
+        let hit = PillPlacement.hitSize(for: render)
+        let visual = PillPlacement.panelSize(
+            long: render.totalWidth, short: render.height, axis: render.axis)
+        let visualRect = PillPlacement.visualFrame(
+            in: hit, visual: visual, edge: render.dockEdge)
+        let grow: Animation? = reduceMotion ? nil : .easeOut(duration: PillMotion.widthDuration)
 
-        content(render)
-            // The capsule is drawn at exactly the width `Pill` says, and
-            // `Pill` says the width the *window* has at this instant — see
-            // `windowDidResize`. Anything looser and the drawn shape and the
-            // panel disagree for the length of a width animation, which is not
-            // a subtle thing: a capsule centred in a narrower panel has both of
-            // its caps clipped off and comes out a hard-edged slab.
-            .frame(width: render.axis == .vertical ? render.height : render.totalWidth,
-                   height: render.axis == .vertical ? render.totalWidth : render.height,
-                   alignment: .center)
-            .background(body(for: render))
-            .scaleEffect(arrived ? 1 : PillMotion.appearScale)
-            .opacity(render.isVisible ? 1 : 0)
-            .onHover { hovering in
-                hovered = hovering
-                box.onHover?(hovering)
-            }
-            .animation(.easeOut(duration: 0.14), value: hovered)
+        capsule(render)
+            .frame(width: visual.width, height: visual.height)
+            .offset(x: visualRect.minX, y: hit.height - visualRect.maxY)
+            .frame(width: hit.width, height: hit.height, alignment: .topLeading)
+            .contentShape(Rectangle())
+            .animation(grow, value: render.totalWidth)
+            .animation(grow, value: render.height)
+            .animation(grow, value: render.dockEdge)
             .simultaneousGesture(dragGesture())
             .onChange(of: box.render) { old, new in
                 stage(from: old, to: new)
             }
+    }
+
+    @ViewBuilder
+    private func capsule(_ render: PillRender) -> some View {
+        content(render)
+            .background(body(for: render))
+            .scaleEffect(arrived ? 1 : PillMotion.appearScale)
+            .opacity(render.isVisible ? 1 : 0)
     }
 
     // MARK: - the body
@@ -133,7 +136,7 @@ public struct PillSurface: View {
             capsule.fill(color(fill.color).opacity(bodyAlpha(for: render.state)))
             // The lit edge. Under Increase Contrast it stops being lit and
             // becomes one solid, unmistakable line.
-            capsule.strokeBorder(rimStyle(for: render.state), lineWidth: 1)
+            capsule.strokeBorder(rimStyle(for: render), lineWidth: 1)
             // A hair of thickness under the top arc. Skipped entirely under
             // Increase Contrast, where it only muddies the solid edge.
             if contrast != .increased {
@@ -150,19 +153,20 @@ public struct PillSurface: View {
                         lineWidth: 1)
             }
         }
-        .animation(.easeInOut(duration: PillMotion.alarmRimDuration), value: render.state)
+            .animation(.easeInOut(duration: PillMotion.alarmRimDuration), value: render.state)
+            .animation(.easeOut(duration: 0.14), value: render.isHovered)
     }
 
     /// The rim. Two jobs: separate the pill from an unknown desktop, and say
     /// "alarm" before a single word of the message has been read.
-    private func rimStyle(for state: PillState) -> AnyShapeStyle {
+    private func rimStyle(for render: PillRender) -> AnyShapeStyle {
         if contrast == .increased {
             return AnyShapeStyle(Color.white.opacity(PillPalette.rimContrastAlpha))
         }
-        if state == .error || state == .blockedSecure {
+        if render.state == .error || render.state == .blockedSecure {
             // A tinted edge for the whole life of the state, rather than a
             // shake at the start of it. Clear, and never an alarm.
-            let tint = color(PillPalette.tint(for: state))
+            let tint = color(PillPalette.tint(for: render.state))
             return AnyShapeStyle(
                 LinearGradient(
                     colors: [tint.opacity(PillPalette.alarmRimAlpha),
@@ -174,7 +178,8 @@ public struct PillSurface: View {
         // borrows the same lane for 133 ms — Wispr's toast pops its capsule as
         // it unfolds, and an edge that brightens is the version of that pop
         // which cannot be sheared off by the panel.
-        let boost = ((hovered && (state == .idle || state == .recording || state == .prewarming))
+        let boost = ((render.isHovered && (render.state == .idle || render.state == .recording
+                                            || render.state == .prewarming))
                         ? PillPalette.rimHoverBoost : 0)
             + (noticePop ? PillMotion.noticeRimPop : 0)
         return AnyShapeStyle(

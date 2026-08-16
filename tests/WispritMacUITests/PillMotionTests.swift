@@ -262,6 +262,37 @@ final class PillMotionTests: XCTestCase {
                           "the pill has to be there the instant the key goes down")
     }
 
+    func testIdlePresenceFadesWithoutMovingAndSnapsUnderReduceMotion() {
+        XCTAssertEqual(PillMotion.presenceDuration, 0.28)
+        XCTAssertGreaterThanOrEqual(PillMotion.presenceDuration, 0.20)
+        XCTAssertLessThanOrEqual(PillMotion.presenceDuration, 0.35)
+        XCTAssertEqual(PillMotion.hoverExitHysteresis, 0.08)
+        XCTAssertGreaterThan(PillMotion.hoverExitHysteresis, 0,
+                             "exit hysteresis filters tracking-area flicker")
+        var rest = PillRender.collapsed
+        rest.isVisible = true
+        rest.state = .idle
+        rest.totalWidth = PillGeometry.widthMini
+        rest.height = PillGeometry.heightMini
+        var hovered = rest
+        hovered.isHovered = true
+        hovered.totalWidth = PillGeometry.widthListening
+        hovered.height = PillGeometry.height
+        let hit = PillPlacement.hitSize(for: rest)
+        XCTAssertEqual(hit, PillPlacement.hitSize(for: hovered),
+                       "idle hover must not change the window size")
+        let change = PillMotion.frameChange(
+            wasVisible: true, isVisible: true,
+            oldWidth: hit.width, newWidth: hit.width,
+            newState: .idle, reduceMotion: false,
+            oldHeight: hit.height, newHeight: hit.height)
+        XCTAssertEqual(change.kind, .none, "a stable hit frame is not a resize")
+        XCTAssertEqual(PillMotion.presenceFadeDuration(reduceMotion: false),
+                       PillMotion.presenceDuration)
+        XCTAssertEqual(PillMotion.presenceFadeDuration(reduceMotion: true), 0,
+                       "Reduce Motion snaps the HUD fade")
+    }
+
     func testOrientationMorphIsAShortSpringNotASnap() {
         XCTAssertEqual(PillMotion.orientationDuration, 0.32)
         XCTAssertEqual(PillMotion.orientationSpringDamping, 0.86, accuracy: 1e-9)
