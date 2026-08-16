@@ -1,0 +1,140 @@
+{
+  "battery" : 0.9484649122807017,
+  "categories" : [
+    {
+      "category" : "proper-nouns",
+      "emptyRate" : 0,
+      "termRecall" : 0.5,
+      "utterances" : 5,
+      "wer" : 0.14634146341463414
+    },
+    {
+      "category" : "control-names",
+      "emptyRate" : 0,
+      "termRecall" : 0.25,
+      "utterances" : 4,
+      "wer" : 0.12903225806451613
+    },
+    {
+      "category" : "tech-jargon",
+      "emptyRate" : 0,
+      "termRecall" : 0.75,
+      "utterances" : 6,
+      "wer" : 0.06779661016949153
+    },
+    {
+      "category" : "homophones",
+      "emptyRate" : 0,
+      "utterances" : 5,
+      "wer" : 0
+    },
+    {
+      "category" : "addresses",
+      "emptyRate" : 0,
+      "utterances" : 5,
+      "wer" : 0.10204081632653061
+    },
+    {
+      "category" : "spelled-runs",
+      "emptyRate" : 0,
+      "utterances" : 4,
+      "wer" : 0.08333333333333333
+    },
+    {
+      "category" : "numbers-dates",
+      "emptyRate" : 0,
+      "utterances" : 4,
+      "wer" : 0.029411764705882353
+    },
+    {
+      "category" : "postal-address",
+      "emptyRate" : 0,
+      "utterances" : 1,
+      "wer" : 0
+    },
+    {
+      "category" : "commands",
+      "emptyRate" : 0,
+      "utterances" : 4,
+      "wer" : 0
+    },
+    {
+      "category" : "disfluency",
+      "emptyRate" : 0,
+      "utterances" : 5,
+      "wer" : 0.0975609756097561
+    },
+    {
+      "category" : "self-correction",
+      "emptyRate" : 0,
+      "utterances" : 10,
+      "wer" : 0.02564102564102564
+    },
+    {
+      "category" : "long-form",
+      "emptyRate" : 0,
+      "termRecall" : 1,
+      "utterances" : 1,
+      "wer" : 0.05555555555555555
+    }
+  ],
+  "config" : "refine=on,dict=on",
+  "corpusId" : "tts-samantha",
+  "engine" : "apple_live",
+  "provenance" : {
+    "corpusSource" : "tts",
+    "dictionaryTerms" : 9,
+    "gitSha" : "9702c34",
+    "osBuild" : "25F84",
+    "promptSha256" : "b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf",
+    "scorerVersion" : 1
+  },
+  "split" : "all",
+  "stages" : [
+    {
+      "cer" : 0.18093385214007782,
+      "emptyRate" : 0,
+      "errors" : 101,
+      "refWords" : 484,
+      "stage" : "raw",
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 54,
+      "wer" : 0.20867768595041322,
+      "zeroEdit" : 0.24074074074074073
+    },
+    {
+      "cer" : 0.17509727626459143,
+      "emptyRate" : 0,
+      "errors" : 98,
+      "refWords" : 484,
+      "stage" : "corrected",
+      "termRecall" : 0.05555555555555555,
+      "utterances" : 54,
+      "wer" : 0.2024793388429752,
+      "zeroEdit" : 0.25925925925925924
+    },
+    {
+      "cer" : 0.10272373540856031,
+      "emptyRate" : 0,
+      "errors" : 65,
+      "refWords" : 484,
+      "stage" : "refined",
+      "termRecall" : 0.2222222222222222,
+      "utterances" : 54,
+      "wer" : 0.13429752066115702,
+      "zeroEdit" : 0.35185185185185186
+    },
+    {
+      "cer" : 0.049805447470817124,
+      "emptyRate" : 0,
+      "errors" : 30,
+      "refWords" : 484,
+      "stage" : "final",
+      "termRecall" : 0.5555555555555556,
+      "utterances" : 54,
+      "wer" : 0.06198347107438017,
+      "zeroEdit" : 0.42592592592592593
+    }
+  ],
+  "timestamp" : "2026-08-15T21:47:14Z"
+}
