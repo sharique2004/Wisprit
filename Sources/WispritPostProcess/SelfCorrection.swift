@@ -1284,8 +1284,65 @@ private let ambiguousMonthPattern = "(?:(?-i:"
 
 private let monthPattern = "(?:" + unambiguousMonthPattern + "|" + ambiguousMonthPattern + ")"
 
-private let relativeDayPattern = alternation(["today", "tonight", "tomorrow", "yesterday"])
+// Relative time. The four bare words are what this class shipped with; the
+// phrases are the same class spoken with a determiner, and they belong HERE,
+// in the lexicon, rather than in a probe downstream — because the class is
+// what decides how much of a phrase a correction replaces.
+//
+// Measured through `PostProcess.process` before this list grew. The report is
+// utterance 189, where the second correction never resolved at all:
+//
+//   "…did not sleep very well tonight. I mean last night."   -> verbatim
+//
+// but the miss was the cheap half of the defect. "last night" was not in any
+// class, so tier (a) read only its LAST word as the item, and the determiner
+// in front of it survived the deletion — stranded, in text the user never
+// said:
+//
+//   "I slept badly last night no actually tonight"      -> "…badly last tonight"
+//   "I'll do it this morning, no actually this afternoon."
+//                                                       -> "…do it this this afternoon."
+//   "Revenue is up this year. No, actually, next year." -> "…is up this next year."
+//   "Ship it this week no actually next week"           -> "Ship it this next week"
+//   "I will be there next week, no wait, this week."    -> "…there next this week."
+//
+// That is `SpokenClockTimeTests.testTheHourNeverSurvivesAlone` in a second
+// costume — the same invariant, on a different class: a relative time is ONE
+// item, so it is either left alone or replaced whole. Pinned as such below.
+//
+// What decides whether a phrase is a NAME (here) or a name plus a MODIFIER
+// (not here) is whether it comes apart. "last night" does not: "last" is not a
+// time on its own, so the two words are one name and only the whole thing can
+// be replaced. "tomorrow morning" does: "tomorrow" is the name and "morning"
+// narrows the same slot, which `bareSlotModifiers` and the anchor probes'
+// daypart suffix already handle — so it is NOT duplicated here, and row 177
+// ("…with Vivek tonight. I mean, tomorrow morning.") still resolves through
+// exactly the path it always did.
+//
+// Longest-first ordering is load-bearing for the first time in this pattern:
+// "this week" is a prefix of "this weekend". `alternation` sorts, and
+// `SelfCorrectionTests.testRelativeTimeAlternationIsLongestFirst` pins that it
+// still does.
+private let relativeDayPattern = alternation([
+    "today", "tonight", "tomorrow", "yesterday",
+    // <determiner> <daypart>.
+    "this morning", "this afternoon", "this evening",
+    "last night", "last evening",
+    // <determiner> <period>. "the following" is the dictated long form of
+    // "next" and was already a relative time to the anchor tier; it is a name
+    // here for the same reason the rest are.
+    "this week", "this month", "this year", "this weekend",
+    "last week", "last month", "last year", "last weekend",
+    "next week", "next month", "next year", "next weekend",
+    "the following week", "the following month",
+    "the following year", "the following weekend",
+])
 
+// Five classes, five capture groups, and every group number downstream
+// (`xClassFirst`, `markerNoWait`, `yWhole`, …) is a LITERAL. A class is
+// therefore extended by adding alternatives to its word list — never a group —
+// so this shape, and every index that depends on it, never moves.
+// `SelfCorrectionTests.testJointPatternGroupLayout` pins the count.
 private let classCount = 5
 private let classAlternation = "(?:(" + clockPattern + ")|(" + numberPattern + ")|("
     + weekdayPattern + ")|(" + monthPattern + ")|(" + relativeDayPattern + "))"
@@ -1371,6 +1428,16 @@ private let jointPattern = "(?<![\\w'-])"
         + gap
         + "(?:(?:(?:to|for|from|with|on|at|in)\\s+)?(" + classAlternation + ")(?![\\w'-]))?"
 private let jointRx = Rx(jointPattern)
+
+/// The two facts about the joint pattern that no caller can observe and a
+/// vocabulary edit can break in silence: how many groups it has, and how its
+/// classes are ordered. Both are literals the sweep trusts, so both are
+/// exposed for `SelfCorrectionTests` to pin rather than left to be discovered
+/// by a golden three tiers downstream.
+extension SelfCorrection {
+    static var jointPatternGroupCount: Int { jointRx.captureGroupCount }
+    static var relativeTimeAlternation: String { relativeDayPattern }
+}
 
 // MARK: - Possessive date pair
 
@@ -2225,14 +2292,23 @@ private let anchorMonthRx = Rx("^(?:" + monthPattern + ")(?:\\s+\\d{1,2}(?:st|nd
 /// correcting a number, and the "the" is part of how English says it.
 private let anchorNumberRx = Rx("^(?:the\\s+)?(?:" + numberPattern + ")$")
 
-/// Relative time: tier (a)'s four bare words, plus the phrase forms speech
-/// actually uses for the same thing. "day after" is the one the user's
-/// sentence turns on — it is a relative day exactly as "tomorrow" is, and the
-/// only reason tier (a) cannot see it is that it is two words.
-private let anchorRelativeRx = Rx("^(?:" + relativeDayPattern
-    + "|(?:the\\s+)?day\\s+(?:after|before)(?:\\s+(?:tomorrow|yesterday))?"
-    + "|(?:next|last|this|the\\s+following)\\s+(?:week|month|year|weekend)"
-    + "|this\\s+(?:morning|afternoon|evening))$")
+/// Relative time: the class lexicon, with the modifier that still leaves it a
+/// relative time — the SAME optional daypart `anchorWeekdayRx` gives a
+/// weekday, for the same reason. It is what a chained correction leaves
+/// BEHIND: "Dinner tonight. I mean, tomorrow morning. Sorry, tomorrow
+/// evening." can only resolve its second cue if the first one's own output
+/// still classifies, and before this suffix existed it did not — the weekday
+/// spelling of that chain resolved and the relative-day spelling shipped with
+/// both dates in it.
+///
+/// The determiner forms ("last night", "next week") are NOT repeated here:
+/// they are names and they live in `relativeDayPattern`. What is left over is
+/// the "day after" family, which tier (a) still cannot see — two words,
+/// neither of them a name — and which is the shape the original user report
+/// turned on.
+private let anchorRelativeRx = Rx("^(?:(?:" + relativeDayPattern + ")"
+    + "(?:\\s+(?:morning|afternoon|evening|night))?"
+    + "|(?:the\\s+)?day\\s+(?:after|before)(?:\\s+(?:tomorrow|yesterday))?)$")
 
 /// Prepositions that can head a parallel phrase. Closed and small: each one is
 /// a preposition that takes a plain noun-phrase object in dictation, which is

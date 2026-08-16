@@ -131,6 +131,79 @@ final class SelfCorrectionTests: XCTestCase {
         ])
     }
 
+    /// The determiner forms — "last night", "this morning", "next week" — are
+    /// members of the SAME class as the four bare words, so any of them may
+    /// correct any other.
+    func testRelativeTimePhrasesAreOneClosedClassItem() {
+        assertCases([
+            ("I slept badly last night no actually tonight", "I slept badly tonight"),
+            ("I slept badly tonight no actually last night", "I slept badly last night"),
+            ("the demo is this morning no actually this afternoon",
+             "the demo is this afternoon"),
+            ("ship it this week no actually next week", "ship it next week"),
+            ("the offsite is next month I mean last month", "the offsite is last month"),
+            ("book it for next year sorry this year", "book it for this year"),
+            ("we ship this weekend I mean next weekend", "we ship next weekend"),
+            ("the review is next week I mean the following week",
+             "the review is the following week"),
+            // ...including across the weekday↔relative-day compatibility pair,
+            // which the phrase forms join on the same terms the bare words did.
+            ("ship it Thursday no actually next week", "ship it next week"),
+            ("ship it last night wait Thursday", "ship it Thursday"),
+        ])
+    }
+
+    /// `SpokenClockTimeTests.testTheHourNeverSurvivesAlone`, stated for this
+    /// class: a relative time is ONE item, so it is either left alone or
+    /// replaced whole. Before the phrases were in the lexicon the class knew
+    /// only their LAST word, so tier (b)'s single-word span deleted that and
+    /// left the determiner standing in text the user never said. Every input
+    /// below is a measured output of the shipping pipeline, quoted in the
+    /// comment beside it.
+    func testTheDeterminerNeverSurvivesAlone() {
+        let measured: [(raw: String, wasShipped: String)] = [
+            ("I slept badly last night no actually tonight", "I slept badly last tonight"),
+            ("I'll do it this morning, no actually this afternoon.",
+             "I'll do it this this afternoon."),
+            ("Revenue is up this year. No, actually, next year.",
+             "Revenue is up this next year."),
+            ("Ship it this week no actually next week", "Ship it this next week"),
+            ("I will be there next week, no wait, this week.",
+             "I will be there next this week."),
+            ("Move the retro to this week, I mean next week.",
+             "Move the retro to this next week."),
+        ]
+        for (raw, wasShipped) in measured {
+            let out = PostProcess.process(raw)
+            XCTAssertNotEqual(out, wasShipped, "orphaned determiner: \(raw.debugDescription)")
+            // Stated without reference to WHETHER the pair corrects: whatever
+            // the answer is, no stranded determiner may be in it.
+            for orphan in [" this ", " last ", " next "] where !raw.contains(orphan + orphan) {
+                XCTAssertFalse(out.contains(orphan + orphan),
+                               "doubled determiner: \(out.debugDescription)")
+            }
+            XCTAssertEqual(PostProcess.process(out), out, raw)
+        }
+    }
+
+    /// The same vocabulary in ordinary use. Every phrase added to the class is
+    /// also everyday English, and the class only fires when a connective sits
+    /// between two members of it.
+    func testRelativeTimePhrasesInOrdinaryUse() {
+        assertUntouched([
+            "I have not seen him since last night.",
+            "This week has been hard.",
+            "We meet this week and next week.",
+            "I work mornings and nights.",
+            "We meet every night this week.",
+            "We do this every week. No, actually, twice a week.",
+            "We doubled revenue this year. No, actually, we tripled it.",
+            "There is no wait this morning.",
+            "The clinic has no wait time today.",
+            "It rained day after day, week after week.",
+        ])
+    }
+
     // MARK: - tier (a): possessive date pairs
 
     func testPossessiveDatePairs() {
@@ -421,6 +494,54 @@ final class SelfCorrectionTests: XCTestCase {
         // The engine now also runs sandwich connectives and past-day
         // restatement; 5 ms still leaves >100× headroom on the ~1/s live path.
         XCTAssertLessThan(ms, 5)
+    }
+
+    /// The joint pattern addresses its groups by LITERAL number — `xWhole` 1,
+    /// the X classes 2…6, the five captured markers 8…12, `yWhole` 13, the Y
+    /// classes 14…18 — so a capturing group added anywhere inside a class
+    /// sub-pattern renumbers everything after it and the sweep silently starts
+    /// reading the wrong side of every joint. Classes are therefore extended by
+    /// adding ALTERNATIVES to their word lists, never groups, and this is the
+    /// number that proves it: 18 == yClassFirst (14) + classCount (5) - 1.
+    func testJointPatternGroupLayout() {
+        XCTAssertEqual(SelfCorrection.jointPatternGroupCount, 18)
+        // ...and the relative-day class is still the FIFTH one, which is what
+        // the weekday↔relative-day compatibility pair (2,4) is indexed on.
+        XCTAssertTrue(SelfCorrection.classesCompatible(2, 4))
+        XCTAssertTrue(SelfCorrection.classesCompatible(4, 2))
+        XCTAssertEqual(SelfCorrection.apply("ship it Thursday no actually last night"),
+                       "ship it last night")
+        XCTAssertEqual(SelfCorrection.apply("ship it Thursday no actually 3 o'clock"),
+                       "ship it Thursday no actually 3 o'clock")
+    }
+
+    /// Regex alternation is FIRST-match, not longest-match, so a phrase whose
+    /// prefix is also an alternative has to come first or the shorter one wins
+    /// and truncates the anchor. The relative-time class is the first one in
+    /// this file to contain such a pair — "this week" is a prefix of "this
+    /// weekend" — and `alternation` sorts longest-first for exactly that
+    /// reason. Pinned here because the sort lives one call away from the
+    /// vocabulary and nothing else would notice if it stopped.
+    func testRelativeTimeAlternationIsLongestFirst() {
+        // The compiled `(?:a|b|c)`, back to the list the alternation was built
+        // from — a substring search would find "this week" INSIDE "this
+        // weekend" and prove nothing.
+        let alt = SelfCorrection.relativeTimeAlternation
+            .trimmingCharacters(in: CharacterSet(charactersIn: "()?:"))
+            .components(separatedBy: "|")
+        for (long, short) in [("this weekend", "this week"), ("last weekend", "last week"),
+                              ("next weekend", "next week"),
+                              ("the following weekend", "the following week")] {
+            guard let longAt = alt.firstIndex(of: long),
+                  let shortAt = alt.firstIndex(of: short) else {
+                return XCTFail("missing from the class: \(long) / \(short)")
+            }
+            XCTAssertLessThan(longAt, shortAt, "\(short) shadows \(long)")
+        }
+        // The behavioral half: the whole phrase is the item, so the correction
+        // replaces all of it and leaves no "end" behind.
+        XCTAssertEqual(SelfCorrection.apply("see you this weekend no actually next weekend"),
+                       "see you next weekend")
     }
 
     func testEveryFixtureIsIdempotentUnderTheFullPipeline() {

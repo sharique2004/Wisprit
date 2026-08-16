@@ -620,6 +620,12 @@ struct Rx {
         re = try? NSRegularExpression(pattern: pattern, options: options)
     }
 
+    /// How many capture groups the compiled pattern has, or -1 when it did not
+    /// compile. `SelfCorrection`'s joint pattern addresses its groups by
+    /// literal number, so this is how a test proves a sub-pattern edit added
+    /// no group and renumbered nothing.
+    var captureGroupCount: Int { re?.numberOfCaptureGroups ?? -1 }
+
     func matches(_ s: String) -> Bool {
         guard let re else { return false }
         return re.firstMatch(in: s, options: [], range: NSRange(location: 0, length: (s as NSString).length)) != nil

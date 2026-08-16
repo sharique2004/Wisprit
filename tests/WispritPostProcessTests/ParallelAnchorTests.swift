@@ -227,6 +227,100 @@ final class ParallelAnchorTests: XCTestCase {
         for (id, raw, expected) in cases { assertPipeline(raw, expected, id) }
     }
 
+    /// The relative-time class, once its determiner forms became names rather
+    /// than a bare word plus a stranded modifier. Any member anchors any other
+    /// member: a daypart phrase corrects a bare day, a period corrects a day,
+    /// a day corrects a period.
+    func testRelativeTimeAnchors() {
+        let cases: [(id: String, raw: String, expected: String)] = [
+            // The reported pair — the one that shipped unresolved.
+            ("tonight-last-night", "I slept badly tonight. I mean last night.",
+             "I slept badly last night."),
+            ("daypart", "The demo is this morning. I mean this afternoon.",
+             "The demo is this afternoon."),
+            ("period-to-day", "Ship it next week. I mean tomorrow.", "Ship it tomorrow."),
+            ("day-to-period", "Ship it tomorrow. I mean next week.", "Ship it next week."),
+            ("daypart-to-day", "Let's talk this evening. I mean tomorrow, after the standup.",
+             "Let's talk tomorrow, after the standup."),
+            ("weekend", "See you this weekend. I mean next weekend.", "See you next weekend."),
+            // Already resolving before the vocabulary grew, pinned so the
+            // rewrite of the probe is visible if it takes one away.
+            ("period", "The offsite is next week. I mean next month, after the launch.",
+             "The offsite is next month, after the launch."),
+            ("day-after", "I want to go tomorrow. I mean, day after to the hackathon.",
+             "I want to go day after to the hackathon."),
+            ("day-after-tomorrow", "Let's meet the day after tomorrow. "
+                + "I mean the day before yesterday.",
+             "Let's meet the day before yesterday."),
+        ]
+        for (id, raw, expected) in cases { assertPipeline(raw, expected, id) }
+    }
+
+    /// The compound-versus-modifier line, pinned from both sides.
+    ///
+    /// A relative time is a NAME plus an optional same-slot MODIFIER, and the
+    /// two live in different places on purpose. "last night" is a name — "last"
+    /// is not a time on its own, so the phrase does not come apart and it is a
+    /// member of the closed class. "tomorrow morning" is a name plus a
+    /// modifier — "tomorrow" is the member and "morning" narrows the same slot
+    /// — so it is NOT a second entry in the class, and row 177 resolves through
+    /// the path it always did: the anchor is "tonight" ↔ "tomorrow", and
+    /// "morning" rides along because the splice keeps the whole post-cue tail.
+    ///
+    /// The chain is what makes the modifier's one home matter. `anchorWeekdayRx`
+    /// has carried an optional daypart since it shipped, so the WEEKDAY
+    /// spelling of a chained correction has always resolved; the relative-day
+    /// spelling did not, because its probe had no such suffix — measured
+    /// "Dinner tomorrow morning. Sorry, tomorrow evening.", both dates left in.
+    /// One suffix, both day classes, no third handling.
+    func testDaypartIsAModifierNotASecondName() {
+        // Row 177, verbatim from `utterance_detail` — the behavior this rule
+        // may not change.
+        assertPipeline("I was planning on going for dinner with Vivek tonight. "
+            + "I mean, tomorrow morning.",
+                       "I was planning on going for dinner with Vivek tomorrow morning.",
+                       "row-177")
+        // The same shape once more, so the pin is not a single sentence.
+        assertPipeline("Dinner tonight. I mean, tomorrow evening.", "Dinner tomorrow evening.",
+                       "daypart-tail")
+        // The chain: the first cue's own OUTPUT has to classify for the second
+        // cue to find an anchor, which is what the daypart suffix is for.
+        assertPipeline("Dinner tonight. I mean, tomorrow morning. Sorry, tomorrow evening.",
+                       "Dinner tomorrow evening.", "relative-chain")
+        // The weekday spelling of the same chain, which already worked — the
+        // two day classes now behave alike.
+        assertPipeline("Ship it Thursday. No, rather Friday morning. Sorry, Saturday morning.",
+                       "Ship it Saturday morning.", "weekday-chain")
+        // The cue-less tier's own modifier list is untouched: the survivor may
+        // still carry a daypart or a clock tail and still count as bare.
+        assertPipeline("I was planning on going for dinner tomorrow, today morning.",
+                       "I was planning on going for dinner today morning.", "bare-daypart")
+        assertPipeline("dinner tomorrow, today at six.", "dinner today at six.", "bare-clock")
+    }
+
+    /// The fences that keep the widened vocabulary honest. Two temporals in a
+    /// sentence are ordinary English far more often than they are a
+    /// correction, and every rule that could reach these has to decline.
+    func testRelativeTimeMustNotFire() {
+        assertVerbatim([
+            // Two temporals with a conjunction and a clause between them.
+            ("conjunction", "I did not sleep well last night and I am tired today."),
+            // Separate clauses, with content after each — not touching, not
+            // bare, not clause-final.
+            ("separate-clauses", "Last night was rough. This morning is worse."),
+            // Plurals are not class members.
+            ("plurals", "I work mornings and nights."),
+            // A daypart that belongs to the phrase after it, not before it.
+            ("every-night", "We meet every night this week."),
+            ("since", "I have not seen him since last night."),
+            ("this-week-prose", "This week has been hard."),
+            ("list", "We meet this week and next week."),
+            // A cue, a pause, and still no parallel: the replacement is a
+            // clause, not a restatement.
+            ("no-anchor", "I slept badly last night. I mean, the whole week was bad."),
+        ])
+    }
+
     func testPrepositionalAnchors() {
         let cases: [(id: String, raw: String, expected: String)] = [
             ("bare-object", "Send it to marketing, sorry to finance.", "Send it to finance."),
@@ -369,6 +463,33 @@ final class ParallelAnchorTests: XCTestCase {
             (180, "This is what the test showed based on everything that, you know, I usually "
                 + "kind of talk about, but yeah, it's not working. Fix it."),
         ].map { (id: "utterance \($0.0)", raw: $0.1) })
+    }
+
+    /// `utterance_detail` row 189 — one utterance carrying TWO corrections of
+    /// the same class, and the reason the relative-time vocabulary had to grow.
+    ///
+    /// The hackathon correction resolved on the night; the sleep one did not,
+    /// and the cause was in the lexicon rather than in any tier's logic: "last
+    /// night" was not a member of ANY temporal class, so `leadingClass` found
+    /// no class for the replacement and `anchorStart` correctly declined. The
+    /// utterance shipped with both dates in it.
+    ///
+    /// Pinned as the whole sentence, because the two cues resolve on separate
+    /// passes of `apply`'s fixpoint loop and the second one reads what the
+    /// first one produced.
+    func testProductionRow189() {
+        assertPipeline(
+            "I was thinking of going for a harkathon tomorrow. I mean, today, but I did "
+                + "not end up going because, uh, I did not sleep very well tonight. "
+                + "I mean last night. And because of that, I was feeling tired.",
+            "I was thinking of going for a harkathon today, but I did not end up going "
+                + "because, I did not sleep very well last night. And because of that, "
+                + "I was feeling tired.",
+            "utterance 189")
+        // The second correction on its own, so a regression names the half
+        // that broke rather than the whole paragraph.
+        assertPipeline("I did not sleep very well tonight. I mean last night.",
+                       "I did not sleep very well last night.", "utterance 189 second cue")
     }
 
     /// A correction is spoken the moment the speaker notices the mistake, and
