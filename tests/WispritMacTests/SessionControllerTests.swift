@@ -180,10 +180,16 @@ final class SessionControllerTests: XCTestCase {
         h.session.dispatch(HotkeyEvent(.press, ts: 0))
         for partial in LiveCorrectionScript.partials { h.asr.deliverPartial(partial) }
 
-        XCTAssertEqual(pill.bubble, "x on friday",
-                       "the rendered tail — PartialTail's window over the corrected text")
+        // The correction reaches the pill; the pill no longer *renders* it.
+        // The 2026-08-15 redesign took the transcript tail off the capsule —
+        // Flow's pill carries no text, and a tail that grows to 288 pt fights
+        // the resting-sliver directive. What matters to this feature is that
+        // the corrected text is what the surface is handed, and it is: the
+        // session still resolves "thuersday actually friday" before anything
+        // downstream sees it, and Live Typing puts the words in the field.
         XCTAssertEqual(pill.partials.last, LiveCorrectionScript.corrected)
-        XCTAssertFalse(pill.bubble.contains("thuersday"))
+        XCTAssertFalse(pill.partials.last?.contains("thuersday") ?? true)
+        XCTAssertEqual(pill.bubble, "", "the capsule shows no transcript text")
         // Verbatim-first: every partial before the marker completes is passed
         // through untouched, because until "actually friday" lands there is no
         // unambiguous correction to make.
@@ -203,10 +209,10 @@ final class SessionControllerTests: XCTestCase {
         h.asr.deliverPartial(LiveCorrectionScript.partials[3])
         h.asr.deliverPartial(LiveCorrectionScript.corrected)
 
-        XCTAssertEqual(pill.bubble, "x on friday")
         XCTAssertEqual(pill.partials.suffix(3),
                        [LiveCorrectionScript.corrected, LiveCorrectionScript.corrected,
                         LiveCorrectionScript.corrected])
+        XCTAssertEqual(pill.bubble, "", "no transcript tail on the capsule (see above)")
     }
 
     /// The regression that matters: the preview is a preview. Finalize re-runs

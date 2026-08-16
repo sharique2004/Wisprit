@@ -29,13 +29,25 @@ public final class Pill: NSObject, NSWindowDelegate {
         public var savedPosition: () -> CGPoint?
         /// Persist a user drag (`windowDidMove_` → `settings.set("pill_position", …)`).
         public var persistPosition: (CGPoint) -> Void
+        /// Click the idle bar — same as pressing the hotkey.
+        public var onStart: () -> Void
+        /// Recording chrome: X. Same as Esc.
+        public var onCancel: () -> Void
+        /// Recording chrome: ✓. Same as releasing the hotkey.
+        public var onConfirm: () -> Void
 
         public init(isSuppressed: @escaping () -> Bool = { false },
                     savedPosition: @escaping () -> CGPoint? = { nil },
-                    persistPosition: @escaping (CGPoint) -> Void = { _ in }) {
+                    persistPosition: @escaping (CGPoint) -> Void = { _ in },
+                    onStart: @escaping () -> Void = {},
+                    onCancel: @escaping () -> Void = {},
+                    onConfirm: @escaping () -> Void = {}) {
             self.isSuppressed = isSuppressed
             self.savedPosition = savedPosition
             self.persistPosition = persistPosition
+            self.onStart = onStart
+            self.onCancel = onCancel
+            self.onConfirm = onConfirm
         }
     }
 
@@ -69,6 +81,25 @@ public final class Pill: NSObject, NSWindowDelegate {
     /// be overwritten by that: shrink back and the pill returns to where it was
     /// dragged.
     private var preferredOrigin: CGPoint?
+    /// True while a pointer drag owns the frame — `apply` must not yank the
+    /// pill back to `preferredOrigin` underneath the cursor.
+    private var isDragging = false
+    /// Escape-cancel and drag-end must snap, not spring, back to the parked
+    /// frame. Held across the `setPlacement` emit so `apply` does not start
+    /// an orientation morph that `setFrameDirect` would then fight.
+    private var suppressFrameAnimation = false
+    private var grabFraction = CGPoint(x: 0.5, y: 0.5)
+    private var dragMouse: CGPoint?
+    private var dragStartCanonical: CGPoint?
+    private var dragStartAxis: PillAxis = .horizontal
+    private var dragStartEdge: PillScreenEdge?
+    private var escapeMonitor: Any?
+    private var shakeTimer: Timer?
+    private var shakeGeneration = 0
+    private var lastShaking = false
+    /// Origin captured when a wiggle starts, so interrupting it cannot leave
+    /// the panel a few points off the user's spot.
+    private var shakeBaseOrigin: CGPoint?
 
     public init(configuration: Configuration = Configuration()) {
         self.config = configuration
@@ -90,7 +121,9 @@ public final class Pill: NSObject, NSWindowDelegate {
     public func showPrewarming() { model.showPrewarming() }
     public func showRecording() { model.showRecording() }
     public func updateLevel(_ level: Double) { model.updateLevel(level) }
-    /// NEW — render the tail of the in-progress transcript while recording.
+    /// Engine evidence that the pipeline heard something. The pill does not
+    /// draw the words — they go to the caret — but the call still suppresses
+    /// the dead-mic cue.
     public func livePartial(_ text: String) { model.livePartial(text) }
     /// NEW — flash a short message ("Learned Sharique").
     public func transientNotice(_ text: String) { model.transientNotice(text) }
@@ -102,8 +135,8 @@ public final class Pill: NSObject, NSWindowDelegate {
     public func flashMissed(_ message: String = PillGeometry.missedMessage) {
         model.flashMissed(message)
     }
-    /// NEW — the marginal-audio miss: a `missed` body with the alarm states'
-    /// width and dwell, because the copy is an instruction.
+    /// Empty / nothing-heard: a graceful wiggle, never a banner. The session
+    /// still sends copy; the pill ignores the words.
     public func flashTooQuiet(_ message: String) { model.flashTooQuiet(message) }
     /// NEW — Secure Keyboard Entry blocked the insertion; the text is on the
     /// clipboard. Until the session adopts it, `flashError` carries the same
@@ -148,7 +181,7 @@ public final class Pill: NSObject, NSWindowDelegate {
         panel.isOpaque = false
         panel.backgroundColor = .clear
         panel.hasShadow = true
-        panel.isMovableByWindowBackground = true
+        panel.isMovableByWindowBackground = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         panel.hidesOnDeactivate = false
         panel.delegate = self
@@ -187,11 +220,37 @@ public final class Pill: NSObject, NSWindowDelegate {
         self.panel = panel
         self.host = host
         self.glass = glass
+        wireSurface()
         applyTransparencyPreference()
         NSWorkspace.shared.notificationCenter.addObserver(
             self, selector: #selector(accessibilityDisplayOptionsChanged),
             name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         restorePosition()
+        syncPlacement(from: panel.frame)
+    }
+
+    private func wireSurface() {
+        box.onHover = { [weak self] hovering in
+            MainActor.assumeIsolated { self?.model.setHovered(hovering) }
+        }
+        box.onStart = { [weak self] in
+            MainActor.assumeIsolated { self?.config.onStart() }
+        }
+        box.onCancel = { [weak self] in
+            MainActor.assumeIsolated { self?.config.onCancel() }
+        }
+        box.onConfirm = { [weak self] in
+            MainActor.assumeIsolated { self?.config.onConfirm() }
+        }
+        box.onDrag = { [weak self] point in
+            MainActor.assumeIsolated { self?.trackDrag(to: point) }
+        }
+        box.onDragEnded = { [weak self] in
+            MainActor.assumeIsolated { self?.endDrag(commit: true) }
+        }
+        box.onDragCancelled = { [weak self] in
+            MainActor.assumeIsolated { self?.endDrag(commit: false) }
+        }
     }
 
     /// Reduce Transparency turns the glass off entirely; `PillSurface` reads the
@@ -231,41 +290,72 @@ public final class Pill: NSObject, NSWindowDelegate {
     }
 
     private func isOnScreen(_ point: CGPoint) -> Bool {
-        NSScreen.screens.contains { $0.visibleFrame.contains(point) }
+        NSScreen.screens.contains { $0.visibleFrame.contains(point) || $0.frame.contains(point) }
     }
 
-    /// §2.6 guard #2, the edge flip: growth is rightward only, so a pill parked
-    /// near the right edge would grow off screen. Slide it left just far enough
-    /// to stay on, and remember the user's own x so it comes back when the
-    /// panel contracts.
+    private func screen(for point: CGPoint) -> NSScreen? {
+        let screens = NSScreen.screens
+        guard let index = PillPlacement.screenIndex(
+            containing: point,
+            frames: screens.map(\.frame),
+            visibleFrames: screens.map(\.visibleFrame))
+        else { return NSScreen.main }
+        return screens[index]
+    }
+
+    private func syncPlacement(from frame: CGRect) {
+        guard let screen = screen(for: CGPoint(x: frame.midX, y: frame.midY)) else { return }
+        let place = PillPlacement.placement(
+            center: CGPoint(x: frame.midX, y: frame.midY),
+            in: screen.visibleFrame)
+        model.setPlacement(axis: place.axis, edge: place.edge)
+    }
+
+    /// The panel frame for this render. Growth is centred on the user's
+    /// dragged position (the canonical listening-width origin), then clamped
+    /// to the visible work area so the Dock and menu bar are never covered.
+    /// During a drag the cursor owns the centre via `grabFraction`.
+    private func placedFrame(for render: PillRender) -> CGRect {
+        let size = PillPlacement.panelSize(
+            long: render.totalWidth, short: render.height, axis: render.axis)
+        if isDragging, let mouse = dragMouse {
+            var frame = CGRect(x: mouse.x - grabFraction.x * size.width,
+                               y: mouse.y - grabFraction.y * size.height,
+                               width: size.width, height: size.height)
+            if let screen = screen(for: CGPoint(x: frame.midX, y: frame.midY)) {
+                frame = PillPlacement.clamp(frame, to: screen.visibleFrame)
+            }
+            return frame
+        }
+        guard let anchor = preferredOrigin else {
+            return NSRect(origin: panel?.frame.origin ?? .zero, size: size)
+        }
+        let center = CGPoint(x: anchor.x + PillGeometry.widthListening / 2,
+                             y: anchor.y + PillGeometry.height / 2)
+        var frame = PillPlacement.frame(
+            center: center, long: render.totalWidth, short: render.height, axis: render.axis)
+        if let screen = screen(for: center) {
+            frame = PillPlacement.clamp(frame, to: screen.visibleFrame)
+        }
+        return frame
+    }
+
+    /// §2.6 guard #2, kept as a width-only helper for call sites that still
+    /// speak in origins. Forwards to `placedFrame`.
     private func placedOrigin(width: Double) -> CGPoint {
-        guard let anchor = preferredOrigin else { return panel?.frame.origin ?? .zero }
-        guard let screen = NSScreen.screens.first(where: { $0.visibleFrame.contains(anchor) })
-                ?? NSScreen.main else { return anchor }
-        // `preferredOrigin` is, by convention, where a LISTENING-width pill's
-        // origin sits (`windowDidMove` normalizes whatever size was dragged).
-        // Every other size is placed around that pill's centre, so the mini
-        // sliver rests exactly under where the capsule will grow and a notice
-        // unfolds from the middle instead of marching right.
-        let centered = anchor.x + (PillGeometry.widthListening - width) / 2.0
-        let limit = screen.visibleFrame.maxX - PillGeometry.edgeMargin - width
-        let x = max(screen.visibleFrame.minX, min(centered, limit))
-        return CGPoint(x: x, y: anchor.y)
+        var render = appliedRender
+        render.totalWidth = width
+        return placedFrame(for: render).origin
     }
 
     // MARK: - NSWindowDelegate
 
     public func windowDidMove(_ notification: Notification) {
-        guard !suppressMoveNotifications, frameAnimations == 0, let panel else { return }
-        // Normalize to the listening-width origin whatever size was dragged —
-        // dragging the mini sliver and dragging the full capsule must both
-        // mean "the pill lives here". Keeps the persisted format (and every
-        // position saved before the mini rest existed) unchanged.
-        let normalized = CGPoint(
-            x: panel.frame.origin.x + (panel.frame.width - PillGeometry.widthListening) / 2.0,
-            y: panel.frame.origin.y)
-        preferredOrigin = normalized
-        config.persistPosition(normalized)
+        guard !suppressMoveNotifications, frameAnimations == 0, !isDragging,
+              shakeTimer == nil, let panel else { return }
+        preferredOrigin = PillPlacement.canonicalOrigin(for: panel.frame)
+        syncPlacement(from: panel.frame)
+        config.persistPosition(preferredOrigin!)
     }
 
     /// Every step of every width animation, including the ones AppKit drives
@@ -299,8 +389,13 @@ public final class Pill: NSObject, NSWindowDelegate {
         // It writes `box.render` at the display's rate, which sounds expensive
         // and is not: this only ever runs during a state transition. The 20 Hz
         // level path changes no width, so it never comes through here.
-        if frameAnimations > 0, box.render.totalWidth != size.width {
-            box.render.totalWidth = size.width
+        // Feed the live panel size back in the model's long/short vocabulary.
+        // Horizontal pills: long = width. Vertical pills: long = height.
+        // Updating only `totalWidth` from `size.width` was right when the
+        // capsule never stood up; a vertical morph would otherwise draw a
+        // 96 pt-tall capsule inside a still-short window (or the reverse).
+        if frameAnimations > 0 {
+            syncDrawnSize(from: size, into: appliedRender)
         }
         glass?.refreshMask()
         panel.invalidateShadow()
@@ -325,11 +420,9 @@ public final class Pill: NSObject, NSWindowDelegate {
         let previous = appliedRender
         appliedRender = render
 
-        let size = NSSize(width: render.totalWidth, height: render.height)
-        // Grow rightwards only: the origin is the user's dragged position and
-        // the pill must stay exactly where they put it — unless that would put
-        // it off the right edge, which is what `placedOrigin` handles.
-        let target = NSRect(origin: placedOrigin(width: render.totalWidth), size: size)
+        let target = placedFrame(for: render)
+        let previousSize = PillPlacement.panelSize(
+            long: previous.totalWidth, short: previous.height, axis: previous.axis)
 
         // The bypass. It still owes the `.none` arm's two non-drawing duties —
         // the frame correction and the order front/out — because those are
@@ -343,12 +436,40 @@ public final class Pill: NSObject, NSWindowDelegate {
             return
         }
 
+        // Direct manipulation owns the frame while the pointer is down —
+        // a spring would lag the cursor the moment an edge reorients. The
+        // morph runs on release and on non-drag state changes.
+        if isDragging || suppressFrameAnimation {
+            box.render = render
+            setFrameDirect(panel, host, target)
+            if render.isVisible { panel.orderFrontRegardless() } else { panel.orderOut(nil) }
+            lastShaking = render.isShaking
+            return
+        }
+
+        // The wiggle *is* the motion. A width spring fighting the sine leaves
+        // the panel twitching on two clocks; snap to the shake pose first.
+        if render.isShaking && !lastShaking {
+            hideGeneration += 1
+            box.render = render
+            setFrameDirect(panel, host, target)
+            if render.isVisible { panel.orderFrontRegardless() }
+            beginShake()
+            lastShaking = true
+            return
+        }
+        if !render.isShaking && lastShaking {
+            stopShake()
+            lastShaking = false
+        }
+
         let change = PillMotion.frameChange(
             wasVisible: previous.isVisible, isVisible: render.isVisible,
-            oldWidth: previous.totalWidth, newWidth: render.totalWidth,
+            oldWidth: previousSize.width, newWidth: target.width,
             newState: render.state,
             reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion,
-            notice: PillMotion.NoticeChange.between(previous, render))
+            notice: PillMotion.NoticeChange.between(previous, render),
+            oldHeight: previousSize.height, newHeight: target.height)
 
         switch change.kind {
         case .appear:
@@ -387,9 +508,7 @@ public final class Pill: NSObject, NSWindowDelegate {
             // first step has not happened yet, and one frame of slab is still
             // a frame of slab.
             if change.animatesFrame {
-                var drawn = render
-                drawn.totalWidth = panel.frame.width
-                box.render = drawn
+                syncDrawnSize(from: panel.frame.size, into: render)
             } else {
                 box.render = render
             }
@@ -432,6 +551,21 @@ public final class Pill: NSObject, NSWindowDelegate {
                 panel.orderOut(nil)
             }
         }
+    }
+
+    /// Map a live panel size onto `PillRender.totalWidth` / `height` so the
+    /// SwiftUI capsule and the window agree in every intermediate frame of a
+    /// morph — including the ones that swap width and height.
+    private func syncDrawnSize(from size: CGSize, into render: PillRender) {
+        var drawn = render
+        if render.axis == .vertical {
+            drawn.totalWidth = size.height
+            drawn.height = size.width
+        } else {
+            drawn.totalWidth = size.width
+            drawn.height = size.height
+        }
+        box.render = drawn
     }
 
     /// The one place a named curve becomes a real one.
@@ -500,9 +634,7 @@ public final class Pill: NSObject, NSWindowDelegate {
         panel.alphaValue = 1
         let render = appliedRender
         box.render = render
-        let size = NSSize(width: render.totalWidth, height: render.height)
-        setFrameDirect(panel, host,
-                       NSRect(origin: placedOrigin(width: render.totalWidth), size: size))
+        setFrameDirect(panel, host, placedFrame(for: render))
     }
 
     // MARK: - deferred actions (`_schedule_hide` / `_cancel_hide_timer`)
@@ -522,19 +654,167 @@ public final class Pill: NSObject, NSWindowDelegate {
         deferredTimer?.invalidate()
         deferredTimer = nil
     }
+
+    // MARK: - drag
+
+    private func trackDrag(to mouse: CGPoint) {
+        guard let panel else { return }
+        if !isDragging {
+            isDragging = true
+            dragStartCanonical = preferredOrigin ?? PillPlacement.canonicalOrigin(for: panel.frame)
+            dragStartAxis = appliedRender.axis
+            dragStartEdge = appliedRender.dockEdge
+            let frame = panel.frame
+            if frame.width > 0, frame.height > 0 {
+                grabFraction = CGPoint(
+                    x: (mouse.x - frame.minX) / frame.width,
+                    y: (mouse.y - frame.minY) / frame.height)
+            }
+            installEscapeMonitor()
+        }
+        dragMouse = mouse
+        guard let screen = screen(for: mouse) else { return }
+        let place = PillPlacement.placement(center: mouse, in: screen.visibleFrame)
+        model.setPlacement(axis: place.axis, edge: place.edge)
+        // If orientation did not change, `apply` never ran — move 1:1 here.
+        if appliedRender.axis == place.axis, appliedRender.dockEdge == place.edge {
+            let target = placedFrame(for: appliedRender)
+            if let host {
+                setFrameDirect(panel, host, target)
+            }
+        }
+    }
+
+    private func endDrag(commit: Bool) {
+        removeEscapeMonitor()
+        guard isDragging, let panel, let host else {
+            isDragging = false
+            dragMouse = nil
+            return
+        }
+        let restoreOrigin = dragStartCanonical
+        let restoreAxis = dragStartAxis
+        let restoreEdge = dragStartEdge
+        suppressFrameAnimation = true
+        isDragging = false
+        dragMouse = nil
+        if !commit, let start = restoreOrigin {
+            preferredOrigin = start
+            model.setPlacement(axis: restoreAxis, edge: restoreEdge)
+        } else {
+            preferredOrigin = PillPlacement.canonicalOrigin(for: panel.frame)
+            syncPlacement(from: panel.frame)
+            if let origin = preferredOrigin {
+                config.persistPosition(origin)
+            }
+        }
+        let target = placedFrame(for: appliedRender)
+        setFrameDirect(panel, host, target)
+        suppressFrameAnimation = false
+    }
+
+    private func installEscapeMonitor() {
+        removeEscapeMonitor()
+        escapeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            if event.keyCode == 53 {
+                MainActor.assumeIsolated { self?.endDrag(commit: false) }
+                return nil
+            }
+            return event
+        }
+    }
+
+    private func removeEscapeMonitor() {
+        if let escapeMonitor {
+            NSEvent.removeMonitor(escapeMonitor)
+        }
+        escapeMonitor = nil
+    }
+
+    // MARK: - empty wiggle
+
+    /// A decaying sine on the unconstrained axis — the macOS password-field
+    /// "no". The panel moves, so the hosting view cannot clip the travel.
+    /// Reduced motion keeps the feedback as a brief opacity pulse.
+    private func beginShake() {
+        guard let panel else { return }
+        stopShake()
+        shakeGeneration += 1
+        let generation = shakeGeneration
+        let base = panel.frame.origin
+        shakeBaseOrigin = base
+        let axis = appliedRender.axis
+        let reduce = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if reduce {
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.12
+                panel.animator().alphaValue = 0.72
+            }, completionHandler: { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.shakeGeneration == generation else { return }
+                    NSAnimationContext.runAnimationGroup { context in
+                        context.duration = 0.12
+                        panel.animator().alphaValue = 1
+                    }
+                    self.stopShake()
+                }
+            })
+            return
+        }
+        let start = CACurrentMediaTime()
+        let duration = PillMotion.shakeDuration
+        let timer = Timer.scheduledTimer(withTimeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.shakeGeneration == generation, let panel = self.panel else { return }
+                let t = CACurrentMediaTime() - start
+                if t >= duration {
+                    self.suppressMoveNotifications = true
+                    panel.setFrameOrigin(base)
+                    self.suppressMoveNotifications = false
+                    self.stopShake()
+                    return
+                }
+                let envelope = exp(-PillMotion.shakeDecay * t)
+                let wave = sin(2 * Double.pi * PillMotion.shakeCycles * t / duration)
+                let offset = PillMotion.shakeAmplitude * envelope * wave
+                var origin = base
+                switch axis {
+                case .horizontal: origin.x += offset
+                case .vertical: origin.y += offset
+                }
+                self.suppressMoveNotifications = true
+                panel.setFrameOrigin(origin)
+                self.suppressMoveNotifications = false
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        shakeTimer = timer
+    }
+
+    private func stopShake() {
+        shakeTimer?.invalidate()
+        shakeTimer = nil
+        if let panel {
+            if let base = shakeBaseOrigin {
+                suppressMoveNotifications = true
+                panel.setFrameOrigin(base)
+                suppressMoveNotifications = false
+            }
+            if panel.alphaValue != 1 { panel.alphaValue = 1 }
+        }
+        shakeBaseOrigin = nil
+    }
 }
 
 // MARK: - the drawn surface
 
 /// The hosting view for `PillSurface`.
 ///
-/// The only reason it is a subclass: `isMovableByWindowBackground` needs the
-/// view under the cursor to say the drag belongs to the window, and a hosting
-/// view full of interactive-by-default SwiftUI does not. The pill has no
-/// controls, so every mouse-down on it is a drag (§7 — no cancel/confirm
-/// buttons, releasing the key is confirm).
+/// Window dragging is owned by `Pill` (grab-offset, edge reorientation,
+/// Escape-to-cancel). Hover chrome buttons must be able to receive clicks,
+/// so this view does not claim `mouseDownCanMoveWindow`.
 final class PillHostingView<Content: View>: NSHostingView<Content> {
-    override var mouseDownCanMoveWindow: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
     override var isOpaque: Bool { false }
 
     required init(rootView: Content) {
@@ -547,10 +827,10 @@ final class PillHostingView<Content: View>: NSHostingView<Content> {
     }
 }
 
-/// The panel's content view: nothing but a transparent tray holding the glass
-/// and the surface, and the same "every mouse-down is a drag" answer.
+/// The panel's content view: a transparent tray holding the glass and the
+/// surface. Drag is tracked in SwiftUI and forwarded to `Pill`.
 final class PillPanelView: NSView {
-    override var mouseDownCanMoveWindow: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
     override var isOpaque: Bool { false }
 }
 
@@ -569,7 +849,7 @@ final class PillGlassView: NSVisualEffectView {
         state = .active
         isEmphasized = false
         autoresizingMask = [.width, .height]
-        maskImage = PillGlassView.capsuleMask(height: PillGeometry.height)
+        maskImage = PillGlassView.capsuleMask(size: frameRect.size)
     }
 
     @available(*, unavailable)
@@ -598,23 +878,31 @@ final class PillGlassView: NSVisualEffectView {
     /// second call the glass stays a rectangle for the rest of the pill's life,
     /// which is a dark slab in the two corners the capsule leaves empty.
     func refreshMask() {
-        maskImage = PillGlassView.capsuleMask(height: PillGeometry.height)
+        maskImage = PillGlassView.capsuleMask(size: bounds.size)
     }
 
-    override var mouseDownCanMoveWindow: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
 
     /// A resizable capsule: two end caps and one stretchable point between
-    /// them, so every panel width gets the same true capsule without ever
-    /// rebuilding the image.
-    static func capsuleMask(height: Double) -> NSImage {
-        let radius = height / 2
-        let size = NSSize(width: radius * 2 + 1, height: height)
-        let image = NSImage(size: size, flipped: false) { rect in
+    /// them. Horizontal pills stretch along x; vertical pills stretch along y
+    /// so the rounded caps stay on the short sides.
+    static func capsuleMask(size: NSSize) -> NSImage {
+        let vertical = size.height > size.width + 0.5
+        let short = max(min(size.width, size.height), 1)
+        let radius = short / 2
+        let imageSize = vertical
+            ? NSSize(width: short, height: radius * 2 + 1)
+            : NSSize(width: radius * 2 + 1, height: short)
+        let image = NSImage(size: imageSize, flipped: false) { rect in
             NSColor.black.setFill()
             NSBezierPath(roundedRect: rect, xRadius: radius, yRadius: radius).fill()
             return true
         }
-        image.capInsets = NSEdgeInsets(top: 0, left: radius, bottom: 0, right: radius)
+        if vertical {
+            image.capInsets = NSEdgeInsets(top: radius, left: 0, bottom: radius, right: 0)
+        } else {
+            image.capInsets = NSEdgeInsets(top: 0, left: radius, bottom: 0, right: radius)
+        }
         image.resizingMode = .stretch
         return image
     }

@@ -228,7 +228,10 @@ public final class AppController: NSObject, NSApplicationDelegate {
             },
             persistPosition: { point in
                 settings.setPillPosition(x: Double(point.x), y: Double(point.y))
-            }))
+            },
+            onStart: { events.put(HotkeyEvent(.press)) },
+            onCancel: { events.put(HotkeyEvent(.esc)) },
+            onConfirm: { events.put(HotkeyEvent(.release)) }))
         self.pill = pill
 
         // Rungs 1–2 of the insertion ladder. Nothing here touches an input

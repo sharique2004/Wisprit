@@ -46,6 +46,14 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(PillGeometry.barFieldWidth, TallyMetrics.pill.fieldWidth)
         XCTAssertEqual(PillGeometry.sideInset,
                        (PillGeometry.widthListening - PillGeometry.barFieldWidth) / 2)
+        XCTAssertEqual(PillGeometry.widthMini, 36.0)
+        XCTAssertEqual(PillGeometry.heightMini, 10.0)
+        XCTAssertEqual(PillGeometry.chromeButton, 20.0)
+        XCTAssertEqual(PillGeometry.widthChrome, 128.0)
+        let chromeNeeded = 2 * 10 + 2 * PillGeometry.chromeButton
+            + 2 * PillGeometry.chromeGap + PillGeometry.barFieldWidth
+        XCTAssertGreaterThanOrEqual(PillGeometry.widthChrome, chromeNeeded,
+                                    "Cancel + waveform + confirm must fit")
     }
 
     /// The processing capsule is Flow's measured ×1.34, on the 8 pt grid, and
@@ -207,8 +215,9 @@ final class PillModelTests: XCTestCase {
         model.showRecording()
         let listening = sink.last
         XCTAssertEqual(idle.totalWidth, PillGeometry.widthMini)
-        XCTAssertEqual(listening.totalWidth, PillGeometry.widthListening)
+        XCTAssertEqual(listening.totalWidth, PillGeometry.widthChrome)
         XCTAssertEqual(listening.height, PillGeometry.height)
+        XCTAssertEqual(listening.hoverChrome, .recording)
         XCTAssertEqual(PillMotion.frameChange(
             wasVisible: true, isVisible: true,
             oldWidth: idle.totalWidth, newWidth: listening.totalWidth,
@@ -227,9 +236,10 @@ final class PillModelTests: XCTestCase {
         XCTAssertTrue(sink.last.isVisible)
         XCTAssertEqual(sink.last.tint, PillPalette.hot)
         XCTAssertEqual(sink.last.level, 0.0)
-        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthChrome)
         XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount),
                        "a fresh press starts from a row of dots")
+        XCTAssertEqual(sink.last.hoverChrome, .recording)
     }
 
     func testFullUtteranceHappyPath() {
@@ -340,7 +350,7 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(sink.last.tint, PillPalette.muted)
         XCTAssertNotEqual(sink.last.tint, PillPalette.hot)
         XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount))
-        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthChrome)
         XCTAssertEqual(sink.last.glyph, .none)
     }
 
@@ -420,18 +430,20 @@ final class PillModelTests: XCTestCase {
         XCTAssertTrue(sink.last.message.hasSuffix("…"))
     }
 
-    func testFlashMissedIsQuietNotAnAlarm() {
+    func testFlashMissedIsAWiggleNotAnAlarm() {
         let (model, sink) = makeModel()
         model.showRecording()
         model.flashMissed("Didn't catch that")
-        XCTAssertEqual(sink.last.state, .missed)
-        XCTAssertEqual(sink.last.bubble, "Didn't catch that")
-        XCTAssertEqual(sink.last.glyph, .none, "a miss is not a warning triangle")
+        XCTAssertEqual(sink.last.state, .idle)
+        XCTAssertTrue(sink.last.isShaking)
+        XCTAssertEqual(sink.last.bubble, "", "nothing-heard is a wiggle, not a banner")
+        XCTAssertEqual(sink.last.message, "")
+        XCTAssertEqual(sink.last.glyph, .none)
         XCTAssertEqual(sink.last.tint, PillPalette.muted)
-        XCTAssertEqual(PillPalette.bodyFill(for: .missed).color, PillPalette.body)
-        XCTAssertEqual(sink.last.bars, Array(repeating: 0, count: PillGeometry.barCount),
-                       "the waveform flattens to dots, the way Flow leaves")
-        XCTAssertEqual(sink.scheduled.last?.seconds, PillGeometry.missedHideDelay)
+        XCTAssertNotEqual(sink.last.tint, PillPalette.critical)
+        XCTAssertEqual(PillPalette.bodyFill(for: sink.last.state).color, PillPalette.body)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening)
+        XCTAssertEqual(sink.scheduled.last?.seconds, PillMotion.shakeDuration)
         XCTAssertEqual(sink.scheduled.last?.action, .settle)
     }
 
@@ -568,7 +580,7 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(model.bubble, PillGeometry.deadMicMessage)
 
         model.livePartial("hello")
-        XCTAssertEqual(sink.last.bubble, "hello")
+        XCTAssertEqual(sink.last.bubble, "", "transcription is not drawn on the pill")
         XCTAssertFalse(sink.last.tailMuted)
         XCTAssertEqual(sink.last.message, "")
     }
@@ -578,7 +590,7 @@ final class PillModelTests: XCTestCase {
         model.showRecording()
         model.livePartial("hi")
         silentTicks(model, PillGeometry.deadMicTickCount * 3)
-        XCTAssertEqual(sink.last.bubble, "hi", "the tail stays a tail")
+        XCTAssertEqual(sink.last.bubble, "", "the tail stays empty — words go to the caret")
         XCTAssertFalse(sink.last.tailMuted)
     }
 
@@ -748,16 +760,18 @@ final class PillModelTests: XCTestCase {
 
     /// A pill that shrinks and regrows between "you stopped talking" and "here
     /// is the result" reads as two events, not one.
-    func testFinalizingHoldsTheWidthTheUtteranceEarned() {
+    /// Transcription is inserted at the caret. A live partial must never
+    /// widen the pill or put words on it; it only suppresses the dead-mic cue.
+    func testFinalizingDoesNotInheritATranscriptWidth() {
         let (model, sink) = makeModel()
         model.showRecording()
         model.livePartial("some long text here")
-        let recording = sink.last.totalWidth
-        XCTAssertGreaterThan(recording, PillGeometry.widthListening)
+        XCTAssertEqual(sink.last.bubble, "")
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthChrome)
 
         model.showFinalizing()
-        XCTAssertEqual(model.bubble, "", "the tail still collapses")
-        XCTAssertEqual(sink.last.totalWidth, recording, "but the width it bought is held")
+        XCTAssertEqual(model.bubble, "")
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthProcessing)
     }
 
     // MARK: - pill_hidden suppression
@@ -851,10 +865,8 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(sink.frames.count, settled, "and then silence is free again")
     }
 
-    /// A text tail no longer halves the meter: Flow keeps one field and grows
-    /// the capsule around it, so the bars the user was watching do not
-    /// rearrange themselves the moment a word arrives.
-    func testTheMeterKeepsItsFieldWhenATailSharesTheCapsule() {
+    /// A text tail no longer shares the capsule: live partials are not drawn.
+    func testALivePartialDoesNotRearrangeTheMeter() {
         let (model, sink) = makeModel()
         model.showRecording()
         model.updateLevel(0.6)
@@ -862,60 +874,57 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(before.count, PillGeometry.barCount)
         model.livePartial("hello there world")
         XCTAssertEqual(sink.last.bars, before, "the same ten bars, in the same places")
-        XCTAssertGreaterThan(sink.last.totalWidth, PillGeometry.widthListening)
+        XCTAssertEqual(sink.last.bubble, "")
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthChrome)
     }
 
     // MARK: - livePartial
 
-    func testLivePartialOnlyRendersWhileRecording() {
+    /// Transcription is inserted at the caret. The pill is status + waveform;
+    /// a partial must never put words on the capsule.
+    func testLivePartialNeverDrawsTranscriptOnThePill() {
         let (model, sink) = makeModel()
         model.livePartial("idle words")
         XCTAssertEqual(model.bubble, "")
 
         model.showRecording()
         model.livePartial("hello there world")
-        XCTAssertEqual(model.bubble, "hello there world")
-        XCTAssertTrue(sink.last.totalWidth > PillGeometry.widthListening)
+        XCTAssertEqual(model.bubble, "")
+        XCTAssertEqual(sink.last.bubble, "")
+        XCTAssertEqual(sink.last.message, "")
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthChrome)
 
         model.showFinalizing()
-        XCTAssertEqual(model.bubble, "", "the tail collapses when recording ends")
+        XCTAssertEqual(model.bubble, "")
         model.livePartial("late arrival")
-        XCTAssertEqual(model.bubble, "", "a late partial must not reopen the tail")
+        XCTAssertEqual(model.bubble, "", "a late partial must not reopen a tail")
     }
 
-    func testLivePartialShowsOnlyTheTail() {
+    func testLivePartialDoesNotSurfaceTheNewestWords() {
         let (model, _) = makeModel()
         model.showRecording()
         model.livePartial("the quick brown fox jumps over the lazy dog")
-        XCTAssertEqual(model.bubble, "the lazy dog")
+        XCTAssertEqual(model.bubble, "")
+        XCTAssertEqual(model.bubbleWidth, 0)
     }
 
-    /// Flicker control #1: an identical tail emits no frame at all.
-    func testUnchangedTailEmitsNoFrame() {
+    /// An identical (or whitespace-equivalent) partial emits no frame — the
+    /// dead-mic cue is already clear, so there is nothing to say.
+    func testUnchangedPartialEmitsNoFrame() {
         let (model, sink) = makeModel()
         model.showRecording()
         model.livePartial("hello there")
         let count = sink.frames.count
         model.livePartial("hello there")
-        model.livePartial("  hello   there  ")   // same words, different spacing
+        model.livePartial("  hello   there  ")
         XCTAssertEqual(sink.frames.count, count)
     }
 
-    /// Flicker control #2 + #3: quantised, and monotone within an utterance.
-    func testTailWidthIsQuantisedAndNeverShrinksMidUtterance() {
+    func testAFreshPressStillResetsTheTailFloor() {
         let (model, _) = makeModel()
         model.showRecording()
-        var widths: [Double] = []
-        for text in ["so", "so I", "so I was", "so I was thinking", "so I was thinking about it"] {
-            model.livePartial(text)
-            widths.append(model.bubbleWidth)
-        }
-        XCTAssertEqual(widths, widths.sorted(), "width must be non-decreasing while recording")
-        for w in widths {
-            XCTAssertLessThanOrEqual(w, PillTailGeometry.maxWidth)
-            XCTAssertGreaterThanOrEqual(w, PillTailGeometry.minWidth)
-        }
-        // A fresh press resets the floor.
+        model.livePartial("so I was thinking about it")
+        XCTAssertEqual(model.bubbleWidth, 0)
         model.showRecording()
         XCTAssertEqual(model.bubbleWidth, 0)
     }
@@ -996,5 +1005,59 @@ final class PillModelTests: XCTestCase {
         XCTAssertEqual(PillGlyph.lock.symbolName, "lock.fill")
         XCTAssertEqual(PillGlyph.sparkles.symbolName, "sparkles")
         XCTAssertEqual(PillGlyph.sparkle.symbolName, "sparkle")
+    }
+
+    // MARK: - hover chrome (Wispr Flow: X · waveform · ✓)
+
+    func testIdleHoverExpandsIntoTheWaveformCapsule() {
+        let (model, sink) = makeModel()
+        model.showIdle()
+        XCTAssertEqual(sink.last.hoverChrome, .none)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthMini)
+        XCTAssertEqual(sink.last.bars, [])
+
+        model.setHovered(true)
+        XCTAssertEqual(sink.last.hoverChrome, .idle)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthListening)
+        XCTAssertEqual(sink.last.height, PillGeometry.height)
+        XCTAssertEqual(sink.last.bars.count, PillGeometry.barCount)
+        XCTAssertTrue(sink.last.bars.allSatisfy { $0 == 0 }, "cream dots at floor")
+
+        model.setHovered(false)
+        XCTAssertEqual(sink.last.hoverChrome, .none)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthMini)
+    }
+
+    func testRecordingAlwaysShowsCancelAndConfirmChrome() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        XCTAssertEqual(sink.last.hoverChrome, .recording)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthChrome)
+        model.setHovered(false)
+        XCTAssertEqual(sink.last.hoverChrome, .recording, "recording chrome is not hover-only")
+    }
+
+    func testPlacementEmitsOnlyWhenTheEdgeChanges() {
+        let (model, sink) = makeModel()
+        model.showIdle()
+        let before = sink.frames.count
+        model.setPlacement(axis: .horizontal, edge: nil)
+        XCTAssertEqual(sink.frames.count, before)
+        model.setPlacement(axis: .vertical, edge: .left)
+        XCTAssertEqual(sink.last.axis, .vertical)
+        XCTAssertEqual(sink.last.dockEdge, .left)
+        XCTAssertEqual(sink.frames.count, before + 1)
+    }
+
+    func testShakeThenSettleReturnsToTheMiniSliver() {
+        let (model, sink) = makeModel()
+        model.showRecording()
+        model.flashMissed()
+        XCTAssertTrue(sink.last.isShaking)
+        model.fireDeferred(.settle)
+        XCTAssertEqual(model.state, .idle)
+        XCTAssertFalse(sink.last.isShaking)
+        XCTAssertEqual(sink.last.totalWidth, PillGeometry.widthMini)
+        XCTAssertEqual(sink.last.bubble, "")
     }
 }

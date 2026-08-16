@@ -47,7 +47,8 @@ public enum PillState: String, Equatable, Sendable, CaseIterable {
     /// clipboard instead of in the field.
     case blockedSecure
     /// An utterance that produced nothing — silence, a miss, a short tap.
-    /// Studio body, muted ink, no alarm. Flow just fades; we say so quietly.
+    /// Kept as a state so existing palette/truncation switches stay exhaustive;
+    /// the empty-utterance *path* is now a wiggle on `.idle`, not this case.
     case missed
     /// The Flow-style resting bar: a compact capsule that stays on screen
     /// between utterances. Expands into the waveform the moment you hold.
@@ -204,6 +205,13 @@ public enum PillGeometry {
     /// real expansion rather than Flow's colour crossfade.
     public static let widthMini: Double = 36.0
     public static let heightMini: Double = 10.0
+    /// Recording chrome: Cancel (X) and confirm (✓) beside the ten-bar field.
+    /// 2×12 inset + 2×20 buttons + 2×6 gaps + 51.75 field = 127.75, snapped
+    /// to the 8 pt grid — the same 128 as the processing capsule, so
+    /// listening-with-buttons → spinner is a colour change, not a resize.
+    public static let chromeButton: Double = 20.0
+    public static let chromeGap: Double = 6.0
+    public static let widthChrome: Double = 128.0
     /// `_BOTTOM_MARGIN` for the default bottom-centre placement — unchanged.
     public static let bottomMargin: Double = 90.0
     /// §2.6 edge flip: keep this much clear of the screen's right edge.
@@ -560,6 +568,24 @@ public enum PillMotion {
     /// the capsule has its own pop sheared off at the sides.
     public static let noticeRimPop: Double = 0.18
 
+    // MARK: orientation morph & empty-state wiggle
+
+    /// Left/right ↔ top/bottom: a short, interruptible morph — Apple's
+    /// rotation spring (response 0.4, damping ~0.8) taken a hair snappier
+    /// because the object is a 28 pt HUD, not a sheet.
+    public static let orientationDuration: Double = 0.32
+    public static let orientationSpringResponse: Double = 0.36
+    public static let orientationSpringDamping: Double = 0.86
+
+    /// Empty / nothing-heard: a macOS password-field "no". Small, springy,
+    /// three decaying cycles, then idle. Not a rumble and not an alarm.
+    public static let shakeAmplitude: Double = 7.0
+    public static let shakeDuration: Double = 0.42
+    public static let shakeCycles: Double = 3.0
+    /// Exponential envelope so the last millimetre dies out instead of
+    /// slamming into zero — the settle that makes it read as a spring.
+    public static let shakeDecay: Double = 9.5
+
     // MARK: the commit (NEW)
 
     /// The check mark draws itself rather than fading in — 220 ms is the
@@ -655,7 +681,9 @@ public enum PillMotion {
                                    oldWidth: Double, newWidth: Double,
                                    newState: PillState,
                                    reduceMotion: Bool,
-                                   notice: NoticeChange = .none) -> FrameChange {
+                                   notice: NoticeChange = .none,
+                                   oldHeight: Double = -1,
+                                   newHeight: Double = -1) -> FrameChange {
         if isVisible && !wasVisible {
             return FrameChange(kind: .appear, duration: appearDuration,
                                travel: reduceMotion ? 0 : appearRise,
@@ -666,13 +694,23 @@ public enum PillMotion {
                                travel: reduceMotion ? 0 : hideSink,
                                animatesFrame: !reduceMotion, curve: .easeIn)
         }
-        if isVisible && oldWidth != newWidth {
+        let heightChanged = oldHeight >= 0 && newHeight >= 0 && oldHeight != newHeight
+        let swapped = oldHeight >= 0 && newHeight >= 0
+            && oldWidth == newHeight && oldHeight == newWidth
+            && oldWidth != newWidth
+        if isVisible && swapped {
+            return FrameChange(kind: .resize, duration: orientationDuration,
+                               travel: 0, animatesFrame: !reduceMotion, curve: .easeOut)
+        }
+        if isVisible && (oldWidth != newWidth || heightChanged) {
             // The commit is the one shrink with its own name: the pill is
             // returning to rest, not resizing for content. The settle into the
             // mini idle sliver is the same going-to-rest move, so it shares
             // the contract timing rather than the content-resize timing.
+            // Vertical docks shrink along height instead of width.
             if (newState == .success || newState == .idle)
-                && newWidth < oldWidth && notice != .closing {
+                && notice != .closing
+                && (newWidth < oldWidth || (oldHeight >= 0 && newHeight >= 0 && newHeight < oldHeight)) {
                 return FrameChange(kind: .contract, duration: committedDuration,
                                    travel: 0, animatesFrame: !reduceMotion, curve: .easeOut)
             }

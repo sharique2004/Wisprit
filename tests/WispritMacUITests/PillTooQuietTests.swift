@@ -1,51 +1,39 @@
 import XCTest
 @testable import WispritMacUI
 
-/// The marginal-audio flash (2026-08-15) — the one piece of pill copy that is an
-/// INSTRUCTION rather than a label, and therefore the one that must survive the
-/// frame intact.
-///
-/// A plain `flashMissed` lays its text out with the live tail's 196 pt cap,
-/// which fits about 26 characters: enough to render "Heard you, but too faint"
-/// and cut off the part that tells the user what to do. That is worse than
-/// saying nothing, so this state borrows the alarm layout (40-character budget,
-/// wider cap) and the `blockedSecure` dwell — without borrowing the alarm.
+/// Empty / too-quiet / nothing-heard: a graceful wiggle, never red, never a
+/// banner. The session still calls `flashTooQuiet` / `flashMissed` with copy;
+/// the pill ignores the words and shakes, then settles to idle.
 final class PillTooQuietTests: XCTestCase {
 
     /// Kept as a literal on purpose: `SessionController` owns the words and this
-    /// target cannot import it, so the copy's LENGTH is the contract under test.
+    /// target cannot import it. Length is no longer a layout contract — the
+    /// pill does not draw the line — but the session still sends it.
     private let copy = "Heard you, but too faint — speak up"
 
-    func testTheRemedyIsNotCutOff() {
+    func testTooQuietIsAWiggleWithNoBanner() {
         let model = PillModel()
         model.flashTooQuiet(copy)
 
-        XCTAssertEqual(model.bubble, copy, "every word of it, ellipsis-free")
+        XCTAssertEqual(model.bubble, "", "no too-quiet banner")
+        XCTAssertEqual(model.message, "")
         XCTAssertFalse(model.bubble.hasSuffix("…"))
-        XCTAssertEqual(model.message, copy)
-    }
-
-    /// Wider than any live tail can be — which is the whole reason this method
-    /// exists rather than a `flashMissed` call with longer copy.
-    func testItIsLaidOutWithTheAlarmStatesWidth() {
-        let model = PillModel()
-        model.flashTooQuiet(copy)
-        XCTAssertGreaterThan(model.bubbleWidth, PillTailGeometry.maxWidth)
-        XCTAssertEqual(model.bubbleWidth,
-                       PillTailGeometry.errorWidth(forCharacters: copy.count))
-    }
-
-    /// A miss, not a fault: the `missed` body — muted ink, no glyph, no shake.
-    func testItIsStillAMissAndNotAnAlarm() {
-        let model = PillModel()
-        model.flashTooQuiet(copy)
-        XCTAssertEqual(model.state, .missed)
+        XCTAssertTrue(model.render.isShaking)
+        XCTAssertEqual(model.state, .idle)
         XCTAssertTrue(model.isVisible)
     }
 
-    /// Long enough to read a sentence and act on it. 0.9 s is the right dwell
-    /// for two words and the wrong one for this.
-    func testItStaysLongEnoughToActOn() {
+    func testItDoesNotBorrowTheAlarmWidthOrBody() {
+        let model = PillModel()
+        model.flashTooQuiet(copy)
+        XCTAssertEqual(model.render.totalWidth, PillGeometry.widthListening)
+        XCTAssertEqual(PillPalette.bodyFill(for: model.state).color, PillPalette.body)
+        XCTAssertNotEqual(model.render.tint, PillPalette.critical)
+        XCTAssertEqual(model.render.glyph, .none)
+        XCTAssertEqual(model.render.hoverChrome, .none)
+    }
+
+    func testMissedAndTooQuietShareTheSameWiggleTiming() {
         final class Sink { var scheduled: [(seconds: Double, action: PillDeferredAction)] = [] }
         let sink = Sink()
         let model = PillModel()
@@ -53,16 +41,27 @@ final class PillTooQuietTests: XCTestCase {
         model.flashTooQuiet(copy)
 
         XCTAssertEqual(sink.scheduled.count, 1)
-        XCTAssertEqual(sink.scheduled.first?.seconds, PillGeometry.blockedSecureHideDelay)
+        XCTAssertEqual(sink.scheduled.first?.seconds, PillMotion.shakeDuration)
         XCTAssertEqual(sink.scheduled.first?.action, .settle)
-        XCTAssertGreaterThan(PillGeometry.blockedSecureHideDelay, PillGeometry.missedHideDelay)
+        XCTAssertLessThan(PillMotion.shakeDuration, 0.6,
+                          "a password-field no, not a held error")
     }
 
-    /// `pill_hidden` silences it exactly like every other state.
     func testSuppressionIsHonoured() {
         let model = PillModel(isSuppressed: { true })
         model.flashTooQuiet(copy)
         XCTAssertEqual(model.bubble, "")
         XCTAssertFalse(model.isVisible)
+        XCTAssertFalse(model.render.isShaking)
+    }
+
+    func testTheWiggleIsSmallAndSpringy() {
+        XCTAssertEqual(PillMotion.shakeAmplitude, 7.0)
+        XCTAssertEqual(PillMotion.shakeCycles, 3.0)
+        XCTAssertEqual(PillMotion.shakeDuration, 0.42)
+        XCTAssertGreaterThan(PillMotion.shakeDecay, 6,
+                             "the last millimetre must die out, not slam")
+        XCTAssertLessThan(PillMotion.shakeAmplitude, 12,
+                          "password-field no, not a rumble")
     }
 }

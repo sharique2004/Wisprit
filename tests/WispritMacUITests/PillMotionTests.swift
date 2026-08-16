@@ -262,4 +262,23 @@ final class PillMotionTests: XCTestCase {
                           "the pill has to be there the instant the key goes down")
     }
 
+    func testOrientationMorphIsAShortSpringNotASnap() {
+        XCTAssertEqual(PillMotion.orientationDuration, 0.32)
+        XCTAssertEqual(PillMotion.orientationSpringDamping, 0.86, accuracy: 1e-9)
+        XCTAssertGreaterThan(PillMotion.orientationSpringDamping, 0.8)
+        let change = PillMotion.frameChange(
+            wasVisible: true, isVisible: true,
+            oldWidth: 128, newWidth: 28,
+            newState: .recording, reduceMotion: false,
+            oldHeight: 28, newHeight: 128)
+        XCTAssertEqual(change.kind, .resize)
+        XCTAssertEqual(change.duration, PillMotion.orientationDuration)
+        XCTAssertTrue(change.animatesFrame)
+        let reduced = PillMotion.frameChange(
+            wasVisible: true, isVisible: true,
+            oldWidth: 128, newWidth: 28,
+            newState: .recording, reduceMotion: true,
+            oldHeight: 28, newHeight: 128)
+        XCTAssertFalse(reduced.animatesFrame, "Reduce Motion snaps the morph")
+    }
 }

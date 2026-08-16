@@ -55,12 +55,22 @@ public struct PillRender: Equatable, Sendable {
     /// NEW — true while the tail is the live dead-mic cue (R10): notice
     /// styling, muted ink, never orange and never an alarm.
     public var tailMuted: Bool
+    /// Horizontal (top/bottom / free) or vertical (left/right).
+    public var axis: PillAxis
+    /// The edge the pill is docked against, if any. Nil when free-floating.
+    public var dockEdge: PillScreenEdge?
+    public var isHovered: Bool
+    /// Empty/nothing-heard wiggle in flight — no error chrome.
+    public var isShaking: Bool
+    /// Wispr Flow hover/recording affordances.
+    public var hoverChrome: PillHoverChrome
 
     public static let collapsed = PillRender(
         isVisible: false, state: .hidden, tint: PillPalette.tint(for: .hidden), level: 0,
         bars: [], bubble: "", bubbleWidth: 0, message: "", glyph: .none,
         totalWidth: PillGeometry.widthListening, height: PillGeometry.height,
-        tailMuted: false)
+        tailMuted: false, axis: .horizontal, dockEdge: nil,
+        isHovered: false, isShaking: false, hoverChrome: .none)
 
     /// Whether the only thing that moved between two frames is the meter.
     ///
@@ -156,6 +166,13 @@ public final class PillModel {
     /// an alarm — which is why both feed one `tailMuted` flag rather than two.
     private var patienceCue = false
 
+    /// Pointer over the capsule — idle expands into the waveform bar.
+    private var hovered = false
+    /// Empty-utterance wiggle. Distinct from `.error`: no red, no copy.
+    private var shaking = false
+    private var axis: PillAxis = .horizontal
+    private var dockEdge: PillScreenEdge?
+
     /// `pill.py._hidden()` — the `pill_hidden` setting. Injected so the UI
     /// target imports nothing from `WispritPersistence`.
     private let isSuppressed: () -> Bool
@@ -187,20 +204,19 @@ public final class PillModel {
             message: message,
             glyph: glyph,
             totalWidth: totalWidth,
-            height: state == .idle ? PillGeometry.heightMini : PillGeometry.height,
-            tailMuted: deadMicCue || patienceCue)
+            height: capsuleHeight,
+            tailMuted: deadMicCue || patienceCue,
+            axis: axis,
+            dockEdge: dockEdge,
+            isHovered: hovered,
+            isShaking: shaking,
+            hoverChrome: hoverChrome)
     }
 
     // MARK: - public API (main thread)
 
-    /// The Flow-style resting bar: ten cream dots in the same 96 pt capsule
-    /// the meter uses, always on screen unless the user hid it.
-    ///
-    /// It no longer *expands* into the meter, because there is nothing to
-    /// expand — idle is the listening frame at silence, which is exactly what
-    /// the real Flow app does (its idle and listening capsules measure the same
-    /// width, and its "dots" are its bars at floor). `idle → listening` is
-    /// therefore a colour crossfade and the bars coming alive, nothing else.
+    /// The resting sliver: on screen unless the user hid it. Hover expands it
+    /// into Flow's waveform capsule; a press grows it into listening.
     public func showIdle() {
         guard !isSuppressed() else { return }
         cancelSchedule()
@@ -209,6 +225,7 @@ public final class PillModel {
         clearBubbleState()
         heldWidth = nil
         resetDeadMicTracking()
+        shaking = false
         state = .idle
         isVisible = true
         emit()
@@ -291,32 +308,43 @@ public final class PillModel {
         return true
     }
 
-    /// NEW — render the tail of the in-progress transcript.
+    /// Engine evidence that the pipeline heard something. Transcription is
+    /// inserted at the caret only — the pill never draws the words (Wispr
+    /// Flow's bar is status + waveform; the text lands in the focused field).
     ///
-    /// Only meaningful while recording (the finalize/insert states have their
-    /// own colours and the text is already on its way to the cursor). The
-    /// engine feeds monotonically growing text; we keep the last few words.
-    ///
-    /// Flicker control, in three layers: an unchanged tail is dropped before
-    /// any redraw; the tail width is quantised; and the width never shrinks
-    /// within one utterance, so a word boundary can only ever widen the pill.
+    /// Still load-bearing: a partial suppresses the dead-mic cue for the rest
+    /// of the utterance, which is why the session keeps calling this even
+    /// though nothing is rendered from it.
     public func livePartial(_ text: String) {
         guard !isSuppressed(), state == .recording else { return }
-        // Engine evidence: a partial is proof the pipeline hears something, so
-        // it suppresses the dead-mic cue for the rest of the utterance — and
-        // replaces it on screen if it was already up (§1.1-T4).
+        let hadText = !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        guard hadText else { return }
         partialSeen = true
-        if deadMicCue {
-            deadMicCue = false
-            bubble = ""
-            message = ""
-        }
-        let tail = PartialTail.tail(of: text)
-        guard tail != bubble else { return }
-        bubble = tail
-        // Monotone width: shrinking mid-utterance is the one thing that reads
-        // as a glitch, so the tail only ever grows until the next press.
-        bubbleWidth = max(bubbleWidth, PillTailGeometry.width(forCharacters: tail.count))
+        guard deadMicCue else { return }
+        deadMicCue = false
+        bubble = ""
+        message = ""
+        bubbleWidth = 0
+        emit()
+    }
+
+    /// Pointer entered or left the capsule. Idle hover expands into the
+    /// waveform bar Flow shows on hover; recording chrome does not depend on
+    /// it (Cancel/Stop are the recording affordance, always).
+    public func setHovered(_ hovering: Bool) {
+        guard hovered != hovering else { return }
+        hovered = hovering
+        guard isVisible, state == .idle, !shaking else { return }
+        emit()
+    }
+
+    /// Reorient from a drag. No-op when nothing changed, so the 60 Hz drag
+    /// path is free until an edge is actually crossed.
+    public func setPlacement(axis: PillAxis, edge: PillScreenEdge?) {
+        guard axis != self.axis || edge != dockEdge else { return }
+        self.axis = axis
+        dockEdge = edge
+        guard isVisible else { return }
         emit()
     }
 
@@ -392,39 +420,19 @@ public final class PillModel {
     }
 
     /// A miss, not a fault: the user spoke too quietly, said nothing, or
-    /// the recognizer returned empty. Studio body, muted ink, floor dots,
-    /// no glyph, no shake — Flow fades; we name it quietly and go.
+    /// the recognizer returned empty. No red, no banner — a small springy
+    /// "no" (password-field energy), then idle.
     public func flashMissed(_ message: String = PillGeometry.missedMessage) {
-        holdWidth()
-        collapseMeter()
-        showMessageState(.missed,
-                         message.isEmpty ? PillGeometry.missedMessage : message,
-                         hideAfter: PillGeometry.missedHideDelay)
+        _ = message
+        shakeEmpty()
     }
 
-    /// NEW (2026-08-15) — the marginal-audio miss: we heard the user, the room
-    /// was louder than they were, and there is something they can do about it.
-    ///
-    /// The `missed` body, because this is not a fault — but laid out like the
-    /// alarm states and held like `blockedSecure`, because unlike "Didn't catch
-    /// that" the copy is an INSTRUCTION. A miss's 196 pt tail truncates at ~26
-    /// characters, which is exactly wide enough to show a diagnosis and cut off
-    /// the remedy; 0.9 s is likewise the right dwell for two words and the wrong
-    /// one for a sentence the user has to act on.
+    /// The marginal-audio miss. Same visual contract as `flashMissed`: the
+    /// session still owns the diagnosis, the pill answers with a wiggle
+    /// instead of a "too quiet" banner or an alarm body.
     public func flashTooQuiet(_ message: String) {
-        holdWidth()
-        collapseMeter()
-        if !isSuppressed() {
-            let flat = PartialTail.notice(message.isEmpty ? PillGeometry.missedMessage : message,
-                                          maxCharacters: PillGeometry.errorMessageCharacters)
-            self.message = flat
-            bubble = flat
-            bubbleWidth = PillTailGeometry.errorWidth(forCharacters: flat.count)
-            deadMicCue = false
-            patienceCue = false
-        }
-        show(.missed)
-        schedule(PillGeometry.blockedSecureHideDelay, .settle)
+        _ = message
+        shakeEmpty()
     }
 
     /// NEW — the focused app holds Secure Keyboard Entry. Distinct from an
@@ -434,6 +442,27 @@ public final class PillModel {
         holdWidth()
         showMessageState(.blockedSecure, message.isEmpty ? PillGeometry.blockedSecureMessage : message,
                          hideAfter: PillGeometry.blockedSecureHideDelay)
+    }
+
+    /// The empty-utterance wiggle: keep the listening capsule (so there is
+    /// something to shake), no copy, no alarm body, then settle to idle.
+    private func shakeEmpty() {
+        cancelSchedule()
+        level = 0
+        collapseMeter()
+        clearBubbleState()
+        heldWidth = nil
+        resetDeadMicTracking()
+        hovered = false
+        guard !isSuppressed() else {
+            schedule(PillMotion.shakeDuration, .settle)
+            return
+        }
+        shaking = true
+        state = .idle
+        isVisible = true
+        emit()
+        schedule(PillMotion.shakeDuration, .settle)
     }
 
     /// `hide`: cancel the timer, order the panel out. Unlike the show paths
@@ -448,6 +477,7 @@ public final class PillModel {
         clearBubbleState()
         heldWidth = nil
         resetDeadMicTracking()
+        shaking = false
         emit()
     }
 
@@ -505,19 +535,35 @@ public final class PillModel {
 
     /// The meter — one ten-bar field, in every state that has one.
     ///
-    /// Flow keeps its idle dots alive because its idle and listening capsules
-    /// are the same frame. Ours are not, by user directive: rest is the mini
-    /// sliver (`PillGeometry.widthMini`) with no meter at all — the bar field
-    /// cannot fit, and an empty `targets` is the established "no meter in this
-    /// state" contract. The two alarm states keep an empty meter because their
-    /// glyph *is* the meter.
+    /// Idle rest is the mini sliver with no meter. Idle hover and the empty
+    /// wiggle borrow the listening field at floor — cream dots, the same
+    /// object Flow shows when you point at the bar.
     private var bars: [Double] {
         switch state {
-        case .hidden, .error, .blockedSecure, .idle:
+        case .hidden, .error, .blockedSecure:
             return []
+        case .idle:
+            return (hovered || shaking) ? barValues : []
         case .prewarming, .recording, .finalizing, .refining, .missed, .success:
             return barValues
         }
+    }
+
+    private var hoverChrome: PillHoverChrome {
+        if shaking { return .none }
+        switch state {
+        case .idle where hovered: return .idle
+        case .prewarming, .recording: return .recording
+        default: return .none
+        }
+    }
+
+    private var isMiniRest: Bool {
+        state == .idle && !hovered && !shaking
+    }
+
+    private var capsuleHeight: Double {
+        isMiniRest ? PillGeometry.heightMini : PillGeometry.height
     }
 
     private var glyph: PillGlyph {
@@ -558,12 +604,12 @@ public final class PillModel {
             return max(natural, heldWidth ?? 0)
         // `success` holds the full capsule for its flash; the settle that
         // follows is what lands on the mini sliver.
-        case .hidden, .prewarming, .recording, .success:
+        case .hidden, .success:
             return natural
-        // Rest is "extremely small" by user directive — the sliver, no meter,
-        // no tail (showIdle clears the bubble before this is ever read).
+        case .prewarming, .recording:
+            return PillGeometry.widthChrome
         case .idle:
-            return PillGeometry.widthMini
+            return (hovered || shaking) ? PillGeometry.widthListening : PillGeometry.widthMini
         }
     }
 
@@ -597,6 +643,7 @@ public final class PillModel {
     private func show(_ newState: PillState) {
         guard !isSuppressed() else { return }
         cancelSchedule()
+        shaking = false
         state = newState
         isVisible = true
         emit()

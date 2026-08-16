@@ -1,5 +1,8 @@
 #if canImport(SwiftUI)
 import SwiftUI
+#if canImport(AppKit)
+import AppKit
+#endif
 
 /// The frame the hosting view reads, as one observable property.
 ///
@@ -22,6 +25,13 @@ public final class PillRenderBox {
     /// `@ObservationIgnored` because it is wiring, not state: a view that
     /// observed its own registration would invalidate itself on attach.
     @ObservationIgnored public var meterSink: ((PillRender) -> Bool)?
+    @ObservationIgnored public var onHover: ((Bool) -> Void)?
+    @ObservationIgnored public var onCancel: (() -> Void)?
+    @ObservationIgnored public var onConfirm: (() -> Void)?
+    @ObservationIgnored public var onStart: (() -> Void)?
+    @ObservationIgnored public var onDrag: ((CGPoint) -> Void)?
+    @ObservationIgnored public var onDragEnded: (() -> Void)?
+    @ObservationIgnored public var onDragCancelled: (() -> Void)?
 
     public init(render: PillRender = .collapsed) {
         self.render = render
@@ -45,10 +55,11 @@ public final class PillRenderBox {
 ///    discrete eight-tick spinner beside a dimmed dot row; the commit is the
 ///    pill going quiet. One vocabulary, and no element that moves without
 ///    meaning something.
-/// 3. **Nothing shakes, nothing pops out of its own panel.** The hosting view
-///    clips to the panel, so the old hover scale and error shake were slicing
-///    themselves off at the edges. Both are now edge-light changes, which is
-///    also the calmer reading of an error.
+/// 3. **The empty-state wiggle lives on the panel, not in this view.** The
+///    hosting view clips to the panel, so a SwiftUI shake would slice itself
+///    off at the edges. `Pill.beginShake` moves the `NSPanel` instead — the
+///    same decaying sine as a password-field "no". Hover chrome buttons stay
+///    inside the capsule (press scale 0.97, never past the circle).
 ///
 /// The meter is deliberately *not* drawn here. It is an `NSViewRepresentable`
 /// over ten `CALayer`s, and level ticks reach it through `PillRenderBox`'s
@@ -91,12 +102,18 @@ public struct PillSurface: View {
             // panel disagree for the length of a width animation, which is not
             // a subtle thing: a capsule centred in a narrower panel has both of
             // its caps clipped off and comes out a hard-edged slab.
-            .frame(width: render.totalWidth, height: render.height, alignment: .center)
+            .frame(width: render.axis == .vertical ? render.height : render.totalWidth,
+                   height: render.axis == .vertical ? render.totalWidth : render.height,
+                   alignment: .center)
             .background(body(for: render))
             .scaleEffect(arrived ? 1 : PillMotion.appearScale)
             .opacity(render.isVisible ? 1 : 0)
-            .onHover { hovered = $0 }
+            .onHover { hovering in
+                hovered = hovering
+                box.onHover?(hovering)
+            }
             .animation(.easeOut(duration: 0.14), value: hovered)
+            .simultaneousGesture(dragGesture())
             .onChange(of: box.render) { old, new in
                 stage(from: old, to: new)
             }
@@ -157,7 +174,8 @@ public struct PillSurface: View {
         // borrows the same lane for 133 ms — Wispr's toast pops its capsule as
         // it unfolds, and an edge that brightens is the version of that pop
         // which cannot be sheared off by the panel.
-        let boost = ((hovered && state == .idle) ? PillPalette.rimHoverBoost : 0)
+        let boost = ((hovered && (state == .idle || state == .recording || state == .prewarming))
+                        ? PillPalette.rimHoverBoost : 0)
             + (noticePop ? PillMotion.noticeRimPop : 0)
         return AnyShapeStyle(
             LinearGradient(
@@ -183,75 +201,112 @@ public struct PillSurface: View {
     private func content(_ render: PillRender) -> some View {
         let hasTail = !render.bubble.isEmpty
         let meter = PillMeterFrame.make(for: render, reduceMotion: reduceMotion)
-        // A wait that follows a live tail is a wide capsule with nothing in it
-        // yet, and the processing frame is wide by definition. Lay both out the
-        // way the tail laid it out — meter on the left, room on the right —
-        // rather than re-centring the meter: the words were on the right, the
-        // spinner and the patience copy are about to be on the right, and in
-        // between nothing should have moved.
         let holdingRoom = !hasTail && render.totalWidth > PillGeometry.widthListening
             && (render.state == .finalizing || render.state == .refining)
         let compact = hasTail || holdingRoom
-        HStack(spacing: PillTailGeometry.gap) {
+        let chrome = render.hoverChrome
+        let vertical = render.axis == .vertical
+        let meterRotation = PillPlacement.meterRotation(edge: render.dockEdge)
+
+        chromeStack(vertical: vertical, spacing: chrome == .none ? PillTailGeometry.gap : PillGeometry.chromeGap) {
+            if chrome == .recording {
+                chromeButton(symbol: "xmark", label: "Cancel dictation") {
+                    box.onCancel?()
+                }
+            }
             if !meter.targets.isEmpty {
-                // Ten `CALayer`s the render server owns. Nothing about this
-                // view changes at 20 Hz — the level ticks reach the layers
-                // through `box.meterSink`, never through here.
-                PillMeterView(frame: meter, box: box)
-                    .frame(width: PillGeometry.barFieldWidth, height: render.height)
-                    .allowsHitTesting(false)
-                    .accessibilityHidden(true)
+                meterView(meter, render: render, rotation: meterRotation, vertical: vertical)
             }
             glyph(render)
             if hasTail {
-                // Machine text (§1.4). Live tails head-truncate — the newest
-                // words are the ones worth keeping; the alarm states
-                // tail-truncate, because a diagnosis leads with the diagnosis
-                // (R9a).
                 Text(render.bubble)
                     .font(Theme.font(Theme.Role.mono))
                     .foregroundStyle(color(textColor(render)).opacity(PillPalette.textAlpha))
                     .lineLimit(1)
                     .truncationMode(truncationMode(render.state))
-                    .frame(width: render.bubbleWidth, alignment: .leading)
-                    // The copy arrives *with* the capsule that opened for it,
-                    // rather than snapping in at the end of the widening.
+                    .frame(width: vertical ? render.height - 8 : render.bubbleWidth,
+                           alignment: .leading)
+                    .rotationEffect(.degrees(vertical ? 90 : 0))
+                    .frame(width: vertical ? render.height - 8 : render.bubbleWidth,
+                           height: vertical ? min(render.bubbleWidth, 80) : render.height,
+                           alignment: .center)
                     .transition(.opacity)
             }
+            if chrome == .recording {
+                chromeButton(symbol: "checkmark", label: "Stop dictation") {
+                    box.onConfirm?()
+                }
+            }
         }
-        .padding(.horizontal, compact ? PillTailGeometry.textInset : 0)
-        .frame(maxWidth: .infinity, alignment: compact ? .leading : .center)
-        // The processing chrome sits at the trailing inset, where Flow puts it.
-        //
-        // An overlay rather than a row member on purpose: the spinner must be
-        // pinned to the capsule's own edge whatever width the utterance
-        // earned, and a trailing `Spacer` would make the row's width depend on
-        // whether the pill is thinking. `PillTailGeometry.spinnerAllowance` is
-        // the model's half of the same bargain — it keeps the copy from
-        // running underneath this.
-        .overlay(alignment: .trailing) {
+        .padding(.horizontal, compact && !vertical ? PillTailGeometry.textInset : (chrome == .none ? 0 : 10))
+        .padding(.vertical, vertical && chrome != .none ? 10 : 0)
+        .frame(maxWidth: .infinity, maxHeight: .infinity,
+               alignment: compact ? (vertical ? .top : .leading) : .center)
+        .overlay(alignment: vertical ? .bottom : .trailing) {
             if meter.spinning {
                 PillSpinnerView(spinning: true, animated: !reduceMotion)
                     .frame(width: PillGeometry.spinnerBox, height: PillGeometry.spinnerBox)
-                    .padding(.trailing, PillTailGeometry.textInset)
+                    .padding(vertical ? .bottom : .trailing, PillTailGeometry.textInset)
                     .allowsHitTesting(false)
                     .accessibilityHidden(true)
                     .transition(.opacity)
             }
         }
-        // §2.5 row 7's other half: when the glyph changes, its insertion —
-        // and whatever it replaces — crossfades over the committed duration
-        // instead of popping. Under Reduce Motion this fade *is* the committed
-        // transition: the contraction is dropped, the crossfade survives. The
-        // 20 Hz level path never changes `glyph`, so this transaction is
-        // state-change-only.
         .animation(.easeInOut(duration: PillMotion.committedDuration), value: render.glyph)
         .animation(.easeOut(duration: PillMotion.widthDuration), value: hasTail)
-        .accessibilityElement()
-        .accessibilityLabel(accessibilityLabel(render))
-        // The pill is a status light, not a control: it never takes focus and
-        // it never offers an action to perform.
-        .accessibilityAddTraits(.isStaticText)
+        .animation(.easeOut(duration: PillMotion.orientationDuration), value: render.axis)
+        .modifier(PillAccessibility(render: render, chrome: chrome))
+        .modifier(IdleStartTap(enabled: render.state == .idle && !render.isShaking) {
+            box.onStart?()
+        })
+    }
+
+    @ViewBuilder
+    private func chromeStack<Content: View>(vertical: Bool, spacing: Double,
+                                            @ViewBuilder content: () -> Content) -> some View {
+        if vertical {
+            VStack(spacing: spacing) { content() }
+        } else {
+            HStack(spacing: spacing) { content() }
+        }
+    }
+
+    private func meterView(_ meter: PillMeterFrame, render: PillRender,
+                           rotation: Double, vertical: Bool) -> some View {
+        let field = PillGeometry.barFieldWidth
+        let short = render.height
+        return PillMeterView(frame: meter, box: box)
+            .frame(width: field, height: short)
+            .rotationEffect(.degrees(vertical ? rotation : 0))
+            .frame(width: vertical ? short : field,
+                   height: vertical ? field : short)
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
+    }
+
+    private func chromeButton(symbol: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: symbol)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(color(PillPalette.ink).opacity(0.92))
+                .frame(width: PillGeometry.chromeButton, height: PillGeometry.chromeButton)
+                .contentShape(Circle())
+        }
+        .buttonStyle(PillChromeButtonStyle())
+        .accessibilityLabel(label)
+        .help(label)
+    }
+
+    private func dragGesture() -> some Gesture {
+        DragGesture(minimumDistance: 10)
+            .onChanged { _ in
+                #if canImport(AppKit)
+                box.onDrag?(NSEvent.mouseLocation)
+                #endif
+            }
+            .onEnded { _ in
+                box.onDragEnded?()
+            }
     }
 
     /// A drawn check mark, kept for the one path that could still want one.
@@ -382,22 +437,6 @@ public struct PillSurface: View {
         default: return 13
         }
     }
-
-    private func accessibilityLabel(_ render: PillRender) -> String {
-        if !render.message.isEmpty { return render.message }
-        switch render.state {
-        case .hidden: return ""
-        case .prewarming: return "Starting"
-        case .recording: return "Listening"
-        case .finalizing: return "Finishing"
-        case .refining: return "Cleaning up"
-        case .success: return "Inserted"
-        case .error: return "Error"
-        case .blockedSecure: return PillGeometry.blockedSecureMessage
-        case .missed: return render.message.isEmpty ? PillGeometry.missedMessage : render.message
-        case .idle: return "Ready"
-        }
-    }
 }
 
 // MARK: - the drawn check mark
@@ -417,6 +456,68 @@ struct CheckStroke: Shape {
         path.addLine(to: CGPoint(x: rect.minX + rect.width * 0.86,
                                  y: rect.minY + rect.height * 0.22))
         return path
+    }
+}
+
+/// Circular hover-chrome control. Press scales to 0.97 — the same physical
+/// confirm Apple uses on every tappable chip — and never grows past the
+/// circle, so the hosting view cannot clip it.
+private struct PillChromeButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .background(
+                Circle()
+                    .fill(Color.white.opacity(configuration.isPressed ? 0.18 : 0.10))
+            )
+            .scaleEffect(configuration.isPressed ? 0.97 : 1)
+            .animation(.easeOut(duration: 0.1), value: configuration.isPressed)
+    }
+}
+
+private struct IdleStartTap: ViewModifier {
+    let enabled: Bool
+    let action: () -> Void
+
+    func body(content: Content) -> some View {
+        if enabled {
+            content.onTapGesture(perform: action)
+        } else {
+            content
+        }
+    }
+}
+
+private struct PillAccessibility: ViewModifier {
+    let render: PillRender
+    let chrome: PillHoverChrome
+
+    func body(content: Content) -> some View {
+        if chrome == .recording {
+            content
+                .accessibilityElement(children: .contain)
+                .accessibilityLabel(label)
+        } else {
+            content
+                .accessibilityElement()
+                .accessibilityLabel(label)
+                .accessibilityAddTraits(.isStaticText)
+        }
+    }
+
+    private var label: String {
+        if !render.message.isEmpty { return render.message }
+        switch render.state {
+        case .hidden: return ""
+        case .prewarming: return "Starting"
+        case .recording: return "Listening"
+        case .finalizing: return "Finishing"
+        case .refining: return "Cleaning up"
+        case .success: return "Inserted"
+        case .error: return "Error"
+        case .blockedSecure: return PillGeometry.blockedSecureMessage
+        case .missed: return render.message.isEmpty ? PillGeometry.missedMessage : render.message
+        case .idle: return chrome == .idle ? "Click to start dictating" : "Ready"
+        }
     }
 }
 #endif

@@ -251,8 +251,10 @@ enum PillDemo {
                  burst: [0.07, 0.10, 0.13, 0.16, 0.19, 0.22, 0.25, 0.30],
                  level: { t in t < 0.06 ? 0.9 : nil }) { $0.showRecording() },
 
-            // The live tail: the capsule opens rightwards for the words.
-            Step("07-listening-tail", dwell: 2.6, shotAt: 1.8,
+            // The live tail is no longer drawn on the pill — text goes to the
+            // caret. This step still calls `livePartial` so the dead-mic cue
+            // stays suppressed the way a real utterance would.
+            Step("07-listening", dwell: 2.6, shotAt: 1.8,
                  level: { t in speech(t) }) { pill in
                 pill.showRecording()
                 pill.livePartial("so I was thinking about")
@@ -290,7 +292,8 @@ enum PillDemo {
                 $0.transientNotice("Learned Sharique")
             },
 
-            Step("13-missed", dwell: 1.8, shotAt: 0.45) {
+            // Empty utterance: a password-field "no", then idle. No red, no banner.
+            Step("13-missed", dwell: 1.8, shotAt: 0.20) {
                 $0.flashMissed("Didn't catch that")
             },
 
