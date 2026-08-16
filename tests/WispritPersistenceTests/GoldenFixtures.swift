@@ -12,7 +12,7 @@ import Foundation
 /// then prints the resulting bytes / sqlite_master rows / JSONL lines.)
 ///
 /// The one exception is the native settings appendix — `live_typing`,
-/// `im_selection_policy`, `emoji_commands` — which post-dates the Python and is
+/// `im_selection_policy`, `emoji_commands`, `identity_expansion` — which post-dates the Python and is
 /// appended here by hand, in `Settings.defaults` order, whenever a key is added.
 enum Golden {
 
@@ -50,7 +50,8 @@ enum Golden {
       "enabled": false,
       "live_typing": false,
       "im_selection_policy": "warm",
-      "emoji_commands": true
+      "emoji_commands": true,
+      "identity_expansion": true
     }
 
     """
@@ -91,6 +92,7 @@ enum Golden {
       "live_typing": false,
       "im_selection_policy": "warm",
       "emoji_commands": true,
+      "identity_expansion": true,
       "future_key": {
         "a": [
           1,

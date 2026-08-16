@@ -108,6 +108,63 @@ Gated by `emoji_commands` (default `true`), the fourth key `PostProcessOptions`
 reads and the third native appendix in `Settings.defaults` (append-only, after
 `im_selection_policy`).
 
+## Identity expansion — a native-only stage OUTSIDE `processResult` (2026-08-16)
+
+"my email" → the configured address. Post-Python, like the spoken-emoji stage
+above, so `Goldens.swift` / `FuzzGoldens.swift` are untouched and the behavior
+is pinned by hand-written tables (`IdentityExpansionTests.swift`,
+`SessionIdentityTests.swift`) — the same precedent.
+
+Unlike every other text stage it does **not** live inside
+`PostProcess.processResult`. It runs in `SessionController` after
+`processResult` AND after `expandSnippets`, and both halves of that position
+are load-bearing:
+
+- **After the whole pipeline** so the spliced address can no longer be touched
+  by `joinEmail`/`joinURL`, by `ensureSentencePeriod`, or by
+  `SmartFormat.applyContextFit`'s `lowercaseOpening`. Each non-interaction is a
+  test, not an assumption (`SessionIdentityTests`).
+- **After snippets** so a user-authored snippet — an explicit unconditional
+  rule — wins a trigger collision by consuming the phrase first. Zero
+  precedence code, and reordering the two calls silently flips it.
+
+Three decisions worth recording:
+
+- **Whitelist polarity, never a blocklist.** Nothing expands mid-sentence
+  without a NAMED licenser (presentative, locative, hand-over verb + strong
+  preposition, addressee-directed frame, dangling copula, coordination). A
+  blocklist of referring verbs would fail OPEN on every verb nobody thought of;
+  this fails closed. The accepted cost is false negatives ("share my email with
+  the team"), which cost a re-dictation. A false fire types a real personal
+  address into whatever app is frontmost.
+- **Hand-over verbs license; deposit verbs do not.** A hand-over verb's
+  prepositional object is the CHANNEL by which something reaches a person
+  (`send`, `forward`, `email`, `reach`, `cc`); a deposit verb's is a PLACE the
+  speaker owns (`post`, `push`, `upload`, `publish`, `add`, `share`, `sign`).
+  "I'll post it on my LinkedIn" and "push it to my GitHub" name a place and
+  stay verbatim. `find`/`connect` are licensed by the 2nd-person FRAME ("you
+  can find me on my GitHub") rather than by lemma membership.
+- **An unset slot is INERT — it never emits, not even a stub.** LinkedIn and
+  website ship empty. Blank and absent are the same thing at the API boundary
+  (`IdentityValues.value`), on disk (`persist` omits empty values), and in the
+  UI (blank input clears before the normalizer can run). Nothing the user has
+  not explicitly saved can reach a document: the git-config email is a
+  suggestion that fills a field's DRAFT, and `IdentityStore.set` is called from
+  exactly one place, the field's save action.
+
+Storage is `~/.wisprit/identity.json` (`{"version":1,"identity":{…}}`), its own
+file rather than a snippet kind — `SnippetStore.reload()` drops empty
+expansions and `persist()` rebuilds each row as exactly {trigger, expansion},
+so a `kind` marker would be destroyed by an unrelated snippet edit. Gated by
+`identity_expansion` (default `true`), the fourth native appendix in
+`Settings.defaults`, and independently inert while every slot is empty.
+
+**The expanded value reaches `history.sqlite`.** `history.add(text:)` records
+what was INSERTED, so where the store used to hold "my email" it now holds the
+address — a new class of content in an existing store, not a new store. Kept
+deliberately (consistent with snippets, and it is what the user actually put in
+their document); the Identity section's copy says so.
+
 ## Retro-correction (Phase 3)
 
 - **A second `metrics.log` line per utterance, `outcome: "vocab_retro"`.**

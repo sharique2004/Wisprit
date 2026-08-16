@@ -218,6 +218,9 @@ public final class WispritWindowModel: ObservableObject {
     @Published public private(set) var liveTypingFallbacks: [BundleVerdict] = []
     @Published public private(set) var dictionaryRows: [DictionaryRow] = []
     @Published public private(set) var snippetRows: [SnippetRow] = []
+    /// Always four, always in this order, filled or not — they are named
+    /// fields, not a list.
+    @Published public private(set) var identityRows: [IdentityRow] = []
     /// Phase-5 learn proposals awaiting review — §3.4's Pending badge grows a
     /// second population beyond the quarantined dictionary entries.
     @Published public private(set) var learnProposals: [LearnProposalRow] = []
@@ -312,6 +315,7 @@ public final class WispritWindowModel: ObservableObject {
     private let settings: Settings
     private let dictionary: DictionaryEditor
     private let snippets: SnippetStore?
+    private let identity: IdentityStore?
     private let ports: Ports
     private var timer: Timer?
     /// Full probes are expensive; the 2-second tick only does the cheap one and
@@ -345,14 +349,17 @@ public final class WispritWindowModel: ObservableObject {
     private var isDictating = false
 
     public init(settings: Settings, dictionary: DictionaryEditor,
-                snippets: SnippetStore? = nil, ports: Ports = Ports()) {
+                snippets: SnippetStore? = nil, identity: IdentityStore? = nil,
+                ports: Ports = Ports()) {
         self.settings = settings
         self.dictionary = dictionary
         self.snippets = snippets
+        self.identity = identity
         self.ports = ports
         reloadSettings()
         reloadDictionary()
         reloadSnippets()
+        reloadIdentity()
         // The model is built once per launch, so this is where the
         // time-to-wow clock (R14) sees launches.
         noteLaunchForTimeToWow()
@@ -373,6 +380,7 @@ public final class WispritWindowModel: ObservableObject {
         reloadSettings()
         reloadDictionary()
         reloadSnippets()
+        reloadIdentity()
         refreshRecents()
         loadHistory(reset: true)
         refreshHomeStats()
@@ -829,6 +837,113 @@ public final class WispritWindowModel: ObservableObject {
     public func deleteSnippet(_ trigger: String) {
         snippets?.remove(trigger: trigger)
         reloadSnippets()
+    }
+
+    // MARK: - Identity
+
+    public struct IdentityRow: Identifiable, Equatable, Sendable {
+        public var slot: IdentitySlot
+        /// "" == unset. The row still exists — it is a named field.
+        public var value: String
+        public var id: String { slot.rawValue }
+
+        public var label: String {
+            switch slot {
+            case .email: return "Email"
+            case .linkedin: return "LinkedIn"
+            case .github: return "GitHub"
+            case .website: return "Website"
+            }
+        }
+
+        /// The phrase shown next to the field, so the trigger is never a
+        /// thing the user has to guess.
+        public var spokenTrigger: String {
+            switch slot {
+            case .email: return "Say “my email”"
+            case .linkedin: return "Say “my LinkedIn”"
+            case .github: return "Say “my GitHub”"
+            case .website: return "Say “my website”"
+            }
+        }
+
+        /// The SHAPE, never a fake value — a placeholder must not read as
+        /// something that would be typed.
+        public var placeholder: String {
+            switch slot {
+            case .email: return "you@example.com"
+            case .linkedin: return "linkedin.com/in/your-name"
+            case .github: return "your-github-username"
+            case .website: return "yoursite.com"
+            }
+        }
+    }
+
+    public enum IdentitySaveResult: Equatable {
+        case saved(normalized: String)
+        case cleared
+        /// Refused values produce a message instead of a silent drop — and the
+        /// field stays EMPTY, so a bad value degrades to no value rather than
+        /// to a broken one that could be typed into a document.
+        case rejected(reason: String)
+    }
+
+    public var hasIdentity: Bool { identity != nil }
+
+    @Published public private(set) var emailSuggestionDismissed = false
+    private var suggestedEmailProbed = false
+    private var suggestedEmailCache: String?
+
+    public func reloadIdentity() {
+        let values = identity?.values() ?? IdentityValues()
+        identityRows = IdentitySlot.allCases.map {
+            IdentityRow(slot: $0, value: values.value($0) ?? "")
+        }
+    }
+
+    /// Read on FIRST ACCESS, never in `init`: `AppController` builds this model
+    /// at launch, and a user who never opens Settings should not have their
+    /// `~/.gitconfig` opened on their behalf.
+    ///
+    /// VIEW STATE ONLY. This value fills a field's draft; the only call to
+    /// `IdentityStore.set` in the whole app is `saveIdentity`, which the user
+    /// triggers. Nothing unconfirmed can reach identity.json, and therefore
+    /// nothing unconfirmed can reach a document.
+    public var suggestedEmail: String? {
+        guard !emailSuggestionDismissed else { return nil }
+        if !suggestedEmailProbed {
+            suggestedEmailProbed = true
+            suggestedEmailCache = IdentitySeed.gitConfigEmail()
+        }
+        return suggestedEmailCache
+    }
+
+    /// Dismissing the suggestion hides it for the session.
+    public func dismissEmailSuggestion() { emailSuggestionDismissed = true }
+
+    @discardableResult
+    public func saveIdentity(_ slot: IdentitySlot, value: String) -> IdentitySaveResult {
+        guard let identity else { return .rejected(reason: "Identity is unavailable.") }
+        // Clear short-circuits BEFORE normalize, so no caller can turn blank
+        // input into a `https://github.com/` stub and store it.
+        let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            identity.set(slot, to: "")
+            reloadIdentity()
+            return .cleared
+        }
+        let normalized = IdentityValue.normalize(trimmed, for: slot)
+        if let reason = IdentityValue.validate(normalized, for: slot) {
+            return .rejected(reason: reason)
+        }
+        identity.set(slot, to: normalized)
+        reloadIdentity()
+        return .saved(normalized: normalized)
+    }
+
+    public func clearIdentity(_ slot: IdentitySlot) {
+        identity?.set(slot, to: "")
+        reloadIdentity()
     }
 
     // MARK: - Settings

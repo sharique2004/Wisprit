@@ -21,6 +21,11 @@ public enum WispritPaths {
     public static var configPath: URL { stateDir.appendingPathComponent("config.json") }
     public static var dictionaryPath: URL { stateDir.appendingPathComponent("dictionary.json") }
     public static var snippetsPath: URL { stateDir.appendingPathComponent("snippets.json") }
+    /// Identity values ("my email" → the address). Its own file, not a snippet
+    /// kind: `SnippetStore.persist()` rebuilds every row as exactly
+    /// {trigger, expansion}, so a `kind` marker would be destroyed the first
+    /// time the user edited an unrelated snippet.
+    public static var identityPath: URL { stateDir.appendingPathComponent("identity.json") }
     public static var historyPath: URL { stateDir.appendingPathComponent("history.sqlite") }
     public static var metricsPath: URL { stateDir.appendingPathComponent("metrics.log") }
     public static var logPath: URL { stateDir.appendingPathComponent("wisprit.log") }

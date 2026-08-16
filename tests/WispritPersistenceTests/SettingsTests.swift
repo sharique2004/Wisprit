@@ -36,7 +36,7 @@ final class SettingsTests: XCTestCase {
             "ai_cleanup_max_words", "ai_cleanup_timeout_ms", "mlx_model",
             "paste_restore_delay_ms", "enabled",
             // native appendices (post-Python; keep appending, never insert)
-            "live_typing", "im_selection_policy", "emoji_commands",
+            "live_typing", "im_selection_policy", "emoji_commands", "identity_expansion",
         ])
     }
 

@@ -35,6 +35,15 @@ final class NetworkInvariantTests: XCTestCase {
         Allowance(path: "Sources/WispritIMProtocol/IMBundleTemplate.swift",
                   tokens: ["http://"],
                   reason: "PLIST DOCTYPE public identifier in a generated Info.plist"),
+        // The identity fields normalize a typed-in profile URL to a canonical
+        // form. `https://` here is a SCHEME PREFIX being written into a string
+        // the user's document will receive — the value's whole job is to
+        // autolink once pasted. Nothing fetches it: the file contains no
+        // networking API, only `URL(string:)` for structural validation
+        // (scheme/host/path segments), which performs no I/O.
+        Allowance(path: "Sources/WispritDictionary/IdentityStore.swift",
+                  tokens: ["https://"],
+                  reason: "URL scheme prefix for a value that is TYPED, never fetched"),
         // The ONE planned runtime network call (Phase 6, spikes-parakeet.md):
         // the explicit, user-invoked Parakeet model download. Pinned HF assets
         // verified byte-for-byte against a SHA-256 manifest before any

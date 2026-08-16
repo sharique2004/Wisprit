@@ -141,6 +141,15 @@ public final class SessionController: @unchecked Sendable {
         /// Voice-triggered snippet expansion (Flow Snippets). Identity by
         /// default so tests that never constructed a store stay verbatim.
         public var expandSnippets: @Sendable (String) -> String
+        /// "my email" → the configured address, but only when the phrase hands
+        /// the value over. Identity by default, like `expandSnippets`.
+        ///
+        /// A SEPARATE closure rather than a composition inside `expandSnippets`
+        /// so the ORDER is a fact this file states and a test can pin: snippets
+        /// run first, which is the whole of the precedence rule — a
+        /// user-authored snippet is an explicit unconditional override and
+        /// consumes the phrase before the conditional identity gate sees it.
+        public var expandIdentity: @Sendable (String) -> String
         /// How long to keep the mic open after key-up so the in-flight
         /// ~100 ms tap and resampler tail are not discarded. Zero in tests
         /// (and the default) so the state machine stays instantaneous;
@@ -169,6 +178,7 @@ public final class SessionController: @unchecked Sendable {
                     vocabularyRetro: @escaping @Sendable () -> Bool = { true },
                     pollTimeout: TimeInterval = 0.25,
                     expandSnippets: @escaping @Sendable (String) -> String = { $0 },
+                    expandIdentity: @escaping @Sendable (String) -> String = { $0 },
                     releaseGrace: TimeInterval = 0,
                     inputWarning: @escaping @Sendable () -> String? = { nil },
                     inputVolumeAdvisory: @escaping @Sendable () -> Int? = { nil }) {
@@ -180,6 +190,7 @@ public final class SessionController: @unchecked Sendable {
             self.vocabularyRetro = vocabularyRetro
             self.pollTimeout = pollTimeout
             self.expandSnippets = expandSnippets
+            self.expandIdentity = expandIdentity
             self.releaseGrace = releaseGrace
             self.inputWarning = inputWarning
             self.inputVolumeAdvisory = inputVolumeAdvisory
@@ -621,7 +632,16 @@ public final class SessionController: @unchecked Sendable {
         let processed = PostProcess.processResult(refined,
                                                  options: options,
                                                  corrections: corrections)
-        var text = config.expandSnippets(processed.text)
+        // ORDER IS THE PRECEDENCE RULE, and it is load-bearing in both
+        // directions. Snippets first: an explicit user-authored trigger is an
+        // unconditional override and must win a collision with an identity
+        // trigger, which it does by consuming the phrase — zero precedence
+        // code. Identity last, i.e. after the WHOLE of PostProcess: the
+        // address it splices in can then no longer be re-mangled by the
+        // spoken-email/URL joiner, by `ensureSentencePeriod`, or by
+        // `applyContextFit`'s `lowercaseOpening`. Reordering these two lines
+        // silently flips both guarantees.
+        var text = config.expandIdentity(config.expandSnippets(processed.text))
         // Follow-up "not a pet pill" after the wrong word is already in
         // the field: rewrite that word and swallow the cue, the same
         // shape as a spoken-spelling retro-replace.

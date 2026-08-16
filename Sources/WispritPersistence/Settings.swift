@@ -35,6 +35,7 @@ public enum SettingsKey {
     public static let liveTyping = "live_typing"
     public static let imSelectionPolicy = "im_selection_policy"
     public static let emojiCommands = "emoji_commands"
+    public static let identityExpansion = "identity_expansion"
 }
 
 public final class Settings: @unchecked Sendable {
@@ -75,6 +76,10 @@ public final class Settings: @unchecked Sendable {
             (SettingsKey.liveTyping, .bool(false)),                 // IM rungs stay off until onboarding
             (SettingsKey.imSelectionPolicy, .string("warm")),       // "warm" | "per_utterance"
             (SettingsKey.emojiCommands, .bool(true)),               // spoken "<name> emoji" -> glyph
+            // "my email" -> the configured address. On by default, but INERT
+            // until a value exists, so a default install is a measured no-op;
+            // this key is the kill switch for a stage that types PII.
+            (SettingsKey.identityExpansion, .bool(true)),
         ])
     }
 
@@ -207,6 +212,7 @@ public final class Settings: @unchecked Sendable {
     public var pasteRestoreDelayMs: Int { int(SettingsKey.pasteRestoreDelayMs) ?? defaultInt(SettingsKey.pasteRestoreDelayMs) }
     public var enabled: Bool { bool(SettingsKey.enabled) ?? defaultBool(SettingsKey.enabled) }
     public var emojiCommands: Bool { bool(SettingsKey.emojiCommands) ?? defaultBool(SettingsKey.emojiCommands) }
+    public var identityExpansion: Bool { bool(SettingsKey.identityExpansion) ?? defaultBool(SettingsKey.identityExpansion) }
 
     // MARK: - Writing
 

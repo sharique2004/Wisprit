@@ -83,9 +83,18 @@ public final class SnippetStore: @unchecked Sendable {
         return out
     }
 
+    /// `FileManager.attributesOfItem`, NOT `URL.resourceValues` — a `URL` value
+    /// caches the resource values it has already been asked for (it holds a
+    /// bridged `NSURL`), so re-reading `contentModificationDate` through the
+    /// stored `path` returns the FIRST answer forever and a hand-edit to
+    /// `snippets.json` never lands until relaunch. Measured while building the
+    /// identity store, which hit it verbatim.
+    private func fileModified() -> Date? {
+        (try? FileManager.default.attributesOfItem(atPath: path.path))?[.modificationDate] as? Date
+    }
+
     public func maybeReload() {
-        let mtime = (try? path.resourceValues(forKeys: [.contentModificationDateKey]))?
-            .contentModificationDate
+        let mtime = fileModified()
         lock.lock()
         let known = self.mtime
         lock.unlock()
@@ -99,8 +108,7 @@ public final class SnippetStore: @unchecked Sendable {
             lock.lock()
             snippets = []
             compiled = []
-            mtime = (try? path.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate
+            mtime = fileModified()
             lock.unlock()
             return
         }
@@ -113,8 +121,7 @@ public final class SnippetStore: @unchecked Sendable {
         lock.lock()
         snippets = loaded
         compiled = compile(loaded)
-        mtime = (try? path.resourceValues(forKeys: [.contentModificationDateKey]))?
-            .contentModificationDate
+        mtime = fileModified()
         lock.unlock()
     }
 

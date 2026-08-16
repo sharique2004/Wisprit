@@ -49,6 +49,7 @@ final class SessionControllerTests: XCTestCase {
              context: FakeContext? = nil,
              postProcessOptions: @escaping @Sendable () -> PostProcessOptions = { PostProcessOptions() },
              expandSnippets: @escaping @Sendable (String) -> String = { $0 },
+             expandIdentity: @escaping @Sendable (String) -> String = { $0 },
              // Zero by default, so every timing assertion in this file stays
              // instantaneous — the grace is opt-in per test, exactly as it is
              // per install.
@@ -86,6 +87,7 @@ final class SessionControllerTests: XCTestCase {
                     reconcileVocabulary: reconcile,
                     vocabularyRetro: { vocabularyRetro },
                     expandSnippets: expandSnippets,
+                    expandIdentity: expandIdentity,
                     releaseGrace: releaseGrace,
                     inputWarning: inputWarning,
                     inputVolumeAdvisory: inputVolumeAdvisory))

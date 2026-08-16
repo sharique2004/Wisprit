@@ -1,5 +1,6 @@
 #if os(macOS)
 import SwiftUI
+import WispritKit
 import WispritMacUI
 
 /// Dictionary — `docs/design/ui-redesign.md` §3.4.
@@ -32,6 +33,10 @@ struct DictionaryPage: View {
     @State private var hovered: DictionaryListItem.ID?
     @State private var editingSnippet: SnippetEdit?
     @State private var pendingSnippetDelete: WispritWindowModel.SnippetRow?
+    /// Per-field drafts, keyed by slot. A field is committed on Return, not on
+    /// every keystroke, so a half-typed address is never stored.
+    @State private var identityDrafts: [String: String] = [:]
+    @State private var identityErrors: [String: String] = [:]
 
     private struct SnippetEdit: Identifiable {
         var row: WispritWindowModel.SnippetRow?
@@ -79,6 +84,9 @@ struct DictionaryPage: View {
                         emptyState
                     } else {
                         list
+                    }
+                    if model.hasIdentity {
+                        identitySection
                     }
                     if model.hasSnippets {
                         snippetsSection
@@ -723,6 +731,105 @@ enum DictionaryList {
 }
 
 private extension DictionaryPage {
+    /// Four NAMED fields, always all four, in a fixed order — so a set field
+    /// and an unset one are told apart by their value, never by their absence.
+    ///
+    /// `model.dictionarySearch` deliberately does NOT filter this section: the
+    /// snippet list below is a list, but these are named fields, and hiding one
+    /// because of an unrelated query would make a set field look unset.
+    var identitySection: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.s8) {
+            Text("Identity")
+                .font(.headline)
+                .padding(.top, Theme.Space.s16)
+            // The second sentence is the honest disclosure of rule 2's
+            // conditionality. Without it the behaviour is inexplicable.
+            Text("Say “my email” on its own and Wisprit types the value. "
+                 + "Mid-sentence it only expands when you’re handing the value "
+                 + "over — “I need to check my email” stays as you said it. "
+                 + "What Wisprit types goes into whatever app you’re in, and "
+                 + "into your dictation history.")
+                .font(.subheadline)
+                .foregroundStyle(.secondary)
+            ForEach(model.identityRows) { row in
+                identityRow(row)
+            }
+        }
+    }
+
+    @ViewBuilder
+    func identityRow(_ row: WispritWindowModel.IdentityRow) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s8) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(row.label)
+                        .font(.body.weight(.medium))
+                    Text(row.spokenTrigger)
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                }
+                .frame(width: 160, alignment: .leading)
+                TextField(row.placeholder, text: identityDraft(row))
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { commitIdentity(row) }
+                if !row.value.isEmpty {
+                    Button("Clear", role: .destructive) {
+                        model.clearIdentity(row.slot)
+                        identityDrafts[row.id] = ""
+                        identityErrors[row.id] = nil
+                    }
+                    .buttonStyle(.borderless)
+                    .controlSize(.small)
+                }
+            }
+            .padding(.vertical, Theme.Space.s8)
+            if let reason = identityErrors[row.id] {
+                Text(reason)
+                    .font(.subheadline)
+                    // Theme.critical, not a literal `.red` — Theme.swift §1
+                    // forbids literal colours anywhere in the UI.
+                    .foregroundStyle(Theme.critical)
+            }
+            // Email only, only while unset, and it fills the DRAFT — never the
+            // store. The user still has to press Return to save it.
+            if row.slot == .email, row.value.isEmpty,
+               (identityDrafts[row.id] ?? "").isEmpty, let suggestion = model.suggestedEmail {
+                HStack(spacing: Theme.Space.s8) {
+                    Button("Use \(suggestion)") { identityDrafts[row.id] = suggestion }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                    Text("found in your git config")
+                        .font(.subheadline)
+                        .foregroundStyle(.secondary)
+                    Button("Dismiss") { model.dismissEmailSuggestion() }
+                        .buttonStyle(.borderless)
+                        .controlSize(.small)
+                }
+            }
+        }
+    }
+
+    func identityDraft(_ row: WispritWindowModel.IdentityRow) -> Binding<String> {
+        Binding(get: { identityDrafts[row.id] ?? row.value },
+                set: { identityDrafts[row.id] = $0 })
+    }
+
+    /// Normalize → validate → store, then write the NORMALIZED string back into
+    /// the field, so what the user sees is exactly what will be typed.
+    func commitIdentity(_ row: WispritWindowModel.IdentityRow) {
+        let draft = identityDrafts[row.id] ?? row.value
+        switch model.saveIdentity(row.slot, value: draft) {
+        case .saved(let normalized):
+            identityDrafts[row.id] = normalized
+            identityErrors[row.id] = nil
+        case .cleared:
+            identityDrafts[row.id] = ""
+            identityErrors[row.id] = nil
+        case .rejected(let reason):
+            identityErrors[row.id] = reason
+        }
+    }
+
     var snippetsSection: some View {
         VStack(alignment: .leading, spacing: Theme.Space.s8) {
             Text("Snippets")

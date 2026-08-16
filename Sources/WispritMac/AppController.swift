@@ -31,6 +31,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
     let settings: Settings
     let dictionary: DictionaryStore
     let snippets: SnippetStore
+    let identity: IdentityStore
     let history: History
     let metrics: MetricsWriter
     let refiner: Refiner
@@ -108,6 +109,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
         self.dictionary = dictionary
         let snippets = SnippetStore()
         self.snippets = snippets
+        let identity = IdentityStore()
+        self.identity = identity
         // `history_detail` is honored HERE, the wiring site: the store takes it
         // as a constructor value on purpose (see `History.detailEnabled`).
         self.history = History(settings: settings,
@@ -349,6 +352,17 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 // dictation, not the next launch.
                 vocabularyRetro: { VocabularyRetroSettings.isEnabled(settings) },
                 expandSnippets: { snippets.expand($0) },
+                // The kill switch is read HERE, per utterance, not baked into
+                // the closure at wiring time, so toggling it takes effect on
+                // the next dictation rather than the next launch — the same
+                // discipline as every other setting closure in this struct.
+                // Second, independent gate: the gate itself is the identity
+                // function while every slot is empty, so a default install
+                // with no identity.json is a measured no-op.
+                expandIdentity: { text in
+                    guard settings.identityExpansion else { return text }
+                    return IdentityExpansion.expand(text, identity.values())
+                },
                 // One definition of the grace, in `KeyupGraceSettings`.
                 releaseGrace: KeyupGraceSettings.seconds(settings),
                 inputWarning: { narrowbandWarner.warning() },
@@ -361,6 +375,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
             settings: settings,
             dictionary: DictionaryEditor(store: dictionary),
             snippets: snippets,
+            identity: identity,
             ports: AppController.makeWindowPorts(history: history,
                                                  settings: settings,
                                                  tierCache: tierCache,
