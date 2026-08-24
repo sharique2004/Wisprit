@@ -172,6 +172,38 @@ final class InputDevicePolicyTests: XCTestCase {
         XCTAssertNil(NarrowbandWarner(probe: { nil }).warning())
     }
 
+    // The negotiated rate decides which of the two messages fires: the caller
+    // reads it from the live capture session AFTER the mic opened, so unlike
+    // the advertised rate it cannot lie.
+
+    /// A headset that came up wideband (mSBC 16 kHz — the pipeline's own rate)
+    /// gets told about the playback trade-off, never about accuracy.
+    func testAWidebandNegotiationGetsThePlaybackMessage() {
+        let probe = DeviceBox(device(7))
+        let warner = NarrowbandWarner(probe: { probe.value })
+        XCTAssertEqual(warner.warning(negotiatedRateHz: 16_000), NarrowbandWarner.message)
+    }
+
+    /// A headset that came up CVSD (8 kHz phone-call audio) is the one case
+    /// where accuracy genuinely suffers — that message names the Mac mic.
+    func testACvsdNegotiationGetsTheNarrowbandMessage() {
+        let probe = DeviceBox(device(7))
+        let warner = NarrowbandWarner(probe: { probe.value })
+        XCTAssertEqual(warner.warning(negotiatedRateHz: 8_000),
+                       NarrowbandWarner.narrowbandMessage)
+    }
+
+    /// The very first utterance on a fresh device may have no negotiated rate
+    /// yet; the honest general message is the fallback, and the once-per-device
+    /// rule is not consumed twice.
+    func testAMissingNegotiatedRateFallsBackToThePlaybackMessage() {
+        let probe = DeviceBox(device(7))
+        let warner = NarrowbandWarner(probe: { probe.value })
+        XCTAssertEqual(warner.warning(negotiatedRateHz: nil), NarrowbandWarner.message)
+        XCTAssertNil(warner.warning(negotiatedRateHz: 8_000),
+                     "one notice per device appearance, whichever message fired")
+    }
+
     /// `input_device_policy = off` silences it, and silences it BEFORE the
     /// probe runs — an opted-out user pays nothing at key-down.
     func testPolicyOffSilencesTheWarningWithoutProbing() {

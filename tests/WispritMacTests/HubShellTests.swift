@@ -215,17 +215,22 @@ final class HubShellTests: XCTestCase {
         XCTAssertEqual(WindowSettings.keyupGraceDefault, KeyupGraceSettings.defaultMs)
     }
 
-    func testInputDevicePolicyFallsBackToPreferBuiltin() {
+    /// The default (and unknown-value fallback) is the headset mic with one
+    /// honest notice — the 2026-08-24 reversal of b6752aa's pin
+    /// (docs/research/hearing-and-corrections.md). Case order is display
+    /// order: the recommended default leads.
+    func testInputDevicePolicyFallsBackToWarn() {
         XCTAssertEqual(WindowSettings.InputDevicePolicyOption.allCases.map(\.rawValue),
-                       ["prefer_builtin", "warn", "off"])
+                       ["warn", "prefer_builtin", "off"])
         XCTAssertEqual(WindowSettings.InputDevicePolicyOption.parse("prefer_builtin"),
                        .preferBuiltin)
-        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.parse("nonsense"), .preferBuiltin)
+        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.parse("nonsense"), .warn)
+        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.warn.label,
+                       "Use headset mic (recommended)")
         XCTAssertEqual(WindowSettings.InputDevicePolicyOption.preferBuiltin.label,
                        "Use Mac microphone")
-        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.warn.label,
-                       "Use headset mic, warn once")
-        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.off.label, "Use headset mic")
+        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.off.label,
+                       "Use headset mic, silently")
     }
 
     func testSelectionPolicyFallsBackToWarm() {

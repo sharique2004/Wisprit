@@ -259,11 +259,13 @@ final class DoctorTests: XCTestCase {
         XCTAssertTrue(check?.detail.contains("password field or an app like Slack") == true)
     }
 
-    // MARK: - audio input device (2026-08-15)
+    // MARK: - audio input device (2026-08-15; reframed 2026-08-24)
     //
-    // Warn-only and never gating, the `assetStatus` precedent: a narrowband
-    // headset transcribes, just worse, and calling a healthy install broken over
-    // the user's own device choice would be wrong.
+    // Never gating, the `assetStatus` precedent — and since the default became
+    // "use the headset mic" (docs/research/hearing-and-corrections.md), no
+    // longer a warning either: the headset mic in use is the decision, not a
+    // defect. Warn survives for exactly one shape: a headset advertising
+    // genuine 8 kHz CVSD.
 
     func testAWidebandInputDeviceIsAGreenInformationalRow() {
         var facts = green()
@@ -273,11 +275,11 @@ final class DoctorTests: XCTestCase {
         let report = Doctor.report(from: facts)
         let check = report.check("Audio input device")
         XCTAssertEqual(check?.mark, .ok)
-        XCTAssertEqual(check?.detail, "MacBook Pro Microphone — built-in, 48000 Hz")
+        XCTAssertEqual(check?.detail, "MacBook Pro Microphone — built-in, advertises 48000 Hz")
         XCTAssertTrue(report.isReady)
     }
 
-    func testANarrowbandInputDeviceWarnsWhenPolicyDoesNotPin() {
+    func testAHeadsetMicInUseIsAnHonestGreenRowNotAWarning() {
         var facts = green()
         facts.inputDeviceName = "AirPods Pro"
         facts.inputDeviceTransport = "Bluetooth"
@@ -286,11 +288,12 @@ final class DoctorTests: XCTestCase {
         facts.inputDevicePolicy = "warn"
         let report = Doctor.report(from: facts)
         let check = report.check("Audio input device")
-        XCTAssertEqual(check?.mark, .warn)
-        XCTAssertTrue(check?.detail.contains("AirPods Pro — Bluetooth, 16000 Hz") == true)
+        XCTAssertEqual(check?.mark, .ok, "the headset mic in use is the decision, not a defect")
+        XCTAssertTrue(check?.detail.contains("AirPods Pro — Bluetooth, advertises 16000 Hz") == true)
         XCTAssertTrue(check?.detail.contains("call quality") == true)
-        XCTAssertTrue(check?.detail.contains("input_device_policy=prefer_builtin") == true)
-        XCTAssertTrue(report.isReady, "a worse microphone is not a broken install")
+        XCTAssertTrue(check?.detail.contains("miclab") == true,
+                      "the advertised rate lies; the row points at the active probe")
+        XCTAssertTrue(report.isReady)
     }
 
     func testANarrowbandInputDeviceIsOkWhenWispritPinsBuiltin() {
@@ -302,10 +305,26 @@ final class DoctorTests: XCTestCase {
         facts.inputDevicePolicy = "prefer_builtin"
         let check = Doctor.report(from: facts).check("Audio input device")
         XCTAssertEqual(check?.mark, .ok)
-        XCTAssertTrue(check?.detail.contains("using the built-in mic") == true)
+        XCTAssertTrue(check?.detail.contains("pins the Mac microphone") == true)
     }
 
-    func testHeadsetCaptureRiskWarnsWhenHeadphonesAreTheOutput() {
+    /// The one warn that survives the reframe: a headset advertising genuine
+    /// CVSD (8 kHz phone-call audio), where accuracy really is on the table.
+    func testACvsdHeadsetMicStillWarns() {
+        var facts = green()
+        facts.inputDeviceName = "Old Headset"
+        facts.inputDeviceTransport = "Bluetooth"
+        facts.inputDeviceSampleRateHz = 8_000
+        facts.inputDeviceNarrowband = true
+        facts.inputDevicePolicy = "warn"
+        let report = Doctor.report(from: facts)
+        let check = report.check("Audio input device")
+        XCTAssertEqual(check?.mark, .warn)
+        XCTAssertTrue(check?.detail.contains("8 kHz is phone-call audio") == true)
+        XCTAssertTrue(report.isReady, "a worse microphone is not a broken install")
+    }
+
+    func testHeadsetCaptureRiskIsAGreenRowNamingTheTradeoff() {
         var facts = green()
         facts.inputDeviceName = "AirPods Pro"
         facts.inputDeviceTransport = "Bluetooth"
@@ -313,7 +332,8 @@ final class DoctorTests: XCTestCase {
         facts.inputDeviceHeadsetRisk = true
         facts.inputDevicePolicy = "warn"
         let check = Doctor.report(from: facts).check("Audio input device")
-        XCTAssertEqual(check?.mark, .warn)
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertTrue(check?.detail.contains("headset mic dictates") == true)
         XCTAssertTrue(check?.detail.contains("call quality") == true)
     }
 

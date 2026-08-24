@@ -59,24 +59,29 @@ public enum KeyupGraceSettings {
 
 /// `input_device_policy` — what to do when headphones steal the input device.
 ///
-/// * `prefer_builtin` (default) — pin capture to the built-in mic while the
-///   default input is a classic-Bluetooth headset mic, or while opening it
-///   would drop Bluetooth headphone playback from A2DP to HFP/SCO.
-/// * `warn` — keep using the headset mic, one pill notice the first time.
+/// * `warn` (default) — use the headset mic, one honest pill notice per
+///   device appearance about the playback trade-off.
+/// * `prefer_builtin` — pin capture to the built-in mic while the default
+///   input is a classic-Bluetooth headset mic, or while opening it would drop
+///   Bluetooth headphone playback from A2DP to HFP/SCO.
 /// * `off` — say nothing, pin nothing.
 ///
-/// Default is pin, not warn: connecting headphones is a listening choice.
-/// macOS silently reroutes *input* to the headset mic, which both degrades
-/// recognition (HFP is 8–16 kHz) and glitches the audio the user is hearing.
-/// A USB desk mic is never displaced.
+/// The default was `prefer_builtin` for one release (b6752aa) and was
+/// reversed on a measured argument (docs/research/hearing-and-corrections.md):
+/// headphones go on precisely when the wearer can only speak softly or the
+/// room is loud — the situations where a mic inches from the mouth beats one
+/// on the desk. HFP wideband is 16 kHz, the pipeline's own canonical rate;
+/// the real trade is playback quality while the mic is open, and that is the
+/// wearer's call to make, told honestly, never silently overridden.
+/// A USB desk mic is never displaced under any policy.
 public enum InputDevicePolicySettings: String, CaseIterable, Sendable {
     case preferBuiltin = "prefer_builtin", warn, off
 
     public static let key = "input_device_policy"
 
     public static func policy(_ settings: Settings) -> InputDevicePolicySettings {
-        InputDevicePolicySettings(rawValue: settings.string(key, or: preferBuiltin.rawValue))
-            ?? .preferBuiltin
+        InputDevicePolicySettings(rawValue: settings.string(key, or: warn.rawValue))
+            ?? .warn
     }
 }
 
@@ -1439,13 +1444,33 @@ public final class SessionController: @unchecked Sendable {
 
     // MARK: - level ticker
 
+    /// Shown while a classic-Bluetooth mic has delivered nothing well past a
+    /// warm link's bring-up: SCO can spend 1–3 s negotiating before the first
+    /// sample exists, and a user who starts speaking into that gap is speaking
+    /// into a dead radio. Words the radio never carried cannot be recovered;
+    /// telling the user in the moment is the only honest remedy.
+    static let connectingHeadsetNotice = "Connecting headset mic…"
+    /// Ticks (at `levelTickInterval`, 50 ms) before the notice fires — 400 ms,
+    /// comfortably past a warm SCO link's first buffer but early enough to
+    /// save most of a cold one's 1–3 s.
+    static let connectingNoticeTicks = 8
+
     private func startLevelTicker() {
         guard let interval = config.levelTickInterval else { return }
         levelStop.reset()
         let thread = Thread { [weak self] in
             guard let self else { return }
+            var ticks = 0
+            var connectingShown = false
             while !self.levelStop.wait(interval) {
                 self.pill?.updateLevel(self.audio.level)
+                ticks += 1
+                if !connectingShown, ticks >= Self.connectingNoticeTicks,
+                   self.audio.firstChunkMs == nil,
+                   self.audio.deviceFacts?.isClassicBluetooth == true {
+                    connectingShown = true
+                    self.pill?.transientNotice(Self.connectingHeadsetNotice)
+                }
             }
         }
         thread.name = "pill-level"

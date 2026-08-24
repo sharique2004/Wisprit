@@ -57,6 +57,10 @@ public protocol AudioPort: Sendable {
     /// rows were device-blind until this existed). nil for ports that cannot
     /// know (fakes, the onboarding meter).
     var deviceFacts: AudioDeviceFacts? { get }
+    /// mic-live → first delivered buffer, voiced or not; nil while none has
+    /// arrived. On a classic-Bluetooth mic this is SCO bring-up made visible —
+    /// what the "connecting headset mic" pill state keys on.
+    var firstChunkMs: Double? { get }
 }
 
 /// The capture session's device attribution, in platform-neutral words —
@@ -67,11 +71,16 @@ public struct AudioDeviceFacts: Sendable, Equatable {
     public var transport: String
     /// The input-chain rate the session opened at, in Hz.
     public var negotiatedRateHz: Double
+    /// Classic Bluetooth — the transport whose mic rides SCO (slow bring-up,
+    /// playback drops to HFP while open). LE Audio is deliberately false here.
+    public var isClassicBluetooth: Bool
 
-    public init(name: String, transport: String, negotiatedRateHz: Double) {
+    public init(name: String, transport: String, negotiatedRateHz: Double,
+                isClassicBluetooth: Bool = false) {
         self.name = name
         self.transport = transport
         self.negotiatedRateHz = negotiatedRateHz
+        self.isClassicBluetooth = isClassicBluetooth
     }
 }
 
@@ -79,6 +88,7 @@ public extension AudioPort {
     var noiseFloor: Double? { nil }
     var firstVoicedMs: Double? { nil }
     var deviceFacts: AudioDeviceFacts? { nil }
+    var firstChunkMs: Double? { nil }
 }
 
 public protocol RefinePort: Sendable {
@@ -314,7 +324,10 @@ public struct MicCapturePort: AudioPort {
         else { return nil }
         return AudioDeviceFacts(name: device.name,
                                 transport: device.transportName,
-                                negotiatedRateHz: rate)
+                                negotiatedRateHz: rate,
+                                isClassicBluetooth: InputDevicePolicy
+                                    .isClassicBluetooth(device.transport))
     }
+    public var firstChunkMs: Double? { capture.firstChunkMs }
 }
 #endif

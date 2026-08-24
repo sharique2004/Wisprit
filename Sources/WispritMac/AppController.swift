@@ -151,12 +151,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
                                  // to something: the fact used to stop inside
                                  // MicCapture, where only a log line read it.
                                  onConfigurationChange: { asr.noteConfigurationChange() })
-        // `prefer_builtin` (the default): pin to the built-in mic when opening
-        // the system default would force Bluetooth headphones into HFP/SCO —
-        // playback drops to call quality and the first utterance often dies on
-        // a mid-hold configuration change. Never overrides a USB/external mic.
-        // Evaluated per `start()`, so unplugging the headset restores the
-        // normal path with no relaunch.
+        // `prefer_builtin` (opt-in; the default is `warn` = use the headset
+        // mic): pin to the built-in mic when opening the system default would
+        // force Bluetooth headphones into HFP/SCO. Never overrides a
+        // USB/external mic. Evaluated per `start()`, so unplugging the headset
+        // restores the normal path with no relaunch.
         capture.preferredDevice = {
             guard InputDevicePolicySettings.policy(settings) == .preferBuiltin,
                   let device = InputDeviceProbe.defaultInput(),
@@ -168,7 +167,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
             return InputDeviceProbe.builtInInput()
         }
         // One notice per device appearance, and only when we are *using* the
-        // headset mic (`warn`). `prefer_builtin` pins silently; `off` is quiet.
+        // headset mic (`warn`, the default). `prefer_builtin` pins silently;
+        // `off` is quiet.
         let narrowbandWarner = NarrowbandWarner(
             isEnabled: { InputDevicePolicySettings.policy(settings) == .warn })
         // Its quiet-speech twin (2026-08-15): the same once-per-device
@@ -373,7 +373,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 },
                 // One definition of the grace, in `KeyupGraceSettings`.
                 releaseGrace: KeyupGraceSettings.seconds(settings),
-                inputWarning: { narrowbandWarner.warning() },
+                // Consumed after `audio.start()` succeeded, so the session's
+                // own post-open rate is available — how the CVSD variant knows.
+                inputWarning: { [weak capture] in
+                    narrowbandWarner.warning(negotiatedRateHz: capture?.negotiatedRateHz)
+                },
                 inputVolumeAdvisory: { inputVolumeAdvisor.lowVolumePercent() }))
 
         super.init()

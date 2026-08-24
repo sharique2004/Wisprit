@@ -127,37 +127,40 @@ public enum WindowSettings {
     // MARK: - Headphones (`input_device_policy`)
 
     /// `input_device_policy` — what to do when headphones steal the input.
-    /// Raw values match `InputDevicePolicySettings` (`prefer_builtin` |
-    /// `warn` | `off`); unknown hand-edits fall back to `prefer_builtin`
-    /// rather than being rewritten.
+    /// Raw values match `InputDevicePolicySettings` (`warn` | `prefer_builtin`
+    /// | `off`); unknown hand-edits fall back to `warn` rather than being
+    /// rewritten. Case order is display order: the recommended default leads.
     public enum InputDevicePolicyOption: String, Sendable, Equatable, CaseIterable {
-        case preferBuiltin = "prefer_builtin"
         case warn
+        case preferBuiltin = "prefer_builtin"
         case off
 
         public var label: String {
             switch self {
+            case .warn: return "Use headset mic (recommended)"
             case .preferBuiltin: return "Use Mac microphone"
-            case .warn: return "Use headset mic, warn once"
-            case .off: return "Use headset mic"
+            case .off: return "Use headset mic, silently"
             }
         }
 
         public var explanation: String {
             switch self {
+            case .warn:
+                return "Headphones connected means their microphone dictates — it sits "
+                    + "inches from your mouth, which wins for soft speech and noisy rooms. "
+                    + "Playback drops to call quality while the mic is open; Wisprit "
+                    + "mentions that once per headset."
             case .preferBuiltin:
                 return "When Bluetooth headphones are connected, capture uses the Mac "
-                    + "microphone so playback stays high-quality and dictation stays accurate."
-            case .warn:
-                return "Keep using the headset microphone, and mention the call-quality "
-                    + "trade-off once."
+                    + "microphone so playback stays high-quality — at the cost of "
+                    + "dictating across the room."
             case .off:
-                return "Leave the system input alone, and do not warn."
+                return "Use the headset microphone and never mention the trade-off."
             }
         }
 
         public static func parse(_ raw: String) -> InputDevicePolicyOption {
-            InputDevicePolicyOption(rawValue: raw) ?? .preferBuiltin
+            InputDevicePolicyOption(rawValue: raw) ?? .warn
         }
     }
 

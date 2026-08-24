@@ -1,4 +1,5 @@
 import Foundation
+import WispritEngine
 import WispritIMProtocol
 import WispritKit
 import WispritPersistence
@@ -272,28 +273,35 @@ public enum Doctor {
                   + "(a password field or an app like Slack holds it)"
                 : "not active"))
 
-        // Warn-only and never gating (the `assetStatus` precedent): a headset
-        // mic transcribes, just worse, and calling a healthy install broken
-        // over the user's own device choice would be wrong. Omitted entirely
-        // when the probe found nothing — no device is a story the Microphone row
-        // above already tells. `prefer_builtin` is the default and pins the
-        // built-in mic, so that state is a green note rather than a warning.
+        // Never gating (the `assetStatus` precedent), and — since the default
+        // became "use the headset mic" (docs/research/hearing-and-corrections.md)
+        // — no longer a warning either: the headset mic in use is the DECISION,
+        // not a defect, and the row's job is to say which mic dictates and what
+        // that costs. Warn survives for one case only: a headset advertising
+        // genuine 8 kHz CVSD, where accuracy really is on the table. The
+        // advertised rate lies until HFP is up, so the row points at `miclab`
+        // for the negotiated truth rather than pretending to know it passively.
+        // Omitted entirely when the probe found nothing — no device is a story
+        // the Microphone row above already tells.
         if !facts.inputDeviceName.isEmpty {
             var detail = "\(facts.inputDeviceName) — \(facts.inputDeviceTransport), "
-                + "\(Int(facts.inputDeviceSampleRateHz.rounded())) Hz"
+                + "advertises \(Int(facts.inputDeviceSampleRateHz.rounded())) Hz"
+            var mark = DoctorMark.ok
             let risky = facts.inputDeviceNarrowband || facts.inputDeviceHeadsetRisk
             if risky {
                 if facts.inputDevicePolicy == InputDevicePolicySettings.preferBuiltin.rawValue {
-                    detail += " (headset mic would drop headphones to call quality — "
-                        + "Wisprit is using the built-in mic)"
+                    detail += " (input_device_policy=prefer_builtin — Wisprit pins the "
+                        + "Mac microphone instead)"
+                } else if facts.inputDeviceSampleRateHz < NarrowbandWarner.cvsdCeilingHz {
+                    detail += " (8 kHz is phone-call audio — the Mac mic may hear better; "
+                        + "`Wisprit miclab` reports what the link really negotiates)"
+                    mark = .warn
                 } else {
-                    detail += " (headset mic drops headphones to call quality — "
-                        + "set input_device_policy=prefer_builtin)"
+                    detail += " (headset mic dictates — playback drops to call quality "
+                        + "while the mic is open; `Wisprit miclab` reports the "
+                        + "negotiated rate)"
                 }
             }
-            let mark: DoctorMark = risky
-                && facts.inputDevicePolicy != InputDevicePolicySettings.preferBuiltin.rawValue
-                ? .warn : .ok
             checks.append(DoctorCheck(mark, "Audio input device", detail))
         }
 

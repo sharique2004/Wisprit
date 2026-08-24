@@ -112,15 +112,29 @@ public enum InputDevicePolicy {
     }
 }
 
-/// One warning per device appearance, never per utterance.
+/// One notice per device appearance, never per utterance.
 ///
 /// Fires for a narrowband HFP mic *or* for the headphones-connected case
 /// (`isHeadsetCaptureRisk`): opening that mic drops A2DP to call quality.
-/// Wired into `input_device_policy = warn` only — `prefer_builtin` pins
-/// silently instead of nagging about a mic it is not going to use.
+/// Wired into `input_device_policy = warn` (the default) only —
+/// `prefer_builtin` pins silently instead of nagging about a mic it is not
+/// going to use.
+///
+/// Two messages, decided by the NEGOTIATED rate when the caller has one
+/// (the warning is consumed after `MicCapture.start()` succeeded, so the
+/// session's own post-open truth is available): a headset that came up
+/// genuinely narrowband (CVSD, 8 kHz) gets told the Mac mic would hear
+/// better; a wideband headset gets the honest playback trade-off and
+/// nothing about accuracy — mSBC's 16 kHz IS the pipeline's canonical rate,
+/// and the mic inches from the mouth is why the headset is the default.
 public final class NarrowbandWarner: @unchecked Sendable {
     public static let message =
-        "Headset mic is call-quality — dictation may be less accurate"
+        "Using the headset mic — playback drops to call quality while dictating"
+    public static let narrowbandMessage =
+        "Headset mic came up at phone-call quality (8 kHz) — the Mac mic may hear you better"
+
+    /// Below this, the link negotiated CVSD rather than wideband speech.
+    public static let cvsdCeilingHz: Double = 12_000
 
     private let probe: @Sendable () -> InputDeviceInfo?
     private let outputTransport: @Sendable () -> UInt32?
@@ -139,7 +153,9 @@ public final class NarrowbandWarner: @unchecked Sendable {
     }
 
     /// The line to show, or nil — which is the answer almost always.
-    public func warning() -> String? {
+    /// `negotiatedRateHz` is the live capture session's post-open input rate
+    /// when the caller has one; nil falls back to the honest general message.
+    public func warning(negotiatedRateHz: Double? = nil) -> String? {
         guard isEnabled(), let device = probe() else { return nil }
         let output = outputTransport() ?? 0
         guard InputDevicePolicy.shouldPinBuiltIn(inputTransport: device.transport,
@@ -149,6 +165,9 @@ public final class NarrowbandWarner: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard lastWarnedDeviceID != device.deviceID else { return nil }
         lastWarnedDeviceID = device.deviceID
+        if let negotiatedRateHz, negotiatedRateHz < Self.cvsdCeilingHz {
+            return Self.narrowbandMessage
+        }
         return Self.message
     }
 }
