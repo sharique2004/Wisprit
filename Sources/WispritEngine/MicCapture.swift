@@ -90,7 +90,8 @@ public final class MicCapture: @unchecked Sendable {
     /// Pin capture to a specific Core Audio input device, evaluated at every
     /// `start()`. nil (the default, and a nil answer) keeps the system default
     /// input — `input_device_policy = prefer_builtin` is the only thing that
-    /// ever returns an id, and only when the default input is a narrowband
+    /// ever returns an id, and only when opening the default would force a
+    /// Bluetooth headset into HFP or the default already is a narrowband
     /// classic-Bluetooth mic.
     public var preferredDevice: (@Sendable () -> AudioDeviceID?)?
 
@@ -312,9 +313,10 @@ public final class MicCapture: @unchecked Sendable {
     ///
     /// Best-effort by design: any failure logs and leaves the node on the
     /// system default input, which is the behaviour of every build before the
-    /// policy existed. It never overrides a deliberate device choice — the
-    /// closure only returns an id when the default input is a narrowband
-    /// classic-Bluetooth mic.
+    /// policy existed. It never overrides a deliberate USB/external choice —
+    /// the closure only returns an id when opening the default input would
+    /// force Bluetooth headphones into HFP, or the default already is a
+    /// narrowband classic-Bluetooth mic.
     private func pinPreferredDevice(on input: AVAudioInputNode) {
         guard let preferredDevice, var deviceID = preferredDevice() else { return }
         guard let unit = input.audioUnit else {

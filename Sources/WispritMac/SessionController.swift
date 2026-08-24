@@ -57,23 +57,26 @@ public enum KeyupGraceSettings {
     }
 }
 
-/// `input_device_policy` — what to do about a narrowband Bluetooth microphone.
+/// `input_device_policy` — what to do when headphones steal the input device.
 ///
-/// * `warn` (default) — one pill notice the first time such a device appears.
-/// * `prefer_builtin` — additionally pin capture to the built-in mic while the
-///   default input is a narrowband classic-BT one.
+/// * `prefer_builtin` (default) — pin capture to the built-in mic while the
+///   default input is a classic-Bluetooth headset mic, or while opening it
+///   would drop Bluetooth headphone playback from A2DP to HFP/SCO.
+/// * `warn` — keep using the headset mic, one pill notice the first time.
 /// * `off` — say nothing, pin nothing.
 ///
-/// Advisory by default on purpose: the user chose that headset, and a dictation
-/// tool that silently overrides the system input device is worse than one that
-/// mentions the trade-off once.
+/// Default is pin, not warn: connecting headphones is a listening choice.
+/// macOS silently reroutes *input* to the headset mic, which both degrades
+/// recognition (HFP is 8–16 kHz) and glitches the audio the user is hearing.
+/// A USB desk mic is never displaced.
 public enum InputDevicePolicySettings: String, CaseIterable, Sendable {
-    case warn, preferBuiltin = "prefer_builtin", off
+    case preferBuiltin = "prefer_builtin", warn, off
 
     public static let key = "input_device_policy"
 
     public static func policy(_ settings: Settings) -> InputDevicePolicySettings {
-        InputDevicePolicySettings(rawValue: settings.string(key, or: warn.rawValue)) ?? .warn
+        InputDevicePolicySettings(rawValue: settings.string(key, or: preferBuiltin.rawValue))
+            ?? .preferBuiltin
     }
 }
 
@@ -459,14 +462,16 @@ public final class SessionController: @unchecked Sendable {
         // the sub-400 ms finalize budget depends on paying it here, on key-down.
         let pill = self.pill
         let live = self.liveTyping
+        let dict = self.corrections
         runBlocking { [asr] in
             await asr.begin(onPartial: { text in
-                // Resolve "Thursday umm no actually Friday" HERE, once, before
-                // the partial forks: both surfaces below are a preview of the
-                // same words and must never disagree about them. `text` itself
-                // is untouched — nothing downstream of this closure reads a
-                // partial, so the raw final is still what finalize sees.
-                let shown = LivePartialCorrection.display(text)
+                // Resolve "Thursday umm no actually Friday" and dictionary
+                // hear-phrases HERE, once, before the partial forks: both
+                // surfaces below are a preview of the same words and must never
+                // disagree about them. `text` itself is untouched — nothing
+                // downstream of this closure reads a partial, so the raw final
+                // is still what finalize sees.
+                let shown = LivePartialCorrection.display(text, corrections: dict)
                 // The pill bubble is the feedback for every rung that CANNOT put
                 // provisional text in the field. When rung 1 is actually
                 // streaming, showing it too would print the same words twice —

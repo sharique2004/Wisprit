@@ -56,6 +56,60 @@ final class InputDevicePolicyTests: XCTestCase {
         XCTAssertEqual(InputDevicePolicy.narrowbandCeilingHz, 32_000)
     }
 
+    func testClassicBluetoothIsTheHFPTransport() {
+        XCTAssertTrue(InputDevicePolicy.isClassicBluetooth(kAudioDeviceTransportTypeBluetooth))
+        XCTAssertFalse(InputDevicePolicy.isClassicBluetooth(kAudioDeviceTransportTypeBluetoothLE))
+        XCTAssertFalse(InputDevicePolicy.isClassicBluetooth(kAudioDeviceTransportTypeBuiltIn))
+        XCTAssertFalse(InputDevicePolicy.isClassicBluetooth(kAudioDeviceTransportTypeUSB))
+    }
+
+    /// Opening a classic-BT mic while classic-BT headphones are the output is
+    /// the A2DP→HFP mutex, regardless of the advertised sample rate.
+    func testHeadsetCaptureRiskIsTheA2DPMutex() {
+        XCTAssertTrue(InputDevicePolicy.isHeadsetCaptureRisk(
+            inputTransport: kAudioDeviceTransportTypeBluetooth,
+            outputTransport: kAudioDeviceTransportTypeBluetooth),
+                       "the advertised rate is irrelevant — HFP starts when the mic opens")
+        XCTAssertFalse(InputDevicePolicy.isHeadsetCaptureRisk(
+            inputTransport: kAudioDeviceTransportTypeBluetooth,
+            outputTransport: kAudioDeviceTransportTypeBuiltIn),
+                       "a BT dongle feeding speakers is not headphones")
+        XCTAssertFalse(InputDevicePolicy.isHeadsetCaptureRisk(
+            inputTransport: kAudioDeviceTransportTypeBuiltIn,
+            outputTransport: kAudioDeviceTransportTypeBluetooth),
+                       "headphones as output with the Mac mic is the desired shape")
+        XCTAssertFalse(InputDevicePolicy.isHeadsetCaptureRisk(
+            inputTransport: kAudioDeviceTransportTypeBluetoothLE,
+            outputTransport: kAudioDeviceTransportTypeBluetoothLE),
+                       "LE Audio can do simultaneous I/O")
+        XCTAssertFalse(InputDevicePolicy.isHeadsetCaptureRisk(
+            inputTransport: kAudioDeviceTransportTypeUSB,
+            outputTransport: kAudioDeviceTransportTypeBluetooth))
+    }
+
+    func testShouldPinBuiltInForEitherReason() {
+        XCTAssertTrue(InputDevicePolicy.shouldPinBuiltIn(
+            inputTransport: kAudioDeviceTransportTypeBluetooth,
+            inputSampleRate: 16_000,
+            outputTransport: kAudioDeviceTransportTypeBuiltIn),
+                       "narrowband HFP, even on speakers")
+        XCTAssertTrue(InputDevicePolicy.shouldPinBuiltIn(
+            inputTransport: kAudioDeviceTransportTypeBluetooth,
+            inputSampleRate: 48_000,
+            outputTransport: kAudioDeviceTransportTypeBluetooth),
+                       "headphones connected, advertised rate is a lie until HFP")
+        XCTAssertFalse(InputDevicePolicy.shouldPinBuiltIn(
+            inputTransport: kAudioDeviceTransportTypeBluetooth,
+            inputSampleRate: 48_000,
+            outputTransport: kAudioDeviceTransportTypeBuiltIn),
+                       "wideband BT dongle on speakers is left alone")
+        XCTAssertFalse(InputDevicePolicy.shouldPinBuiltIn(
+            inputTransport: kAudioDeviceTransportTypeUSB,
+            inputSampleRate: 48_000,
+            outputTransport: kAudioDeviceTransportTypeBluetooth),
+                       "a USB desk mic is never displaced")
+    }
+
     func testTransportNamesAreHumanReadable() {
         XCTAssertEqual(InputDevicePolicy.transportName(kAudioDeviceTransportTypeBuiltIn), "built-in")
         XCTAssertEqual(InputDevicePolicy.transportName(kAudioDeviceTransportTypeBluetooth), "Bluetooth")
@@ -92,7 +146,26 @@ final class InputDevicePolicyTests: XCTestCase {
 
     func testAWidebandDeviceIsNeverWarnedAbout() {
         let probe = DeviceBox(device(7, transport: kAudioDeviceTransportTypeBuiltIn, rate: 48_000))
-        XCTAssertNil(NarrowbandWarner(probe: { probe.value }).warning())
+        XCTAssertNil(NarrowbandWarner(probe: { probe.value },
+                                      outputTransport: { kAudioDeviceTransportTypeBuiltIn })
+            .warning())
+    }
+
+    /// Headphones + a 48 kHz-advertised BT mic is still the HFP mutex.
+    func testHeadphonesMakeAWidebandBluetoothMicAWarning() {
+        let probe = DeviceBox(device(7, rate: 48_000))
+        let warner = NarrowbandWarner(probe: { probe.value },
+                                      outputTransport: { kAudioDeviceTransportTypeBluetooth })
+        XCTAssertEqual(warner.warning(), NarrowbandWarner.message)
+        XCTAssertNil(warner.warning(), "once per device, same as the narrowband path")
+    }
+
+    /// A wideband BT dongle feeding speakers is the documented exception.
+    func testAWidebandBluetoothDongleOnSpeakersIsNotAWarning() {
+        let probe = DeviceBox(device(7, rate: 48_000))
+        XCTAssertNil(NarrowbandWarner(probe: { probe.value },
+                                      outputTransport: { kAudioDeviceTransportTypeBuiltIn })
+            .warning())
     }
 
     func testNoDeviceIsNotAWarning() {

@@ -295,8 +295,8 @@ public final class WispritWindowModel: ObservableObject {
     @Published public private(set) var historyLimit = 1000
     @Published public private(set) var finalizeTimeoutMs = 1500
     @Published public private(set) var engine: WindowSettings.EngineOption = .auto
-    /// `input_device_policy` — warn | prefer_builtin | off. String-keyed.
-    @Published public private(set) var inputDevicePolicy: WindowSettings.InputDevicePolicyOption = .warn
+    /// `input_device_policy` — prefer_builtin | warn | off. String-keyed.
+    @Published public private(set) var inputDevicePolicy: WindowSettings.InputDevicePolicyOption = .preferBuiltin
     /// `vocabulary_retro` — on by default. String-keyed.
     @Published public private(set) var vocabularyRetro = true
     /// The pill has been dragged somewhere. "Reset its position" is disabled
@@ -974,7 +974,7 @@ public final class WispritWindowModel: ObservableObject {
         engine = WindowSettings.EngineOption.parse(settings.engine)
         inputDevicePolicy = WindowSettings.InputDevicePolicyOption.parse(
             settings.string(InputDevicePolicySettings.key,
-                            or: InputDevicePolicySettings.warn.rawValue))
+                            or: InputDevicePolicySettings.preferBuiltin.rawValue))
         vocabularyRetro = VocabularyRetroSettings.isEnabled(settings)
         hasPillPosition = settings.pillPosition != nil
         contextAwareness = ContextSettings.isEnabled(settings)

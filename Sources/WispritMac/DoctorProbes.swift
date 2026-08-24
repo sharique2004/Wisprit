@@ -42,6 +42,9 @@ public extension Doctor {
             facts.inputDeviceTransport = device.transportName
             facts.inputDeviceSampleRateHz = device.nominalSampleRate
             facts.inputDeviceNarrowband = device.isNarrowband
+            facts.inputDeviceHeadsetRisk = InputDevicePolicy.isHeadsetCaptureRisk(
+                inputTransport: device.transport,
+                outputTransport: InputDeviceProbe.defaultOutputTransport() ?? 0)
         }
 
         let preflight = await AsrDoctor.check(locale: locale)

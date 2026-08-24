@@ -151,18 +151,26 @@ public final class AppController: NSObject, NSApplicationDelegate {
                                  // to something: the fact used to stop inside
                                  // MicCapture, where only a log line read it.
                                  onConfigurationChange: { asr.noteConfigurationChange() })
-        // `prefer_builtin`, and only against a narrowband classic-BT default —
-        // never over a deliberate USB/external choice. Evaluated per `start()`,
-        // so unplugging the headset restores the normal path with no relaunch.
+        // `prefer_builtin` (the default): pin to the built-in mic when opening
+        // the system default would force Bluetooth headphones into HFP/SCO —
+        // playback drops to call quality and the first utterance often dies on
+        // a mid-hold configuration change. Never overrides a USB/external mic.
+        // Evaluated per `start()`, so unplugging the headset restores the
+        // normal path with no relaunch.
         capture.preferredDevice = {
             guard InputDevicePolicySettings.policy(settings) == .preferBuiltin,
-                  let device = InputDeviceProbe.defaultInput(), device.isNarrowband
+                  let device = InputDeviceProbe.defaultInput(),
+                  InputDevicePolicy.shouldPinBuiltIn(
+                    inputTransport: device.transport,
+                    inputSampleRate: device.nominalSampleRate,
+                    outputTransport: InputDeviceProbe.defaultOutputTransport() ?? 0)
             else { return nil }
             return InputDeviceProbe.builtInInput()
         }
-        // One notice per device appearance, silenced by `input_device_policy=off`.
+        // One notice per device appearance, and only when we are *using* the
+        // headset mic (`warn`). `prefer_builtin` pins silently; `off` is quiet.
         let narrowbandWarner = NarrowbandWarner(
-            isEnabled: { InputDevicePolicySettings.policy(settings) != .off })
+            isEnabled: { InputDevicePolicySettings.policy(settings) == .warn })
         // Its quiet-speech twin (2026-08-15): the same once-per-device
         // discipline, the same `input_device_policy=off` kill switch, and a
         // strictly read-only Core Audio property. Consulted only when an

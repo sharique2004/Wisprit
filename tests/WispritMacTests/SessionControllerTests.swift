@@ -171,6 +171,19 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertEqual(h.pill.partials, ["hello", "hello world"])
     }
 
+    /// Dictionary hear-phrases land in the live preview, not only at release.
+    /// "whisper flow" sitting in the field until they let go is the error the
+    /// user sees *while speaking*.
+    func testLivePartialsApplyDictionaryHearPhrases() {
+        let h = Harness()
+        h.dictionary.substitutions["whisper flow"] = "Wispr Flow"
+        h.asr.partials = ["open whisper flow"]
+
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+
+        XCTAssertEqual(h.pill.partials, ["open Wispr Flow"])
+    }
+
     // MARK: - live self-correction
 
     /// The feature, on the surface that shows it when the field cannot: the
@@ -843,11 +856,11 @@ final class SessionControllerTests: XCTestCase {
     // MARK: - R33: the narrowband input warning
 
     func testTheInputWarningIsShownOnceAndAfterTheMicIsOpen() {
-        let h = Harness(useRefiner: false, inputWarning: { "Bluetooth headset mic is narrowband" })
+        let h = Harness(useRefiner: false, inputWarning: { NarrowbandWarner.message })
 
         h.utterance()
 
-        XCTAssertEqual(h.pill.notices, ["Bluetooth headset mic is narrowband"])
+        XCTAssertEqual(h.pill.notices, [NarrowbandWarner.message])
         guard let noticeIndex = h.pill.calls.firstIndex(of: "transientNotice"),
               let recordingIndex = h.pill.calls.firstIndex(of: "showRecording")
         else { return XCTFail("missing pill calls") }

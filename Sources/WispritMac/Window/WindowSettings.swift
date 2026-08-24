@@ -124,40 +124,40 @@ public enum WindowSettings {
         }
     }
 
-    // MARK: - Bluetooth headset mic (`input_device_policy`)
+    // MARK: - Headphones (`input_device_policy`)
 
-    /// `input_device_policy` — what to do about a narrowband Bluetooth
-    /// microphone. Raw values match `InputDevicePolicySettings` (`warn` |
-    /// `prefer_builtin` | `off`); unknown hand-edits fall back to `warn`
+    /// `input_device_policy` — what to do when headphones steal the input.
+    /// Raw values match `InputDevicePolicySettings` (`prefer_builtin` |
+    /// `warn` | `off`); unknown hand-edits fall back to `prefer_builtin`
     /// rather than being rewritten.
     public enum InputDevicePolicyOption: String, Sendable, Equatable, CaseIterable {
-        case warn
         case preferBuiltin = "prefer_builtin"
+        case warn
         case off
 
         public var label: String {
             switch self {
-            case .warn: return "Warn once"
-            case .preferBuiltin: return "Prefer built-in mic"
-            case .off: return "Do nothing"
+            case .preferBuiltin: return "Use Mac microphone"
+            case .warn: return "Use headset mic, warn once"
+            case .off: return "Use headset mic"
             }
         }
 
         public var explanation: String {
             switch self {
-            case .warn:
-                return "The first time a narrowband Bluetooth mic appears, Wisprit mentions "
-                    + "the trade-off once."
             case .preferBuiltin:
-                return "While the default input is a narrowband Bluetooth mic, capture uses "
-                    + "the built-in microphone."
+                return "When Bluetooth headphones are connected, capture uses the Mac "
+                    + "microphone so playback stays high-quality and dictation stays accurate."
+            case .warn:
+                return "Keep using the headset microphone, and mention the call-quality "
+                    + "trade-off once."
             case .off:
                 return "Leave the system input alone, and do not warn."
             }
         }
 
         public static func parse(_ raw: String) -> InputDevicePolicyOption {
-            InputDevicePolicyOption(rawValue: raw) ?? .warn
+            InputDevicePolicyOption(rawValue: raw) ?? .preferBuiltin
         }
     }
 

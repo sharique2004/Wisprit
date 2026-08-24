@@ -55,9 +55,40 @@ public enum InputDevicePolicy {
     /// and flagging them would nag users of perfectly good hardware. And only
     /// the SAMPLE RATE decides: a classic-BT device presenting 48 kHz is being
     /// used as a wideband input (A2DP-era or a dongle), and we have no business
-    /// second-guessing it.
+    /// second-guessing it *for accuracy*. Headphones still force a profile
+    /// switch — that is `isHeadsetCaptureRisk`, which does not look at rate.
     public static func isNarrowband(transport: UInt32, sampleRate: Double) -> Bool {
-        transport == kAudioDeviceTransportTypeBluetooth && sampleRate < narrowbandCeilingHz
+        isClassicBluetooth(transport) && sampleRate < narrowbandCeilingHz
+    }
+
+    /// Classic Bluetooth, the transport that cannot do A2DP playback and HFP
+    /// capture at the same time. LE Audio/LC3 can, so it stays out.
+    public static func isClassicBluetooth(_ transport: UInt32) -> Bool {
+        transport == kAudioDeviceTransportTypeBluetooth
+    }
+
+    /// Opening this input will flip connected Bluetooth headphones from A2DP
+    /// (music) to HFP/SCO (phone-call quality). That is the "it bugs when
+    /// headphones are connected" failure: playback goes tinny, the first
+    /// utterance often dies on `AVAudioEngineConfigurationChange`, and the
+    /// mic that remains is 8–16 kHz. Sample rate is irrelevant — the advertised
+    /// rate often lies until HFP is up, and the profile switch is the bug.
+    ///
+    /// A wideband Bluetooth dongle feeding speakers (output is not classic-BT)
+    /// is not this case; `isNarrowband` still covers a genuinely bad mic.
+    public static func isHeadsetCaptureRisk(inputTransport: UInt32,
+                                            outputTransport: UInt32) -> Bool {
+        isClassicBluetooth(inputTransport) && isClassicBluetooth(outputTransport)
+    }
+
+    /// `prefer_builtin` pins capture to the built-in mic for either reason:
+    /// the mic is already an HFP brick, or opening it would brick the headphones.
+    public static func shouldPinBuiltIn(inputTransport: UInt32,
+                                        inputSampleRate: Double,
+                                        outputTransport: UInt32) -> Bool {
+        isNarrowband(transport: inputTransport, sampleRate: inputSampleRate)
+            || isHeadsetCaptureRisk(inputTransport: inputTransport,
+                                    outputTransport: outputTransport)
     }
 
     /// FourCC → the word a human reads in `wisprit doctor`.
@@ -83,28 +114,38 @@ public enum InputDevicePolicy {
 
 /// One warning per device appearance, never per utterance.
 ///
-/// A narrowband headset is rare and actionable, which is exactly the shape of
-/// thing worth one line — and exactly the shape of thing that becomes noise if
-/// it repeats every time the user dictates. The probe is injected so the policy
-/// is testable without hardware.
+/// Fires for a narrowband HFP mic *or* for the headphones-connected case
+/// (`isHeadsetCaptureRisk`): opening that mic drops A2DP to call quality.
+/// Wired into `input_device_policy = warn` only — `prefer_builtin` pins
+/// silently instead of nagging about a mic it is not going to use.
 public final class NarrowbandWarner: @unchecked Sendable {
     public static let message =
-        "Bluetooth headset mic is narrowband — dictation may be less accurate"
+        "Headset mic is call-quality — dictation may be less accurate"
 
     private let probe: @Sendable () -> InputDeviceInfo?
+    private let outputTransport: @Sendable () -> UInt32?
     private let isEnabled: @Sendable () -> Bool
     private let lock = UnfairLock()
     private var lastWarnedDeviceID: AudioDeviceID?
 
     public init(isEnabled: @escaping @Sendable () -> Bool = { true },
-                probe: @escaping @Sendable () -> InputDeviceInfo? = { InputDeviceProbe.defaultInput() }) {
+                probe: @escaping @Sendable () -> InputDeviceInfo? = { InputDeviceProbe.defaultInput() },
+                outputTransport: @escaping @Sendable () -> UInt32? = {
+                    InputDeviceProbe.defaultOutputTransport()
+                }) {
         self.isEnabled = isEnabled
         self.probe = probe
+        self.outputTransport = outputTransport
     }
 
     /// The line to show, or nil — which is the answer almost always.
     public func warning() -> String? {
-        guard isEnabled(), let device = probe(), device.isNarrowband else { return nil }
+        guard isEnabled(), let device = probe() else { return nil }
+        let output = outputTransport() ?? 0
+        guard InputDevicePolicy.shouldPinBuiltIn(inputTransport: device.transport,
+                                                 inputSampleRate: device.nominalSampleRate,
+                                                 outputTransport: output)
+        else { return nil }
         lock.lock(); defer { lock.unlock() }
         guard lastWarnedDeviceID != device.deviceID else { return nil }
         lastWarnedDeviceID = device.deviceID
@@ -162,11 +203,18 @@ public final class InputVolumeAdvisor: @unchecked Sendable {
 public enum InputDeviceProbe {
 
     public static func defaultInput() -> InputDeviceInfo? {
-        guard let id = defaultInputDeviceID() else { return nil }
+        guard let id = defaultDevice(kAudioHardwarePropertyDefaultInputDevice) else { return nil }
         return InputDeviceInfo(deviceID: id,
                                name: name(of: id) ?? "(unknown)",
                                transport: transport(of: id) ?? kAudioDeviceTransportTypeUnknown,
                                nominalSampleRate: nominalSampleRate(of: id) ?? 0)
+    }
+
+    /// Transport of the default *output* device. Classic Bluetooth here plus
+    /// a classic-Bluetooth default input is the HFP mutex (`isHeadsetCaptureRisk`).
+    public static func defaultOutputTransport() -> UInt32? {
+        guard let id = defaultDevice(kAudioHardwarePropertyDefaultOutputDevice) else { return nil }
+        return transport(of: id)
     }
 
     /// The default input's volume slider, 0…1, as System Settings shows it.
@@ -175,7 +223,8 @@ public enum InputDeviceProbe {
     /// interfaces and aggregate devices do not, and on those the slider the
     /// advisory would point at does not exist.
     public static func defaultInputVolume() -> (device: AudioDeviceID, volume: Float)? {
-        guard let id = defaultInputDeviceID(), let volume = inputVolume(of: id) else { return nil }
+        guard let id = defaultDevice(kAudioHardwarePropertyDefaultInputDevice),
+              let volume = inputVolume(of: id) else { return nil }
         return (id, volume)
     }
 
@@ -190,9 +239,9 @@ public enum InputDeviceProbe {
 
     // MARK: - property reads
 
-    private static func defaultInputDeviceID() -> AudioDeviceID? {
+    private static func defaultDevice(_ selector: AudioObjectPropertySelector) -> AudioDeviceID? {
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mSelector: selector,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain)
         var device = AudioDeviceID(0)

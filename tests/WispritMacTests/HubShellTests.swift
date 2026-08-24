@@ -215,16 +215,17 @@ final class HubShellTests: XCTestCase {
         XCTAssertEqual(WindowSettings.keyupGraceDefault, KeyupGraceSettings.defaultMs)
     }
 
-    func testInputDevicePolicyFallsBackToWarn() {
+    func testInputDevicePolicyFallsBackToPreferBuiltin() {
         XCTAssertEqual(WindowSettings.InputDevicePolicyOption.allCases.map(\.rawValue),
-                       ["warn", "prefer_builtin", "off"])
+                       ["prefer_builtin", "warn", "off"])
         XCTAssertEqual(WindowSettings.InputDevicePolicyOption.parse("prefer_builtin"),
                        .preferBuiltin)
-        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.parse("nonsense"), .warn)
-        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.warn.label, "Warn once")
+        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.parse("nonsense"), .preferBuiltin)
         XCTAssertEqual(WindowSettings.InputDevicePolicyOption.preferBuiltin.label,
-                       "Prefer built-in mic")
-        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.off.label, "Do nothing")
+                       "Use Mac microphone")
+        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.warn.label,
+                       "Use headset mic, warn once")
+        XCTAssertEqual(WindowSettings.InputDevicePolicyOption.off.label, "Use headset mic")
     }
 
     func testSelectionPolicyFallsBackToWarm() {
@@ -290,7 +291,7 @@ final class SettingsPageWriteTests: XCTestCase {
     func testStringKeyedEngineFeatureKeysWriteThrough() {
         let model = makeModel()
         XCTAssertEqual(model.keyupGraceMs, KeyupGraceSettings.defaultMs)
-        XCTAssertEqual(model.inputDevicePolicy, .warn)
+        XCTAssertEqual(model.inputDevicePolicy, .preferBuiltin)
         XCTAssertTrue(model.vocabularyRetro)
 
         model.setKeyupGraceMs(200)

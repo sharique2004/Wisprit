@@ -277,19 +277,44 @@ final class DoctorTests: XCTestCase {
         XCTAssertTrue(report.isReady)
     }
 
-    func testANarrowbandInputDeviceWarnsAndNamesBothRemedies() {
+    func testANarrowbandInputDeviceWarnsWhenPolicyDoesNotPin() {
         var facts = green()
         facts.inputDeviceName = "AirPods Pro"
         facts.inputDeviceTransport = "Bluetooth"
         facts.inputDeviceSampleRateHz = 16_000
         facts.inputDeviceNarrowband = true
+        facts.inputDevicePolicy = "warn"
         let report = Doctor.report(from: facts)
         let check = report.check("Audio input device")
         XCTAssertEqual(check?.mark, .warn)
         XCTAssertTrue(check?.detail.contains("AirPods Pro — Bluetooth, 16000 Hz") == true)
-        XCTAssertTrue(check?.detail.contains("narrowband HFP") == true)
+        XCTAssertTrue(check?.detail.contains("call quality") == true)
         XCTAssertTrue(check?.detail.contains("input_device_policy=prefer_builtin") == true)
         XCTAssertTrue(report.isReady, "a worse microphone is not a broken install")
+    }
+
+    func testANarrowbandInputDeviceIsOkWhenWispritPinsBuiltin() {
+        var facts = green()
+        facts.inputDeviceName = "AirPods Pro"
+        facts.inputDeviceTransport = "Bluetooth"
+        facts.inputDeviceSampleRateHz = 16_000
+        facts.inputDeviceNarrowband = true
+        facts.inputDevicePolicy = "prefer_builtin"
+        let check = Doctor.report(from: facts).check("Audio input device")
+        XCTAssertEqual(check?.mark, .ok)
+        XCTAssertTrue(check?.detail.contains("using the built-in mic") == true)
+    }
+
+    func testHeadsetCaptureRiskWarnsWhenHeadphonesAreTheOutput() {
+        var facts = green()
+        facts.inputDeviceName = "AirPods Pro"
+        facts.inputDeviceTransport = "Bluetooth"
+        facts.inputDeviceSampleRateHz = 48_000
+        facts.inputDeviceHeadsetRisk = true
+        facts.inputDevicePolicy = "warn"
+        let check = Doctor.report(from: facts).check("Audio input device")
+        XCTAssertEqual(check?.mark, .warn)
+        XCTAssertTrue(check?.detail.contains("call quality") == true)
     }
 
     /// No probe answer, no row: "there is no input device" is a story the

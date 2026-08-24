@@ -117,8 +117,12 @@ public struct DoctorFacts: Sendable {
     public var inputDeviceTransport: String = ""
     public var inputDeviceSampleRateHz: Double = 0
     public var inputDeviceNarrowband: Bool = false
-    /// `input_device_policy`: warn | prefer_builtin | off.
-    public var inputDevicePolicy: String = "warn"
+    /// `input_device_policy`: prefer_builtin | warn | off.
+    public var inputDevicePolicy: String = "prefer_builtin"
+    /// Classic-Bluetooth input *and* classic-Bluetooth output: opening the
+    /// headset mic would drop headphone playback to HFP. Independent of
+    /// sample rate — the advertised rate often lies until HFP is up.
+    public var inputDeviceHeadsetRisk: Bool = false
 
     // Speech
     public var transcriberAvailable: Bool = false
@@ -268,20 +272,29 @@ public enum Doctor {
                   + "(a password field or an app like Slack holds it)"
                 : "not active"))
 
-        // Warn-only and never gating (the `assetStatus` precedent): a narrowband
-        // headset transcribes, just worse, and calling a healthy install broken
+        // Warn-only and never gating (the `assetStatus` precedent): a headset
+        // mic transcribes, just worse, and calling a healthy install broken
         // over the user's own device choice would be wrong. Omitted entirely
         // when the probe found nothing — no device is a story the Microphone row
-        // above already tells.
+        // above already tells. `prefer_builtin` is the default and pins the
+        // built-in mic, so that state is a green note rather than a warning.
         if !facts.inputDeviceName.isEmpty {
             var detail = "\(facts.inputDeviceName) — \(facts.inputDeviceTransport), "
                 + "\(Int(facts.inputDeviceSampleRateHz.rounded())) Hz"
-            if facts.inputDeviceNarrowband {
-                detail += " (narrowband HFP: expect reduced accuracy — pick another mic in "
-                    + "System Settings ▸ Sound, or set input_device_policy=prefer_builtin)"
+            let risky = facts.inputDeviceNarrowband || facts.inputDeviceHeadsetRisk
+            if risky {
+                if facts.inputDevicePolicy == InputDevicePolicySettings.preferBuiltin.rawValue {
+                    detail += " (headset mic would drop headphones to call quality — "
+                        + "Wisprit is using the built-in mic)"
+                } else {
+                    detail += " (headset mic drops headphones to call quality — "
+                        + "set input_device_policy=prefer_builtin)"
+                }
             }
-            checks.append(DoctorCheck(
-                facts.inputDeviceNarrowband ? .warn : .ok, "Audio input device", detail))
+            let mark: DoctorMark = risky
+                && facts.inputDevicePolicy != InputDevicePolicySettings.preferBuiltin.rawValue
+                ? .warn : .ok
+            checks.append(DoctorCheck(mark, "Audio input device", detail))
         }
 
         // --- speech ----------------------------------------------------------

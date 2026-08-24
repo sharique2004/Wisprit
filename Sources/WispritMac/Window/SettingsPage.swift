@@ -160,7 +160,7 @@ struct SettingsPage: View {
                     readout("\(model.keyupGraceMs) ms")
                 }
             }
-            SectionRow("Bluetooth headset mic",
+            SectionRow("Headphones",
                        description: model.inputDevicePolicy.explanation) {
                 Picker("", selection: binding(model.inputDevicePolicy,
                                               model.setInputDevicePolicy)) {
