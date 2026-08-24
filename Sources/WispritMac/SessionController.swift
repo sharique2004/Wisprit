@@ -85,6 +85,22 @@ public enum InputDevicePolicySettings: String, CaseIterable, Sendable {
     }
 }
 
+/// `dual_capture` — while the headset mic dictates over classic Bluetooth,
+/// keep the Mac mic silently recording as a parachute the rescue ladder may
+/// re-read (docs/research/hearing-and-corrections.md). It can only ever ADD
+/// words to a failed or starved headset utterance, never replace a good one.
+/// Default TRUE: the cost is a second mic behind the same orange-indicator
+/// window, and the payoff is that SCO bring-up can no longer swallow the
+/// opening words. Read per utterance, so a flip needs no relaunch.
+public enum DualCaptureSettings {
+    public static let key = "dual_capture"
+    public static let defaultEnabled = true
+
+    public static func isEnabled(_ settings: Settings) -> Bool {
+        settings.bool(key, or: defaultEnabled)
+    }
+}
+
 /// `history_detail` — whether the per-utterance pipeline triple
 /// (`utterance_detail`) is written alongside each transcript. Same string-key
 /// precedent as above; default TRUE because a triple is the same sensitivity
@@ -1444,7 +1460,8 @@ public final class SessionController: @unchecked Sendable {
             // happened, carried through the rescue), so every utterance row —
             // rescued or not — says whether the feed dropped audio.
             tailDiscardMs: result.discardedTailMs,
-            droppedAudioMs: result.droppedAudioMs))
+            droppedAudioMs: result.droppedAudioMs,
+            rescueSource: result.rescueSource))
     }
 
     // MARK: - level ticker

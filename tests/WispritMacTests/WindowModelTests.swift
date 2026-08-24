@@ -292,7 +292,7 @@ final class WindowModelTests: XCTestCase {
         XCTAssertEqual(model.hotkey, .rightOption)
         XCTAssertEqual(model.holdDebounceMs, 275)
         XCTAssertEqual(model.keyupGraceMs, WindowSettings.keyupGraceDefault)
-        XCTAssertEqual(model.inputDevicePolicy, .preferBuiltin)
+        XCTAssertEqual(model.inputDevicePolicy, .warn)
         XCTAssertTrue(model.vocabularyRetro)
     }
 

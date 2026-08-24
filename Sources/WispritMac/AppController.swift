@@ -166,6 +166,24 @@ public final class AppController: NSObject, NSApplicationDelegate {
             else { return nil }
             return InputDeviceProbe.builtInInput()
         }
+        // Dual capture (docs/research/hearing-and-corrections.md): while the
+        // headset mic dictates over classic Bluetooth, the Mac mic silently
+        // records into a retention buffer as a parachute — it can only ever
+        // ADD words through the rescue ladder, never replace a good headset
+        // transcript. Re-evaluated per utterance, so unplugging the headset,
+        // pinning the built-in mic, or flipping `dual_capture` off silences it
+        // with no relaunch.
+        let secondary = SecondaryCapture(wanted: {
+            guard DualCaptureSettings.isEnabled(settings),
+                  InputDevicePolicySettings.policy(settings) != .preferBuiltin,
+                  let device = InputDeviceProbe.defaultInput(),
+                  InputDevicePolicy.isClassicBluetooth(device.transport),
+                  InputDeviceProbe.builtInInput() != nil
+            else { return false }
+            return true
+        })
+        asr.secondaryAudioSource = { secondary.audio }
+
         // One notice per device appearance, and only when we are *using* the
         // headset mic (`warn`, the default). `prefer_builtin` pins silently;
         // `off` is quiet.
@@ -212,7 +230,14 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 // telemetry mid-read and would then have its audio discarded by
                 // `startUtterance`. A refusal means an utterance is still
                 // recording — that press degrades to today's behaviour.
-                if asr.armCapture() { _ = capture.start() }
+                //
+                // The parachute opens here too, AFTER the primary so headset
+                // SCO bring-up starts earliest — key-down is precisely the
+                // moment whose words the secondary exists to save.
+                if asr.armCapture() {
+                    _ = capture.start()
+                    secondary.start()
+                }
             }
         }
         monitor.onRelease = { [weak asr, weak capture] in
@@ -227,6 +252,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 // close the mic until it does.
                 guard !asr.isRecordingUtterance else { return }
                 capture.stop()
+                secondary.stop()
             }
         }
 
@@ -314,7 +340,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
         self.session = SessionController(
             events: events,
             asr: AsrManagerPort(asr),
-            audio: MicCapturePort(capture),
+            audio: MicCapturePort(capture, secondary: secondary),
             inserter: SettingsInserterPort(inserter: Inserter(), settings: settings),
             history: history,
             metrics: metrics,

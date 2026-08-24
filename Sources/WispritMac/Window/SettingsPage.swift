@@ -171,6 +171,16 @@ struct SettingsPage: View {
                 .labelsHidden()
                 .frame(width: 200)
             }
+            if model.inputDevicePolicy != .preferBuiltin {
+                SectionRow("Mac-mic backup",
+                           description: "While a Bluetooth headset mic dictates, the Mac "
+                               + "microphone quietly records too. If the headset audio "
+                               + "fails — a slow connection, a dropout — the backup is "
+                               + "re-read so your words survive. It never replaces a "
+                               + "good headset take.") {
+                    Toggle("", isOn: bind(model.dualCapture, model.setDualCapture))
+                }
+            }
             // `input_gain` — the engine side is being designed in parallel and
             // will land its own key. Do not invent a live control for it.
             // SectionRow("Input gain") { … }

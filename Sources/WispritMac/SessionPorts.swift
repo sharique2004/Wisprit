@@ -312,10 +312,28 @@ public struct SettingsInserterPort: InsertPort {
 #if os(macOS)
 public struct MicCapturePort: AudioPort {
     let capture: MicCapture
-    public init(_ capture: MicCapture) { self.capture = capture }
+    /// Dual capture's Mac-mic parachute — started with the primary, stopped
+    /// with it, so both mics live and die inside the one orange-indicator
+    /// window. nil when dual capture is not wired.
+    let secondary: SecondaryCapture?
 
-    public func start() -> Bool { capture.start() }
-    public func stop() { capture.stop() }
+    public init(_ capture: MicCapture, secondary: SecondaryCapture? = nil) {
+        self.capture = capture
+        self.secondary = secondary
+    }
+
+    public func start() -> Bool {
+        // The primary decides whether the utterance can happen at all; the
+        // parachute is best-effort and never blocks or fails a session.
+        let ok = capture.start()
+        if ok { secondary?.start() }
+        return ok
+    }
+
+    public func stop() {
+        capture.stop()
+        secondary?.stop()
+    }
     public var level: Double { Double(capture.level) }
     public var noiseFloor: Double? { capture.noiseFloor }
     public var firstVoicedMs: Double? { capture.firstVoicedMs }

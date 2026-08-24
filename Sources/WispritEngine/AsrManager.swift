@@ -68,6 +68,15 @@ public final class AsrManager: @unchecked Sendable {
 
     public var primaryAvailable: Bool { SpeechAnalyzerEngine.isAvailable }
 
+    /// Dual capture (docs/research/hearing-and-corrections.md): the Mac-mic
+    /// parachute's audio for the current utterance, or empty/nil when the
+    /// parachute is off. A closure rather than a value because the audio only
+    /// exists at finalize time; `finalize()` snapshots it ONCE, at the same
+    /// moment it detaches the primary retention, for the same reason — a
+    /// queued press's prestart may reset the parachute's buffer while a slow
+    /// rescue is still deciding.
+    public var secondaryAudioSource: (@Sendable () -> Data)?
+
     /// The audio the last `finalize()` detached. Read it on the session thread
     /// the moment finalize returns and pass the VALUE to anything off-path —
     /// reading it later is exactly the race this type exists to kill.
@@ -134,6 +143,9 @@ public final class AsrManager: @unchecked Sendable {
 
     public func finalize() async -> UtteranceResult {
         let (retained, configChanged) = detachRetention()
+        // Snapshot the parachute's audio at the same moment for the same
+        // reason: from here a queued press may reset either buffer.
+        let secondaryPcm = secondaryAudioSource?() ?? Data()
         // The snapshot above legally frees the buffer for the next utterance:
         // from here a queued press may arm its own pre-roll, and this
         // utterance's audio is a value nobody can move.
@@ -144,9 +156,20 @@ public final class AsrManager: @unchecked Sendable {
             setPrimary(nil, started: false)
             setPhase(.idle)
             guard Self.needsRescue(result, configurationChanged: configChanged) else {
+                // The independent-witness clause: a primary whose CAPTURE
+                // starved (the radio delivered nothing — SCO bring-up, not a
+                // quiet user) is exempt from the ordinary rescue because its
+                // own audio is silence, but the parachute heard the room. Its
+                // voiced audio is the witness that words were spoken; without
+                // it the silence rule stands.
+                if result.text.isEmpty, result.starvedInput, !secondaryPcm.isEmpty {
+                    return Self.stamping(await secondaryRescue(result, pcm: secondaryPcm),
+                                         configurationChanged: configChanged)
+                }
                 return Self.stamping(result, configurationChanged: configChanged)
             }
-            return Self.stamping(await rescue(result, pcm: retained.pcm),
+            let repaired = await rescue(result, pcm: retained.pcm)
+            return Self.stamping(await secondaryRescue(repaired, pcm: secondaryPcm),
                                  configurationChanged: configChanged)
         }
 
@@ -393,6 +416,43 @@ public final class AsrManager: @unchecked Sendable {
                                rescueGainDb: streaming.rescueGainDb,
                                discardedTailMs: streaming.discardedTailMs,
                                droppedAudioMs: streaming.droppedAudioMs)
+    }
+
+    /// The dual-capture rung: re-read the Mac-mic parachute's audio when the
+    /// headset utterance still looks damaged after its own rescue.
+    ///
+    /// Strictly additive, one notch more conservative than the primary rescue:
+    /// the parachute's audio must itself be VOICED (a silent secondary is the
+    /// b0a763f silence rule seen from the other mic — nothing to add, and
+    /// batch-transcribing room tone invents words), and the batch reading must
+    /// carry MORE words than whatever text is currently standing. When the
+    /// secondary wins, `rescueSource` says so — a row whose text came from a
+    /// different microphone than its `input_device` claims must be able to say
+    /// which one.
+    private func secondaryRescue(_ current: UtteranceResult, pcm: Data) async -> UtteranceResult {
+        guard !pcm.isEmpty else { return current }
+        guard PcmFormat.peakLevel(of: pcm) >= SpeechAnalyzerEngine.voicedPeakThreshold else {
+            log.info("secondary rescue skipped: the parachute's audio is silent")
+            return current
+        }
+        guard let second = await runBatch(pcm), !second.text.isEmpty else { return current }
+        guard Self.wordCount(second.text) > Self.wordCount(current.text) else {
+            log.info("secondary rescue declined: current text keeps \(Self.wordCount(current.text)) words vs the parachute's \(Self.wordCount(second.text))")
+            return current
+        }
+        log.warning("secondary rescue applied: \(second.text.count) chars from the Mac-mic parachute after the headset path returned \(current.text.count)")
+        return UtteranceResult(text: second.text, engine: second.engine,
+                               finalizeMs: second.finalizeMs,
+                               timedOut: current.timedOut,
+                               crashed: current.crashed,
+                               starvedInput: current.starvedInput,
+                               peakLevel: current.peakLevel,
+                               producedNothing: current.producedNothing,
+                               rescued: true,
+                               rescueGainDb: current.rescueGainDb,
+                               discardedTailMs: current.discardedTailMs,
+                               droppedAudioMs: current.droppedAudioMs,
+                               rescueSource: "secondary_mic")
     }
 
     /// Above this metered peak the engine is measurably level-invariant, so

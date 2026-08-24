@@ -286,6 +286,92 @@ final class AsrRescueTests: XCTestCase {
         XCTAssertEqual(result.droppedAudioMs, 100)
     }
 
+    // MARK: - the dual-capture secondary rung (2026-08-24)
+
+    /// A loud square wave — audio the parachute's voiced gate must accept.
+    private func voicedPcm(_ seconds: Double = 1) -> Data {
+        let frames = Int(seconds * PcmFormat.sampleRate)
+        var data = Data(capacity: frames * PcmFormat.bytesPerFrame)
+        for i in 0..<frames {
+            var sample = Int16(i % 2 == 0 ? 8000 : -8000)
+            withUnsafeBytes(of: &sample) { data.append(contentsOf: $0) }
+        }
+        return data
+    }
+
+    /// The independent-witness clause: a STARVED primary (the radio delivered
+    /// nothing — SCO bring-up, not a quiet user) is exempt from the ordinary
+    /// rescue, but a voiced parachute is proof words were spoken, and they
+    /// come back from the secondary audio.
+    func testAStarvedPrimaryWithAVoicedParachuteIsRescuedFromTheSecondary() async {
+        let (m, batch) = manager(
+            .init(text: "", engine: "apple_live", finalizeMs: 40,
+                  starvedInput: true, peakLevel: 0),
+            batchText: "words the radio never carried")
+        m.secondaryAudioSource = { [voiced = voicedPcm()] in voiced }
+        await m.begin { _ in }
+        let r = await m.finalize()
+
+        XCTAssertEqual(batch.calls, 1, "one pass, over the parachute's audio")
+        XCTAssertEqual(r.text, "words the radio never carried")
+        XCTAssertTrue(r.rescued)
+        XCTAssertEqual(r.rescueSource, "secondary_mic",
+                       "a row whose text came from the other mic must say so")
+        XCTAssertTrue(r.starvedInput, "the primary's failure still shows on the row")
+    }
+
+    /// A silent parachute is the b0a763f rule seen from the other mic: there
+    /// is nothing to add, and batch-transcribing room tone invents words.
+    func testASilentParachuteIsNeverTranscribed() async {
+        let (m, batch) = manager(
+            .init(text: "", engine: "apple_live", finalizeMs: 40,
+                  starvedInput: true, peakLevel: 0),
+            batchText: "hallucinated from room tone")
+        m.secondaryAudioSource = { [silent = self.pcm()] in silent }
+        await m.begin { _ in }
+        let r = await m.finalize()
+
+        XCTAssertEqual(batch.calls, 0, "silence is refused before the batch engine is asked")
+        XCTAssertEqual(r.text, "")
+        XCTAssertNil(r.rescueSource)
+    }
+
+    /// A quiet-user hold — audio delivered, just soft, no starvation — stays
+    /// empty even when the parachute heard something: without the starvation
+    /// witness, voiced secondary audio in a crowded room could be somebody
+    /// else's sentence.
+    func testAQuietHoldWithoutStarvationIsNotSecondRescued() async {
+        let (m, batch) = manager(
+            .init(text: "", engine: "apple_live", finalizeMs: 40, peakLevel: 0.001),
+            batchText: "the neighbor's sentence")
+        m.secondaryAudioSource = { [voiced = voicedPcm()] in voiced }
+        await m.begin { _ in }
+        m.feed(pcm: pcm())
+        let r = await m.finalize()
+
+        XCTAssertEqual(batch.calls, 0)
+        XCTAssertEqual(r.text, "")
+    }
+
+    /// On the ordinary rescue path the parachute runs AFTER the primary rescue
+    /// and must beat the standing word count outright — an equal reading keeps
+    /// the primary's text and the row carries no `rescue_source`.
+    func testTheParachuteNeverReplacesAnEqualPrimaryReading() async {
+        let (m, batch) = manager(
+            .init(text: "half", engine: "apple_live", finalizeMs: 1500,
+                  timedOut: true, peakLevel: 0.5),
+            batchText: "half a sentence")
+        m.secondaryAudioSource = { [voiced = voicedPcm()] in voiced }
+        await m.begin { _ in }
+        m.feed(pcm: pcm())
+        let r = await m.finalize()
+
+        XCTAssertEqual(batch.calls, 2, "primary rescue, then the parachute's audition")
+        XCTAssertEqual(r.text, "half a sentence", "the primary rescue's reading stands")
+        XCTAssertTrue(r.rescued)
+        XCTAssertNil(r.rescueSource, "equal word counts: the parachute is declined")
+    }
+
     /// End to end through the manager: the flag reaches the policy AND the
     /// result, on the path that rescues.
     func testAConfigurationChangeDrivesTheBatchPassAndIsStamped() async {

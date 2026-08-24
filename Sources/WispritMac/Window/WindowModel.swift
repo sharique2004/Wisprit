@@ -295,8 +295,11 @@ public final class WispritWindowModel: ObservableObject {
     @Published public private(set) var historyLimit = 1000
     @Published public private(set) var finalizeTimeoutMs = 1500
     @Published public private(set) var engine: WindowSettings.EngineOption = .auto
-    /// `input_device_policy` — prefer_builtin | warn | off. String-keyed.
-    @Published public private(set) var inputDevicePolicy: WindowSettings.InputDevicePolicyOption = .preferBuiltin
+    /// `input_device_policy` — warn (default) | prefer_builtin | off. String-keyed.
+    @Published public private(set) var inputDevicePolicy: WindowSettings.InputDevicePolicyOption = .warn
+    /// `dual_capture` — the Mac-mic parachute while a classic-BT headset mic
+    /// dictates. On by default.
+    @Published public private(set) var dualCapture = true
     /// `vocabulary_retro` — on by default. String-keyed.
     @Published public private(set) var vocabularyRetro = true
     /// The pill has been dragged somewhere. "Reset its position" is disabled
@@ -974,7 +977,8 @@ public final class WispritWindowModel: ObservableObject {
         engine = WindowSettings.EngineOption.parse(settings.engine)
         inputDevicePolicy = WindowSettings.InputDevicePolicyOption.parse(
             settings.string(InputDevicePolicySettings.key,
-                            or: InputDevicePolicySettings.preferBuiltin.rawValue))
+                            or: InputDevicePolicySettings.warn.rawValue))
+        dualCapture = DualCaptureSettings.isEnabled(settings)
         vocabularyRetro = VocabularyRetroSettings.isEnabled(settings)
         hasPillPosition = settings.pillPosition != nil
         contextAwareness = ContextSettings.isEnabled(settings)
@@ -1136,6 +1140,11 @@ public final class WispritWindowModel: ObservableObject {
     public func setInputDevicePolicy(_ value: WindowSettings.InputDevicePolicyOption) {
         inputDevicePolicy = value
         settings.set(InputDevicePolicySettings.key, value.rawValue)
+    }
+
+    public func setDualCapture(_ value: Bool) {
+        dualCapture = value
+        settings.set(DualCaptureSettings.key, value)
     }
 
     public func setVocabularyRetro(_ value: Bool) {

@@ -93,6 +93,13 @@ public struct UtteranceResult: Sendable, Equatable {
     /// rescue over the complete retained audio.
     public var droppedAudioMs: Double?
 
+    /// Which audio the winning rescue read, when it was not the utterance's
+    /// own retained primary audio. nil on every non-rescued row and on a
+    /// rescue over the primary PCM (those rows predate the field and keep
+    /// their meaning); `"secondary_mic"` when the Mac-mic parachute's audio is
+    /// what the user saw (dual capture).
+    public var rescueSource: String?
+
     /// Either loss counter non-zero: the live feed did not carry everything
     /// the microphone delivered, whatever the text looks like.
     public var liveFeedLostAudio: Bool {
@@ -106,7 +113,8 @@ public struct UtteranceResult: Sendable, Equatable {
                 sawConfigurationChange: Bool = false,
                 rescueGainDb: Double? = nil,
                 discardedTailMs: Double? = nil,
-                droppedAudioMs: Double? = nil) {
+                droppedAudioMs: Double? = nil,
+                rescueSource: String? = nil) {
         self.text = text; self.engine = engine; self.finalizeMs = finalizeMs
         self.timedOut = timedOut; self.crashed = crashed
         self.starvedInput = starvedInput; self.peakLevel = peakLevel
@@ -115,6 +123,7 @@ public struct UtteranceResult: Sendable, Equatable {
         self.rescueGainDb = rescueGainDb
         self.discardedTailMs = discardedTailMs
         self.droppedAudioMs = droppedAudioMs
+        self.rescueSource = rescueSource
     }
 }
 

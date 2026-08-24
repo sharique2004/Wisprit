@@ -296,7 +296,7 @@ final class SettingsPageWriteTests: XCTestCase {
     func testStringKeyedEngineFeatureKeysWriteThrough() {
         let model = makeModel()
         XCTAssertEqual(model.keyupGraceMs, KeyupGraceSettings.defaultMs)
-        XCTAssertEqual(model.inputDevicePolicy, .preferBuiltin)
+        XCTAssertEqual(model.inputDevicePolicy, .warn)
         XCTAssertTrue(model.vocabularyRetro)
 
         model.setKeyupGraceMs(200)

@@ -122,6 +122,10 @@ public struct MetricsRecord: Sendable {
     // carrying one of these plus `rescued` is a repair, not a loss.
     public var tailDiscardMs: Double?
     public var droppedAudioMs: Double?
+    /// Which audio the winning rescue read when it was not the primary mic's
+    /// (dual capture): "secondary_mic". Absent on every other row — including
+    /// primary-PCM rescues, whose rows keep their pre-field meaning.
+    public var rescueSource: String?
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
@@ -147,7 +151,8 @@ public struct MetricsRecord: Sendable {
                 inputTransport: String? = nil,
                 inputRateHz: Double? = nil,
                 tailDiscardMs: Double? = nil,
-                droppedAudioMs: Double? = nil) {
+                droppedAudioMs: Double? = nil,
+                rescueSource: String? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -193,6 +198,7 @@ public struct MetricsRecord: Sendable {
         self.inputRateHz = inputRateHz
         self.tailDiscardMs = tailDiscardMs
         self.droppedAudioMs = droppedAudioMs
+        self.rescueSource = rescueSource
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -272,6 +278,7 @@ public struct MetricsRecord: Sendable {
         // could have written, so those stay byte-for-byte prefixes.
         if let tailDiscardMs { entry["tail_discard_ms"] = .double(MetricsWriter.round1(tailDiscardMs)) }
         if let droppedAudioMs { entry["dropped_audio_ms"] = .double(MetricsWriter.round1(droppedAudioMs)) }
+        if let rescueSource { entry["rescue_source"] = .string(rescueSource) }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -336,6 +343,8 @@ public enum MetricsField {
     // The live-feed loss pair (2026-08-24).
     public static let tailDiscardMs = "tail_discard_ms"
     public static let droppedAudioMs = "dropped_audio_ms"
+    /// Dual capture's cross-mic rescue attribution (2026-08-24).
+    public static let rescueSource = "rescue_source"
 }
 
 public final class MetricsWriter: @unchecked Sendable {
