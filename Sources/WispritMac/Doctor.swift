@@ -443,9 +443,21 @@ public enum Doctor {
             return DoctorCheck(.ok, dictationHealthLabel,
                                "no utterances recorded\(scope) — see: Wisprit stats")
         }
-        let detail = "\(metrics.total) utterances (\(metrics.window.label)); "
+        var detail = "\(metrics.total) utterances (\(metrics.window.label)); "
             + "\(metrics.unexplainedEmpty) silently produced nothing "
             + "(\(percent(metrics.unexplainedEmptyRate)) — audible speech, clean finish, no text)"
+        // The live-feed loss pair (2026-08-24): expected ≈ 0, and every
+        // occurrence is auto-rescued from the complete retained audio — so the
+        // row reads as a repair count, and only an UNRESCUED loss escalates.
+        if metrics.liveFeedLoss > 0 {
+            detail += "; \(metrics.liveFeedLoss) lost live audio "
+                + "(\(metrics.liveFeedLossRescued) re-read by the batch rescue)"
+            if metrics.liveFeedLossRescued < metrics.liveFeedLoss {
+                return DoctorCheck(.warn, dictationHealthLabel,
+                                   detail + " — an unrescued feed loss is words the user "
+                                   + "spoke and never saw; run: Wisprit stats")
+            }
+        }
         guard metrics.unexplainedEmptyRate > unexplainedEmptyWarn else {
             return DoctorCheck(.ok, dictationHealthLabel, detail)
         }

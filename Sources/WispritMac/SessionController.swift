@@ -1439,7 +1439,12 @@ public final class SessionController: @unchecked Sendable {
             // omits the fields.
             inputDevice: audio.deviceFacts?.name,
             inputTransport: audio.deviceFacts?.transport,
-            inputRateHz: audio.deviceFacts?.negotiatedRateHz))
+            inputRateHz: audio.deviceFacts?.negotiatedRateHz,
+            // The live-feed loss pair rides the result (stamped where the loss
+            // happened, carried through the rescue), so every utterance row —
+            // rescued or not — says whether the feed dropped audio.
+            tailDiscardMs: result.discardedTailMs,
+            droppedAudioMs: result.droppedAudioMs))
     }
 
     // MARK: - level ticker

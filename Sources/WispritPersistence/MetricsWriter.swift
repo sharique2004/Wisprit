@@ -114,6 +114,14 @@ public struct MetricsRecord: Sendable {
     public var inputDevice: String?    // device name as Core Audio reports it
     public var inputTransport: String? // "built-in" | "Bluetooth" | "USB" | …
     public var inputRateHz: Double?    // the input chain's post-open rate
+    // 2026-08-24, the live-feed loss pair. Utterance rows only, each omitted
+    // when zero. These name the seam losses the 2026-08 audit could not see:
+    // a finalize that discarded its queued tail to unwedge the pump, and
+    // drop-oldest holes the feed queue punched under backpressure. Both now
+    // trigger the batch rescue over the complete retained audio, so a row
+    // carrying one of these plus `rescued` is a repair, not a loss.
+    public var tailDiscardMs: Double?
+    public var droppedAudioMs: Double?
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
@@ -137,7 +145,9 @@ public struct MetricsRecord: Sendable {
                 appliedGainDb: Double? = nil,
                 inputDevice: String? = nil,
                 inputTransport: String? = nil,
-                inputRateHz: Double? = nil) {
+                inputRateHz: Double? = nil,
+                tailDiscardMs: Double? = nil,
+                droppedAudioMs: Double? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -181,6 +191,8 @@ public struct MetricsRecord: Sendable {
         self.inputDevice = inputDevice
         self.inputTransport = inputTransport
         self.inputRateHz = inputRateHz
+        self.tailDiscardMs = tailDiscardMs
+        self.droppedAudioMs = droppedAudioMs
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -255,6 +267,11 @@ public struct MetricsRecord: Sendable {
         if let inputDevice { entry["input_device"] = .string(inputDevice) }
         if let inputTransport { entry["input_transport"] = .string(inputTransport) }
         if let inputRateHz { entry["input_rate_hz"] = .double(MetricsWriter.round1(inputRateHz)) }
+        // The live-feed loss pair (2026-08-24), after every key above — the
+        // append-only rule once more. Absent from every row an earlier build
+        // could have written, so those stay byte-for-byte prefixes.
+        if let tailDiscardMs { entry["tail_discard_ms"] = .double(MetricsWriter.round1(tailDiscardMs)) }
+        if let droppedAudioMs { entry["dropped_audio_ms"] = .double(MetricsWriter.round1(droppedAudioMs)) }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -316,6 +333,9 @@ public enum MetricsField {
     public static let inputDevice = "input_device"
     public static let inputTransport = "input_transport"
     public static let inputRateHz = "input_rate_hz"
+    // The live-feed loss pair (2026-08-24).
+    public static let tailDiscardMs = "tail_discard_ms"
+    public static let droppedAudioMs = "dropped_audio_ms"
 }
 
 public final class MetricsWriter: @unchecked Sendable {

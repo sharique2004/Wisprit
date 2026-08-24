@@ -218,6 +218,74 @@ final class AsrRescueTests: XCTestCase {
         XCTAssertTrue(AsrManager.needsRescue(loudEmpty, configurationChanged: true))
     }
 
+    // MARK: - the live-feed loss trigger (2026-08-24)
+
+    /// The audit's invisible truncation: discard-then-clean-finish. A non-empty
+    /// result whose live feed provably lost audio is a truncation with a clean
+    /// face, and the retained audio the rescue re-reads is still complete.
+    func testACleanResultWithADiscardedTailIsRescued() {
+        let clean = UtteranceResult(text: "half a sentence", engine: "apple_live",
+                                    finalizeMs: 80, peakLevel: 0.6, discardedTailMs: 300)
+        XCTAssertTrue(AsrManager.needsRescue(clean))
+    }
+
+    func testACleanResultWithDroppedChunksIsRescued() {
+        let clean = UtteranceResult(text: "sentence with a hole", engine: "apple_live",
+                                    finalizeMs: 80, peakLevel: 0.6, droppedAudioMs: 200)
+        XCTAssertTrue(AsrManager.needsRescue(clean))
+    }
+
+    /// The b0a763f silence rule outranks the loss clause too: a discard on a
+    /// silent hold must not batch-transcribe silence. (Empty-and-VOICED is
+    /// already the peak clause's case, tested above.)
+    func testSilenceIsStillExemptWhenTheFeedLostAudio() {
+        let silent = UtteranceResult(text: "", engine: "apple_live", finalizeMs: 40,
+                                     peakLevel: 0, discardedTailMs: 300, droppedAudioMs: 100)
+        XCTAssertFalse(AsrManager.needsRescue(silent))
+    }
+
+    /// Zero-valued loss fields mean no loss — the clause keys on the amount,
+    /// not the fields' presence.
+    func testZeroLossFieldsDoNotTriggerARescue() {
+        let clean = UtteranceResult(text: "all good", engine: "apple_live", finalizeMs: 40,
+                                    peakLevel: 0.9, discardedTailMs: 0, droppedAudioMs: 0)
+        XCTAssertFalse(AsrManager.needsRescue(clean))
+    }
+
+    /// End to end through the manager: a discard-marked streaming result drives
+    /// the batch pass, and the loss accounting survives onto the result the
+    /// caller sees — on the applied AND the declined arbitration alike.
+    func testADiscardedTailDrivesTheBatchPassAndTheFieldsRide() async {
+        let (manager, batch) = manager(
+            .init(text: "half a", engine: "apple_live", finalizeMs: 80,
+                  peakLevel: 0.6, discardedTailMs: 300),
+            batchText: "half a sentence")
+        await manager.begin { _ in }
+        manager.feed(pcm: pcm())
+        let result = await manager.finalize()
+
+        XCTAssertEqual(batch.calls, 1, "the truncation is re-read")
+        XCTAssertEqual(result.text, "half a sentence", "more words wins, as always")
+        XCTAssertTrue(result.rescued)
+        XCTAssertEqual(result.discardedTailMs, 300,
+                       "the loss is why this row exists — it must reach metrics")
+    }
+
+    func testADeclinedLossRescueKeepsTheStreamingTextAndTheFields() async {
+        let (manager, batch) = manager(
+            .init(text: "one two three", engine: "apple_live", finalizeMs: 80,
+                  peakLevel: 0.6, droppedAudioMs: 100),
+            batchText: "one")
+        await manager.begin { _ in }
+        manager.feed(pcm: pcm())
+        let result = await manager.finalize()
+
+        XCTAssertEqual(batch.calls, 1)
+        XCTAssertEqual(result.text, "one two three", "shorter batch reading never wins")
+        XCTAssertFalse(result.rescued)
+        XCTAssertEqual(result.droppedAudioMs, 100)
+    }
+
     /// End to end through the manager: the flag reaches the policy AND the
     /// result, on the path that rescues.
     func testAConfigurationChangeDrivesTheBatchPassAndIsStamped() async {

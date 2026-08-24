@@ -159,13 +159,31 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
         let pumped = Signal()
         let pump = session.pump
         Task.detached { _ = await pump.value; pumped.fire() }
+        var discardedTailMs: Double?
         if await pumped.wait(timeout: budget, deadlineFrom: t0) == false {
             // Drop what is still queued so the pump can reach `builder.finish()`
             // and the analyzer can see EOF. The cost is the tail of the audio;
-            // the alternative is the whole utterance.
+            // the alternative is the whole utterance. COUNT it first: when the
+            // discard unwedges the pump the finalize below completes cleanly,
+            // `timedOut` stays false, and without this number the result is a
+            // plausible sentence silently missing its tail — the one truncation
+            // shape nothing downstream could see (audit 2026-08).
+            let discardedChunks = session.queue.count
             session.queue.discardAll()
-            log.warning("pump did not drain inside the finalize budget — discarding the queued tail")
+            if discardedChunks > 0 {
+                discardedTailMs = Double(discardedChunks)
+                    * (Double(PcmFormat.chunkFrames) / PcmFormat.sampleRate) * 1000.0
+            }
+            log.warning("pump did not drain inside the finalize budget — discarding \(discardedChunks) queued chunk(s)")
         }
+        // Read alongside the discard accounting: drop-oldest holes are
+        // mid-utterance losses in the live feed (the retained audio is still
+        // complete), and the counter had been instrumented-but-unread since
+        // the port.
+        let droppedChunks = session.queue.droppedChunks
+        let droppedAudioMs: Double? = droppedChunks > 0
+            ? Double(droppedChunks) * (Double(PcmFormat.chunkFrames) / PcmFormat.sampleRate) * 1000.0
+            : nil
 
         // A wedged `finalize` cannot be cancelled (spike S1), so it is never
         // awaited directly — it signals, and we wait on the signal with a deadline.
@@ -229,11 +247,16 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
             await teardown(session, hard: false)
         }
 
+        if discardedTailMs != nil || droppedAudioMs != nil {
+            log.warning("live feed lost audio (tail \(discardedTailMs ?? 0, format: .fixed(precision: 0)) ms, dropped \(droppedAudioMs ?? 0, format: .fixed(precision: 0)) ms) — the retained utterance is still complete")
+        }
         return UtteranceResult(text: text.trimmingCharacters(in: .whitespaces),
                                engine: Self.engineName, finalizeMs: finalizeMs,
                                timedOut: timedOut, crashed: crashed,
                                starvedInput: starved, peakLevel: peakLevel,
-                               producedNothing: producedNothing)
+                               producedNothing: producedNothing,
+                               discardedTailMs: discardedTailMs,
+                               droppedAudioMs: droppedAudioMs)
     }
 
     public func cancel() async {

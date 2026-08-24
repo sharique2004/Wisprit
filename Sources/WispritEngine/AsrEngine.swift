@@ -76,19 +76,45 @@ public struct UtteranceResult: Sendable, Equatable {
     /// rescue's text is DECLINED: the question the field answers is "how often
     /// did we have to amplify", not "how often did amplifying win".
     public var rescueGainDb: Double?
+    /// Milliseconds of queued audio `finalize` threw away to unwedge the pump
+    /// (`discardAll` when the drain missed its budget) — nil when nothing was
+    /// discarded, which is every healthy utterance.
+    ///
+    /// This names the ONE truncation the machinery could not previously see:
+    /// discard, then a clean finalize, `timedOut` false, no rescue — a
+    /// plausible sentence silently missing its tail. Stamped on the result so
+    /// `needsRescue` can treat it exactly like a configuration change: the
+    /// retained audio is complete even though the live feed was not.
+    public var discardedTailMs: Double?
+    /// Milliseconds of audio the live feed queue dropped under backpressure
+    /// (drop-oldest) — nil when it dropped nothing. The counter existed since
+    /// the port but was never read; a mid-utterance hole in the live feed is
+    /// the same repair shape as a discarded tail, and now triggers the same
+    /// rescue over the complete retained audio.
+    public var droppedAudioMs: Double?
+
+    /// Either loss counter non-zero: the live feed did not carry everything
+    /// the microphone delivered, whatever the text looks like.
+    public var liveFeedLostAudio: Bool {
+        (discardedTailMs ?? 0) > 0 || (droppedAudioMs ?? 0) > 0
+    }
 
     public init(text: String, engine: String, finalizeMs: Double,
                 timedOut: Bool = false, crashed: Bool = false,
                 starvedInput: Bool = false, peakLevel: Float = 0,
                 producedNothing: Bool = false, rescued: Bool = false,
                 sawConfigurationChange: Bool = false,
-                rescueGainDb: Double? = nil) {
+                rescueGainDb: Double? = nil,
+                discardedTailMs: Double? = nil,
+                droppedAudioMs: Double? = nil) {
         self.text = text; self.engine = engine; self.finalizeMs = finalizeMs
         self.timedOut = timedOut; self.crashed = crashed
         self.starvedInput = starvedInput; self.peakLevel = peakLevel
         self.producedNothing = producedNothing; self.rescued = rescued
         self.sawConfigurationChange = sawConfigurationChange
         self.rescueGainDb = rescueGainDb
+        self.discardedTailMs = discardedTailMs
+        self.droppedAudioMs = droppedAudioMs
     }
 }
 

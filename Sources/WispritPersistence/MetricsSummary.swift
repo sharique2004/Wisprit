@@ -87,6 +87,12 @@ public struct MetricsSummary: Sendable, Equatable {
     /// dictation on a fresh install. Newest such row in the window, nil when
     /// none was written — which is every install that predates the row.
     public var timeToWow: TimeToWow? = nil
+    /// Utterance rows whose live feed provably lost audio (`tail_discard_ms`
+    /// or `dropped_audio_ms` non-zero). Expected ≈ 0; every occurrence now
+    /// triggers the batch rescue over the complete retained audio, so
+    /// `liveFeedLossRescued` says how many of them the repair actually caught.
+    public var liveFeedLoss: Int = 0
+    public var liveFeedLossRescued: Int = 0
 
     /// What the time-to-wow row said. Kept as its own value (not three loose
     /// optionals) because the three numbers were written together by
@@ -107,6 +113,8 @@ public struct MetricsSummary: Sendable, Equatable {
     /// cannot import WispritEngine (WispritKit is the only shared seam), so the
     /// constant is restated here; it is pinned to the engine's by test.
     public static let voicedPeakThreshold = 0.01
+    /// Mirrors `AppleBatchTranscriber.engineName` — same restatement rule.
+    public static let batchEngineName = "apple_batch"
     /// Below this the hold was too short to have said anything.
     public static let shortHoldMs = 1000.0
     /// The `empty_reason` value that means "no benign explanation applies".
@@ -168,6 +176,7 @@ public struct MetricsSummary: Sendable, Equatable {
         var emptyReasons: [String: Int] = [:]
         var aiOutcomes: [String: Int] = [:]
         var empty = 0, unclassified = 0, timedOut = 0, unexplained = 0
+        var feedLoss = 0, feedLossRescued = 0
         var finalizeSamples: [Double] = []
         var releaseSamples: [Double] = []
 
@@ -176,6 +185,14 @@ public struct MetricsSummary: Sendable, Equatable {
             outcomes[outcome, default: 0] += 1
             if let ai = string(row, "ai") { aiOutcomes[ai, default: 0] += 1 }
             if bool(row, "timed_out") { timedOut += 1 }
+            if (double(row, "tail_discard_ms") ?? 0) > 0
+                || (double(row, "dropped_audio_ms") ?? 0) > 0 {
+                feedLoss += 1
+                // The rescue relabels `engine` on the row it repaired; the
+                // batch engine name is the write-side witness that the batch
+                // pass's text is what the user saw.
+                if string(row, "engine") == batchEngineName { feedLossRescued += 1 }
+            }
             if let finalizeMs = double(row, "finalize_ms") { finalizeSamples.append(finalizeMs) }
             // `release_to_text_ms` is written only on rows that actually put text
             // in front of the user, so presence IS the filter — hard-coding
@@ -216,7 +233,9 @@ public struct MetricsSummary: Sendable, Equatable {
             editObserved: editObserved,
             zeroEdit: zeroEdit,
             zeroEditRate: rate(zeroEdit, of: editObserved),
-            timeToWow: timeToWow)
+            timeToWow: timeToWow,
+            liveFeedLoss: feedLoss,
+            liveFeedLossRescued: feedLossRescued)
     }
 
     /// The rows `summarize` would have looked at — exposed so a caller can list

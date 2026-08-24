@@ -335,10 +335,18 @@ public final class AsrManager: @unchecked Sendable {
     /// `&& !text.isEmpty`: bare `configurationChanged` would batch-transcribe a
     /// silent hold and break the b0a763f silence rule, and the empty-and-voiced
     /// case is already covered by the peak clause above.
+    /// Live-feed loss (`discardedTailMs` / `droppedAudioMs`) is the same shape
+    /// as the configuration change and takes the same clause: a clean,
+    /// NON-empty finish whose live feed provably lost audio is a truncation,
+    /// and the retained utterance the rescue re-reads is still complete. The
+    /// same `&& !text.isEmpty` guard for the same reason — a discard on a
+    /// silent hold must not batch-transcribe silence, and the empty-and-voiced
+    /// case is already the peak clause's.
     static func needsRescue(_ result: UtteranceResult,
                             configurationChanged: Bool = false) -> Bool {
         if result.crashed || result.timedOut || result.producedNothing { return true }
         if configurationChanged && !result.text.isEmpty { return true }
+        if result.liveFeedLostAudio && !result.text.isEmpty { return true }
         return result.text.isEmpty
             && result.peakLevel >= SpeechAnalyzerEngine.voicedPeakThreshold
     }
@@ -382,7 +390,9 @@ public final class AsrManager: @unchecked Sendable {
                                peakLevel: streaming.peakLevel,
                                producedNothing: streaming.producedNothing,
                                rescued: true,
-                               rescueGainDb: streaming.rescueGainDb)
+                               rescueGainDb: streaming.rescueGainDb,
+                               discardedTailMs: streaming.discardedTailMs,
+                               droppedAudioMs: streaming.droppedAudioMs)
     }
 
     /// Above this metered peak the engine is measurably level-invariant, so

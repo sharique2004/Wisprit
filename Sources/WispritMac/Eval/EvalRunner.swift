@@ -304,6 +304,13 @@ struct EvalRunner {
 
             let pcm = try Self.pcm(of: audio)
             let result = await transcribe(pcm: pcm, settings: settings, vocabulary: vocabulary)
+            if result.liveFeedLostAudio {
+                // Burst feeding (~35× realtime) is the harshest backpressure the
+                // queue will ever see, so any loss shows up here first. The
+                // expectation is a hard zero; this line is the tripwire.
+                print("  LIVE-FEED LOSS \(entry.id): tail \(Int(result.discardedTailMs ?? 0)) ms, "
+                      + "dropped \(Int(result.droppedAudioMs ?? 0)) ms — investigate before trusting this run")
+            }
             let line = AsrCacheLine(
                 key: key, id: entry.id, raw: result.text, finalizeMs: result.finalizeMs,
                 timedOut: result.timedOut, starvedInput: result.starvedInput,
