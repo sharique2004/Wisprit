@@ -1,6 +1,7 @@
 #if os(macOS)
 import AVFoundation
 import Foundation
+import WispritContext
 import WispritCorrections
 import WispritDictionary
 import WispritEngine
@@ -425,6 +426,23 @@ struct EvalRunner {
         let store = dictionary(root: root)
         let corrector = SpokenSpellingCorrector(vocabulary: store)
         let refiner = config.refine ? try await makeRefiner(vocabulary: store) : nil
+        // Mirrors AppController's wiring: the fuzzy layer wraps the exact pass
+        // wherever `CorrectionApplying` is consumed. One deliberate difference,
+        // for the same reason `runStages` pins `previousUtterance` empty: the
+        // ordinary-word veto is the compiled-in `HighFrequencyWords` rather
+        // than the machine's `/usr/share/dict/words` — a scoreboard row has to
+        // mean the same thing on another machine, and the smaller lexicon errs
+        // toward MORE fuzzy activity, so the eval sees at least everything
+        // production would risk.
+        let corrections = FuzzyVocabularyCorrector(
+            base: store,
+            entries: {
+                store.learnedEntries().filter { !$0.isPending }.map {
+                    FuzzyVocabularyCorrector.Entry(term: $0.term, hears: $0.hear)
+                }
+            },
+            isKnownTerm: { store.isKnownTerm($0) },
+            isOrdinaryWord: { HighFrequencyWords.words.contains($0.lowercased()) })
 
         var out: [StageRecord] = []
         for record in asr {
@@ -452,7 +470,7 @@ struct EvalRunner {
             // job from rewriting the text and is not what the flag measures.
             let final = PostProcess.process(refined,
                                             options: PostProcessOptions(),
-                                            corrections: config.dict ? store : nil)
+                                            corrections: config.dict ? corrections : nil)
 
             out.append(StageRecord(id: record.id, engine: record.engine, raw: raw,
                                    corrected: correction.text, refined: refined, final: final,

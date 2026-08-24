@@ -347,7 +347,23 @@ public final class AppController: NSObject, NSApplicationDelegate {
             refiner: RefinerPort(refiner),
             pill: pillPort,
             vocabulary: dictionary,
-            corrections: dictionary,
+            // The fuzzy layer wraps the exact pass for BOTH `CorrectionApplying`
+            // consumers (live partials + PostProcess stage 2) at this one seam
+            // (corrections A1, docs/research/hearing-and-corrections.md). The
+            // bare store keeps serving every `VocabularySource` consumer — the
+            // biasing channel and the learn gates judge raw evidence and must
+            // not see fuzzy opinions. The lexicon veto is what stands between
+            // phonetics and the ALIX/WellX incident class; pending entries are
+            // quarantined evidence and never fuzzy-match.
+            corrections: FuzzyVocabularyCorrector(
+                base: dictionary,
+                entries: {
+                    dictionary.learnedEntries().filter { !$0.isPending }.map {
+                        FuzzyVocabularyCorrector.Entry(term: $0.term, hears: $0.hear)
+                    }
+                },
+                isKnownTerm: { dictionary.isKnownTerm($0) },
+                isOrdinaryWord: { lexicon.contains($0) }),
             corrector: SpokenSpellingCorrector(vocabulary: dictionary),
             gate: monitor,
             liveTyping: liveTyping,
