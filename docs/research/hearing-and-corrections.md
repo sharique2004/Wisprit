@@ -172,3 +172,31 @@ WISPRIT_REHEARSAL=1 swift test --filter RehearsalTests      # live refine batter
 Plus per-change: new battery/corpus cases land BEFORE the change they judge; new metrics fields for every new decision path; the six-cell mic WER A/B decides Workstream 1's default.
 
 At execution start, this plan (research + decisions) also gets committed into the repo as `docs/research/hearing-and-corrections.md` so the reasoning lives with the code, following the existing `docs/research/` convention. No Co-Authored-By trailers on any commit.
+
+## Execution log
+
+**2026-08-24, first tranche (phases 0–5) landed on `cursor/headphone-mic-live-corrections`:**
+miclab + eval `--mic` + device metrics; the mic rule flip (headset when connected,
+honest UX, CVSD warning-not-pin); tail-discard + dropped-chunks rescue; dual capture
+with the independent-witness clause; the fuzzy dictionary layer (term recall
+0.444→0.667 refine=off / 0.556→0.722 refine=on, WER flat or better — recorded in
+RESULTS.md); the edit-script refine backend behind `refine_backend=apple_edits`
+(default unchanged).
+
+**Edit-script battery, first report-only run (`WISPRIT_REHEARSAL_BACKEND=edits`):**
+perfect on every obedience trap, injection, letter-run/address bypass, jargon split,
+homophone, and tiny-plausibility case — the unrepresentability argument holds live.
+Scores zero on filler-heavy long texts and the self-correction case, which is the
+division of labor working as designed: fillers and self-corrections belong to
+PostProcess stages 1/5, which run AFTER refine in production but are invisible to
+the bare battery. **Consequence for the phase-8 decision gate: judge backends
+end-to-end (`eval stages` with the backend selected), never on the bare battery.**
+One real prompt-tuning lead: `i phone → iPhone` (a casing+join edit the applier
+admits) was not emitted — candidate for a deliberate prompt revision with its
+anchor lock updated.
+
+**Remaining:** phase 6 (Silero VAD via the FluidAudio module + adaptive key-up
+grace), phase 7 (link WispritParakeet, swap the vocabulary channel), phase 8
+decision gate. Both 6 and 7 ride the same one-line Package.swift link, and both
+need their model downloads, which are user actions in-app by design. Sharique's
+six-cell A/B recording and the AirPods-connected miclab probe are still pending.
