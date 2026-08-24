@@ -103,6 +103,9 @@ enum EvalCommand {
         /// `record`: which microphone this pass is on. Part of the clip id, so
         /// the Bluetooth pass of a script the internal mic already recorded is
         /// new clips rather than a duplicate-id error.
+        /// Replay verbs (`asr`/`stages`/`score`): a comma list restricting the
+        /// corpus to clips recorded on these microphones — how the device A/B
+        /// (docs/research/hearing-and-corrections.md, Phase 0) compares cells.
         var mic: String?
         /// `record`: force the dev/held side. Absent means the by-speaker rule
         /// (`EvalRecordPlan.split`), which is the one that should normally
@@ -158,6 +161,9 @@ enum EvalCommand {
           --repeat N             battery samples per case (default: 3)
           --baseline <path>      default: docs/eval/BASELINE.json
           --categories a,b       restrict to these corpus categories
+          --mic a,b              restrict to clips recorded on these
+                                 microphones — the device A/B's filter
+                                 (asr/stages/score; single label on `record`)
           --realtime             pace audio at wall-clock speed
 
         record / verify:

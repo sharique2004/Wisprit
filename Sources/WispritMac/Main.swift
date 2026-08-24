@@ -26,6 +26,8 @@ enum WispritMacMain {
             runApp(open: WindowLaunch.parse(Array(arguments.dropFirst())))
         case "bootstrap":
             exit(runBootstrap())
+        case "miclab":
+            exit(MicLab.run(arguments: Array(arguments.dropFirst())))
         case "hotkey":
             exit(runHotkeySmoke(arguments: Array(arguments.dropFirst())))
         case "insert":
@@ -65,6 +67,10 @@ enum WispritMacMain {
 
         Development only (hidden — not part of the supported surface):
 
+          Wisprit miclab [--seconds N]
+                                  open each candidate microphone and report the
+                                  negotiated rate, bring-up latency, and levels
+                                  (the orange mic indicator lights while it runs)
           Wisprit pill-demo [--shots DIR]
                                   walk the floating pill through every state on
                                   synthetic level data; --shots writes one

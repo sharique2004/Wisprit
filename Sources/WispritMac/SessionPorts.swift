@@ -51,11 +51,34 @@ public protocol AudioPort: Sendable {
     /// clipping-exposure metric: its p5 owns the verdict on whether cold-start
     /// head-loss was ever real exposure (never reported as an accuracy win).
     var firstVoicedMs: Double? { get }
+    /// Which device the session actually captured from and the rate the input
+    /// chain opened at — the negotiated truth, read once at mic-open. The
+    /// attribution every per-device accuracy question needs (`metrics.log`
+    /// rows were device-blind until this existed). nil for ports that cannot
+    /// know (fakes, the onboarding meter).
+    var deviceFacts: AudioDeviceFacts? { get }
+}
+
+/// The capture session's device attribution, in platform-neutral words —
+/// utterance rows must mean the same thing whatever capture backend filled them.
+public struct AudioDeviceFacts: Sendable, Equatable {
+    public var name: String
+    /// Human-readable transport ("built-in", "Bluetooth", "USB", …).
+    public var transport: String
+    /// The input-chain rate the session opened at, in Hz.
+    public var negotiatedRateHz: Double
+
+    public init(name: String, transport: String, negotiatedRateHz: Double) {
+        self.name = name
+        self.transport = transport
+        self.negotiatedRateHz = negotiatedRateHz
+    }
 }
 
 public extension AudioPort {
     var noiseFloor: Double? { nil }
     var firstVoicedMs: Double? { nil }
+    var deviceFacts: AudioDeviceFacts? { nil }
 }
 
 public protocol RefinePort: Sendable {
@@ -286,5 +309,12 @@ public struct MicCapturePort: AudioPort {
     public var level: Double { Double(capture.level) }
     public var noiseFloor: Double? { capture.noiseFloor }
     public var firstVoicedMs: Double? { capture.firstVoicedMs }
+    public var deviceFacts: AudioDeviceFacts? {
+        guard let device = capture.captureDevice, let rate = capture.negotiatedRateHz
+        else { return nil }
+        return AudioDeviceFacts(name: device.name,
+                                transport: device.transportName,
+                                negotiatedRateHz: rate)
+    }
 }
 #endif

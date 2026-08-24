@@ -204,10 +204,18 @@ public enum InputDeviceProbe {
 
     public static func defaultInput() -> InputDeviceInfo? {
         guard let id = defaultDevice(kAudioHardwarePropertyDefaultInputDevice) else { return nil }
-        return InputDeviceInfo(deviceID: id,
-                               name: name(of: id) ?? "(unknown)",
-                               transport: transport(of: id) ?? kAudioDeviceTransportTypeUnknown,
-                               nominalSampleRate: nominalSampleRate(of: id) ?? 0)
+        return info(of: id)
+    }
+
+    /// The same three property reads for an arbitrary device — what
+    /// `MicCapture` uses to report which device the AUHAL actually landed on,
+    /// which is not always the default input (the pin) and not always what the
+    /// device advertised before the mic opened (HFP negotiation).
+    public static func info(of id: AudioDeviceID) -> InputDeviceInfo {
+        InputDeviceInfo(deviceID: id,
+                        name: name(of: id) ?? "(unknown)",
+                        transport: transport(of: id) ?? kAudioDeviceTransportTypeUnknown,
+                        nominalSampleRate: nominalSampleRate(of: id) ?? 0)
     }
 
     /// Transport of the default *output* device. Classic Bluetooth here plus

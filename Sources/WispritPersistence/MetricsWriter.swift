@@ -107,6 +107,13 @@ public struct MetricsRecord: Sendable {
     /// …by this much, in dB. Two fields rather than one on purpose: the flag
     /// counts the rows, the number says how far the audio had to be dragged.
     public var appliedGainDb: Double?
+    // 2026-08-24, device attribution. Utterance rows only. Until these, every
+    // per-device accuracy question ("do AirPods rows really do worse?") was
+    // unanswerable from the log — the row didn't say which mic heard it, nor
+    // what rate the link actually negotiated (the advertised rate lies).
+    public var inputDevice: String?    // device name as Core Audio reports it
+    public var inputTransport: String? // "built-in" | "Bluetooth" | "USB" | …
+    public var inputRateHz: Double?    // the input chain's post-open rate
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
@@ -127,7 +134,10 @@ public struct MetricsRecord: Sendable {
                 configChanged: Bool? = nil,
                 marginalAudio: Bool? = nil,
                 rescueNormalized: Bool? = nil,
-                appliedGainDb: Double? = nil) {
+                appliedGainDb: Double? = nil,
+                inputDevice: String? = nil,
+                inputTransport: String? = nil,
+                inputRateHz: Double? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -168,6 +178,9 @@ public struct MetricsRecord: Sendable {
         self.marginalAudio = marginalAudio
         self.rescueNormalized = rescueNormalized
         self.appliedGainDb = appliedGainDb
+        self.inputDevice = inputDevice
+        self.inputTransport = inputTransport
+        self.inputRateHz = inputRateHz
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -236,6 +249,12 @@ public struct MetricsRecord: Sendable {
         if let marginalAudio { entry["marginal_audio"] = .bool(marginalAudio) }
         if let rescueNormalized { entry["rescue_normalized"] = .bool(rescueNormalized) }
         if let appliedGainDb { entry["applied_gain_db"] = .double(MetricsWriter.round1(appliedGainDb)) }
+        // Device attribution (2026-08-24), after every key above — the
+        // append-only rule once more. Absent from every row an earlier build
+        // could have written, so those stay byte-for-byte prefixes.
+        if let inputDevice { entry["input_device"] = .string(inputDevice) }
+        if let inputTransport { entry["input_transport"] = .string(inputTransport) }
+        if let inputRateHz { entry["input_rate_hz"] = .double(MetricsWriter.round1(inputRateHz)) }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -292,6 +311,11 @@ public enum MetricsField {
     public static let marginalAudio = "marginal_audio"
     public static let rescueNormalized = "rescue_normalized"
     public static let appliedGainDb = "applied_gain_db"
+    // Device attribution (2026-08-24) — strings + one rate, session-written as
+    // a `MetricsRecord` directly, like the quiet-speech trio.
+    public static let inputDevice = "input_device"
+    public static let inputTransport = "input_transport"
+    public static let inputRateHz = "input_rate_hz"
 }
 
 public final class MetricsWriter: @unchecked Sendable {

@@ -573,6 +573,10 @@ struct EvalRunner {
             parts.append("Categories: \(options.categories.joined(separator: ", ")) "
                          + "— a filtered run is not comparable with a full one.")
         }
+        if let mic = options.mic {
+            parts.append("Microphones: \(mic) — a device-filtered run is only "
+                         + "comparable with its A/B counterpart cells.")
+        }
         if options.locale != EvalCommand.defaultLocale {
             parts.append("Locale: \(options.locale) — a non-default locale is an "
                          + "experiment (bake-off / accent cross); its rows are not "
@@ -638,13 +642,26 @@ struct EvalRunner {
         }
     }
 
-    /// `--categories` narrows the corpus. The filter is applied here rather than
-    /// at scoring time so a partial run's artifacts contain exactly what was
-    /// measured.
+    /// `--categories` and `--mic` narrow the corpus. The filters are applied
+    /// here rather than at scoring time so a partial run's artifacts contain
+    /// exactly what was measured.
+    ///
+    /// `--mic` accepts a comma list (`--mic internal,airpods`) because the
+    /// device A/B compares cells side by side; a clip with no `mic` field
+    /// (every synthetic corpus) never matches a mic filter.
     private func selected(_ corpus: Corpus) -> [CorpusEntry] {
-        guard !options.categories.isEmpty else { return corpus.entries }
-        let wanted = Set(options.categories)
-        return corpus.entries.filter { wanted.contains($0.category) }
+        var entries = corpus.entries
+        if !options.categories.isEmpty {
+            let wanted = Set(options.categories)
+            entries = entries.filter { wanted.contains($0.category) }
+        }
+        if let mic = options.mic {
+            let wanted = Set(mic.split(separator: ",").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }.filter { !$0.isEmpty })
+            entries = entries.filter { $0.mic.map(wanted.contains) ?? false }
+        }
+        return entries
     }
 
     private func dictionary(root: URL) -> DictionaryStore {

@@ -1425,7 +1425,16 @@ public final class SessionController: @unchecked Sendable {
             // amplification stays readable independently of whether the batch
             // reading won.
             rescueNormalized: result.rescueGainDb != nil ? true : nil,
-            appliedGainDb: result.rescueGainDb))
+            appliedGainDb: result.rescueGainDb,
+            // Device attribution, derived here like `configChanged` so every
+            // utterance row carries it: `writeMetrics` only ever runs on the
+            // session thread after `audio.stop()`, and the port keeps the
+            // facts stable until the next capture starts. Ports that cannot
+            // know (fakes, the onboarding meter) answer nil and the row simply
+            // omits the fields.
+            inputDevice: audio.deviceFacts?.name,
+            inputTransport: audio.deviceFacts?.transport,
+            inputRateHz: audio.deviceFacts?.negotiatedRateHz))
     }
 
     // MARK: - level ticker

@@ -65,6 +65,16 @@ public final class MicCapture: @unchecked Sendable {
     /// Nanosecond stamp when `start()` went live — the `first_voiced_ms` epoch.
     private var startedAtNs: UInt64 = 0
     private var firstVoicedMsValue: Double?
+    /// mic-live → first tap buffer, voiced or not. On a classic-Bluetooth mic
+    /// this is the SCO bring-up made visible: the radio can spend 1–3 s
+    /// negotiating before the first sample exists, and nothing upstream can
+    /// tell "slow link" from "silent user" without it.
+    private var firstChunkMsValue: Double?
+    /// The device the AUHAL actually landed on for this session (post-pin) and
+    /// the input-chain rate it opened at — the negotiated truth, as opposed to
+    /// the rate the device advertised before the mic was live.
+    private var captureDeviceValue: InputDeviceInfo?
+    private var negotiatedRateHzValue: Double?
     /// Mean-squares of the two most recent chunks (the sliding window's tail).
     private var recentMeanSquares: [Double] = []
     /// Smallest 3-chunk (~300 ms) window mean-square seen this session.
@@ -142,6 +152,30 @@ public final class MicCapture: @unchecked Sendable {
         return firstVoicedMsValue
     }
 
+    /// mic-live → first delivered chunk, in ms; nil when none ever arrived.
+    /// Unlike `firstVoicedMs` this stops on ANY buffer, so it measures the
+    /// capture path (SCO bring-up, HAL wake), not the speaker.
+    public var firstChunkMs: Double? {
+        lock.lock(); defer { lock.unlock() }
+        return firstChunkMsValue
+    }
+
+    /// The device this (or the most recent) session actually captured from,
+    /// resolved from the AUHAL after pinning — not the system default, not the
+    /// pre-open advertisement. nil before the first `start()`.
+    public var captureDevice: InputDeviceInfo? {
+        lock.lock(); defer { lock.unlock() }
+        return captureDeviceValue
+    }
+
+    /// The input-chain sample rate the session opened at. For a classic-BT
+    /// headset this is the negotiated HFP truth (8 k CVSD / 16 k mSBC), which
+    /// the advertised nominal rate routinely lies about until the link is up.
+    public var negotiatedRateHz: Double? {
+        lock.lock(); defer { lock.unlock() }
+        return negotiatedRateHzValue
+    }
+
     /// Returns false when the input could not be opened (mic permission denied,
     /// no input device); the session then aborts the utterance cleanly.
     ///
@@ -169,6 +203,9 @@ public final class MicCapture: @unchecked Sendable {
         reconfigured = false
         startedAtNs = 0
         firstVoicedMsValue = nil
+        firstChunkMsValue = nil
+        captureDeviceValue = nil
+        negotiatedRateHzValue = nil
         recentMeanSquares.removeAll()
         floorMeanSquare = nil
         lock.unlock()
@@ -186,6 +223,15 @@ public final class MicCapture: @unchecked Sendable {
             lock.lock(); active = false; lock.unlock()
             return false
         }
+        // Which device the AUHAL actually landed on (post-pin), and the rate
+        // the input chain opened at. Read here, once, because this is the only
+        // moment the negotiated truth exists: before `start()` the device
+        // advertises whatever it likes, and after `stop()` the link is gone.
+        let device = resolvedDevice(of: input).map { InputDeviceProbe.info(of: $0) }
+        lock.lock()
+        captureDeviceValue = device
+        negotiatedRateHzValue = hardware.sampleRate
+        lock.unlock()
         // Tap in the hardware's own format and down-convert; installing a tap with
         // a mismatched format throws at runtime on some devices.
         guard let converter = PcmDownconverter(from: hardware) else {
@@ -226,6 +272,12 @@ public final class MicCapture: @unchecked Sendable {
             self.lock.lock()
             self.levelValue = l
             self.deliveredBytes += pcm.count
+            // first_chunk_ms: ANY buffer stops this clock — the capture path's
+            // own latency (SCO bring-up, HAL wake), independent of the speaker.
+            if self.firstChunkMsValue == nil, self.startedAtNs > 0 {
+                let now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
+                self.firstChunkMsValue = Double(now - self.startedAtNs) / 1_000_000.0
+            }
             // first_voiced_ms: the first chunk that cleared the voiced
             // threshold stops the clock (R4's clipping-exposure metric).
             if self.firstVoicedMsValue == nil, self.startedAtNs > 0,
@@ -331,6 +383,18 @@ public final class MicCapture: @unchecked Sendable {
         } else {
             log.info("input pinned to device \(deviceID) by input_device_policy")
         }
+    }
+
+    /// The device the input node's AUHAL is actually on — the system default
+    /// unless `pinPreferredDevice` moved it. Best-effort like the pin itself.
+    private func resolvedDevice(of input: AVAudioInputNode) -> AudioDeviceID? {
+        guard let unit = input.audioUnit else { return nil }
+        var deviceID = AudioDeviceID(0)
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioUnitGetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
+                                          kAudioUnitScope_Global, 0, &deviceID, &size)
+        guard status == noErr, deviceID != kAudioObjectUnknown else { return nil }
+        return deviceID
     }
 
     private func removeObserver() {
