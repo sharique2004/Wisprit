@@ -85,6 +85,15 @@ public enum InputDevicePolicySettings: String, CaseIterable, Sendable {
     }
 }
 
+/// `refine_backend` — which generator sits behind the refine cage.
+/// String-keyed like its siblings; unknown values read as `apple` so a
+/// hand-edited config never selects a backend that does not exist.
+public enum RefineBackendSettings {
+    public static let key = "refine_backend"
+    public static let apple = "apple"
+    public static let appleEdits = "apple_edits"
+}
+
 /// `dual_capture` — while the headset mic dictates over classic Bluetooth,
 /// keep the Mac mic silently recording as a parachute the rescue ladder may
 /// re-read (docs/research/hearing-and-corrections.md). It can only ever ADD

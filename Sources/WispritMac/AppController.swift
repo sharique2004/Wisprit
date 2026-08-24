@@ -118,7 +118,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
         self.metrics = MetricsWriter()
 
         self.refiner = Refiner(
-            generator: AppController.makeGenerator(),
+            generator: AppController.makeGenerator(settings: settings, dictionary: dictionary),
             configuration: {
                 RefineConfiguration(enabled: settings.aiCleanup,
                                     maxWords: settings.aiCleanupMaxWords,
@@ -611,9 +611,22 @@ public final class AppController: NSObject, NSApplicationDelegate {
         windowController.showOnboarding()
     }
 
-    private static func makeGenerator() -> any RefineGenerating {
+    /// `refine_backend` — which generator sits behind the (unchanged) cage.
+    /// `apple` is the locked full-text prompt; `apple_edits` is the guided
+    /// edit-script backend (corrections A2), selectable for evaluation and
+    /// default-flipped only when its battery band proves out. Read once at
+    /// wiring, like the engine choice.
+    private static func makeGenerator(settings: Settings,
+                                      dictionary: DictionaryStore) -> any RefineGenerating {
         #if canImport(FoundationModels)
-        return SystemModelGenerator()
+        switch settings.string(RefineBackendSettings.key, or: RefineBackendSettings.apple) {
+        case RefineBackendSettings.appleEdits:
+            return EditScriptGenerator(
+                isKnownTerm: { dictionary.isKnownTerm($0) },
+                candidateTerms: { Array(dictionary.vocabularyTerms().prefix(10)) })
+        default:
+            return SystemModelGenerator()
+        }
         #else
         return UnavailableGenerator()
         #endif

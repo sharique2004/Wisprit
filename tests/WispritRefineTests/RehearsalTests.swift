@@ -38,12 +38,22 @@ final class RehearsalTests: XCTestCase {
         try XCTSkipUnless(ProcessInfo.processInfo.environment["WISPRIT_REHEARSAL"] == "1",
                           "set WISPRIT_REHEARSAL=1 to run the live model battery")
         #if canImport(FoundationModels)
+        // WISPRIT_REHEARSAL_BACKEND=edits runs the SAME battery through the
+        // edit-script backend (corrections A2). Report-only for now: the
+        // accepted band belongs to the full-text prompt, and gating a new
+        // backend against another backend's floor would say nothing. The
+        // edits backend earns its own band before any default flips.
+        let backend = ProcessInfo.processInfo.environment["WISPRIT_REHEARSAL_BACKEND"] ?? "apple"
+        let generator: any RefineGenerating = backend == "edits"
+            ? EditScriptGenerator()
+            : SystemModelGenerator()
+        if backend == "edits" { print("REHEARSAL backend: edit-script (report-only)") }
         // The real cage, not the bare generator: the letter-run and address
         // cases assert a *bypass outcome*, which only exists on this side of
         // `Refiner`, and the plausibility guard is what the user actually gets
         // when the model answers instead of cleaning. Default configuration =
         // the app's own word cap and timeout budget.
-        let refiner = Refiner(generator: SystemModelGenerator(),
+        let refiner = Refiner(generator: generator,
                               configuration: { RefineConfiguration() },
                               startProbe: false)
         let available = await refiner.probeNow()
@@ -73,6 +83,10 @@ final class RehearsalTests: XCTestCase {
               + "\(violated.count) with violations "
               + "(weighted; repeats live in `Wisprit eval refine`)")
 
+        guard backend != "edits" else {
+            print("REHEARSAL       edit-script backend — REPORT ONLY until it earns its own band")
+            return
+        }
         guard let band = try Self.baselineBand() else {
             print("REHEARSAL       no battery band in docs/eval/BASELINE.json — REPORT ONLY, "
                   + "nothing gated. Record one with `Wisprit eval refine`.")
