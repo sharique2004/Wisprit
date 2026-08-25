@@ -126,6 +126,13 @@ public struct MetricsRecord: Sendable {
     /// (dual capture): "secondary_mic". Absent on every other row — including
     /// primary-PCM rescues, whose rows keep their pre-field meaning.
     public var rescueSource: String?
+    // 2026-08-24, the voice-activity witness pair + the adaptive grace's cost
+    // (hearing tiers 3–4). Utterance rows only, absent until the user
+    // downloads the VAD model / while adaptivity is off. Deliberately beside
+    // (never replacing) the RMS pair: the two series must stay comparable.
+    public var vadFirstSpeechMs: Double?
+    public var vadSpeechRatio: Double?
+    public var graceExtendedMs: Double?
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
@@ -152,7 +159,10 @@ public struct MetricsRecord: Sendable {
                 inputRateHz: Double? = nil,
                 tailDiscardMs: Double? = nil,
                 droppedAudioMs: Double? = nil,
-                rescueSource: String? = nil) {
+                rescueSource: String? = nil,
+                vadFirstSpeechMs: Double? = nil,
+                vadSpeechRatio: Double? = nil,
+                graceExtendedMs: Double? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -199,6 +209,9 @@ public struct MetricsRecord: Sendable {
         self.tailDiscardMs = tailDiscardMs
         self.droppedAudioMs = droppedAudioMs
         self.rescueSource = rescueSource
+        self.vadFirstSpeechMs = vadFirstSpeechMs
+        self.vadSpeechRatio = vadSpeechRatio
+        self.graceExtendedMs = graceExtendedMs
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -279,6 +292,13 @@ public struct MetricsRecord: Sendable {
         if let tailDiscardMs { entry["tail_discard_ms"] = .double(MetricsWriter.round1(tailDiscardMs)) }
         if let droppedAudioMs { entry["dropped_audio_ms"] = .double(MetricsWriter.round1(droppedAudioMs)) }
         if let rescueSource { entry["rescue_source"] = .string(rescueSource) }
+        // The witness pair + the grace cost (2026-08-24), after every key
+        // above — the append-only rule once more.
+        if let vadFirstSpeechMs { entry["vad_first_speech_ms"] = .double(MetricsWriter.round1(vadFirstSpeechMs)) }
+        if let vadSpeechRatio { entry["vad_speech_ratio"] = .double(MetricsWriter.round4(vadSpeechRatio)) }
+        if let graceExtendedMs, graceExtendedMs > 0 {
+            entry["grace_extended_ms"] = .double(MetricsWriter.round1(graceExtendedMs))
+        }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -345,6 +365,10 @@ public enum MetricsField {
     public static let droppedAudioMs = "dropped_audio_ms"
     /// Dual capture's cross-mic rescue attribution (2026-08-24).
     public static let rescueSource = "rescue_source"
+    // The voice-activity witness pair + the adaptive grace cost (2026-08-24).
+    public static let vadFirstSpeechMs = "vad_first_speech_ms"
+    public static let vadSpeechRatio = "vad_speech_ratio"
+    public static let graceExtendedMs = "grace_extended_ms"
 }
 
 public final class MetricsWriter: @unchecked Sendable {

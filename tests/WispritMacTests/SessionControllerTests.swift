@@ -54,6 +54,7 @@ final class SessionControllerTests: XCTestCase {
              // instantaneous — the grace is opt-in per test, exactly as it is
              // per install.
              releaseGrace: TimeInterval = 0,
+             adaptiveGrace: Bool = false,
              inputWarning: @escaping @Sendable () -> String? = { nil },
              inputVolumeAdvisory: @escaping @Sendable () -> Int? = { nil },
              // Swap in a different pill for the tests whose subject is what the
@@ -89,6 +90,7 @@ final class SessionControllerTests: XCTestCase {
                     expandSnippets: expandSnippets,
                     expandIdentity: expandIdentity,
                     releaseGrace: releaseGrace,
+                    adaptiveGrace: adaptiveGrace,
                     inputWarning: inputWarning,
                     inputVolumeAdvisory: inputVolumeAdvisory))
             inserter.deferredLabel = { [weak session] in session?.deferredLabel }
@@ -788,6 +790,86 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertLessThan(stoppedAt - t0, 0.05, "no grace, no wait")
         XCTAssertEqual(h.audio.stopCount, 1)
         XCTAssertEqual(h.asr.finalizeCount, 1)
+    }
+
+    // MARK: - hearing tier 4: the adaptive extension
+
+    /// A quiet tail pays the base and NOTHING more — phase B is never entered,
+    /// so the common case's latency stays exactly where it was.
+    func testAQuietTailNeverPaysTheAdaptiveExtension() {
+        let h = Harness(useRefiner: false, releaseGrace: 0.08, adaptiveGrace: true)
+        h.audio.setSpeechProbability(0.05)   // the witness says: not speech
+        let t0 = MonotonicClock.now()
+
+        h.utterance()
+
+        guard let stoppedAt = h.audio.lastStopAt else { return XCTFail("no stop stamp") }
+        XCTAssertGreaterThan(stoppedAt - t0, 0.06, "the base still applies")
+        XCTAssertLessThan(stoppedAt - t0, 0.16, "and nothing beyond it")
+    }
+
+    /// A tail the witness still calls speech extends — and ends at the
+    /// trailing-silence hold once the speech stops, never at the hard cap.
+    func testASpeakingTailExtendsUntilTheSilenceHold() {
+        let h = Harness(useRefiner: false, releaseGrace: 0.08, adaptiveGrace: true)
+        h.audio.setSpeechProbability(0.9)
+        // The syllable ends 150 ms into the grace.
+        DispatchQueue.global().asyncAfter(deadline: .now() + 0.15) {
+            h.audio.setSpeechProbability(0.05)
+        }
+        let t0 = MonotonicClock.now()
+
+        h.utterance()
+
+        guard let stoppedAt = h.audio.lastStopAt else { return XCTFail("no stop stamp") }
+        XCTAssertGreaterThan(stoppedAt - t0, 0.2, "the trailing syllable was granted its time")
+        XCTAssertLessThan(stoppedAt - t0, 0.48, "and the extension ended on silence, not the cap")
+        XCTAssertEqual(h.asr.finalizeCount, 1)
+        XCTAssertEqual(h.inserter.inserted, ["hello world"])
+    }
+
+    /// Speech that never stops meets the 500 ms clamp — the fat-finger bound
+    /// the fixed grace always had.
+    func testTheHardCapBoundsAnEndlessTail() {
+        let h = Harness(useRefiner: false, releaseGrace: 0.08, adaptiveGrace: true)
+        h.audio.setSpeechProbability(0.9)   // never drops
+        let t0 = MonotonicClock.now()
+
+        h.utterance()
+
+        guard let stoppedAt = h.audio.lastStopAt else { return XCTFail("no stop stamp") }
+        XCTAssertLessThan(stoppedAt - t0, 0.62, "maxReleaseGrace holds, adaptive or not")
+    }
+
+    /// Without the witness, the RMS fallback still refuses a loud-room tail:
+    /// level over the floor-multiple reads as speech, level under it does not.
+    func testTheRmsFallbackUsesTheSessionsOwnFloor() {
+        let h = Harness(useRefiner: false, releaseGrace: 0.08, adaptiveGrace: true)
+        h.audio.setSpeechProbability(nil)      // no model
+        h.audio.noiseFloorValue = 0.3
+        h.audio.setLevel(0.4)                  // under 2× floor: not speech
+        let t0 = MonotonicClock.now()
+
+        h.utterance()
+
+        guard let stoppedAt = h.audio.lastStopAt else { return XCTFail("no stop stamp") }
+        XCTAssertLessThan(stoppedAt - t0, 0.16, "a loud room is not a speaking user")
+    }
+
+    /// Esc still cuts in mid-extension — the adaptive phase waits in the same
+    /// event-watching slices as the base.
+    func testEscCutsTheAdaptiveExtensionShort() {
+        let h = Harness(useRefiner: false, releaseGrace: 0.08, adaptiveGrace: true)
+        h.audio.setSpeechProbability(0.9)
+        h.session.dispatch(HotkeyEvent(.press, ts: 0))
+        h.events.put(HotkeyEvent(.esc))
+        let t0 = MonotonicClock.now()
+
+        h.session.dispatch(HotkeyEvent(.release, ts: 1.0))
+
+        XCTAssertLessThan(MonotonicClock.now() - t0, 0.3)
+        XCTAssertEqual(h.asr.cancelCount, 1)
+        XCTAssertEqual(h.inserter.inserted, [])
     }
 
     /// Esc inside the grace discards the utterance immediately — it never

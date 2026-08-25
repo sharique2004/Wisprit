@@ -30,6 +30,8 @@ enum WispritMacMain {
             exit(MicLab.run(arguments: Array(arguments.dropFirst())))
         case "parakeet":
             exit(ParakeetCommand.run(arguments: Array(arguments.dropFirst())))
+        case "vad":
+            exit(VadCommand.run(arguments: Array(arguments.dropFirst())))
         case "hotkey":
             exit(runHotkeySmoke(arguments: Array(arguments.dropFirst())))
         case "insert":
@@ -68,6 +70,9 @@ enum WispritMacMain {
                                   the Parakeet reconcile channel's models —
                                   download is explicit, verified against the
                                   pinned manifest, and never happens on its own
+          Wisprit vad [status|download]
+                                  the voice-activity witness's model (~2 MB) —
+                                  same rule: explicit download, never on its own
           Wisprit hotkey [secs]   print hotkey events (needs WISPRIT_MANUAL_INPUT=1)
           Wisprit insert "text"   insert text after a 3 s countdown (same gate)
 

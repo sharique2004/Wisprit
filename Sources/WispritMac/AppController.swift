@@ -147,7 +147,15 @@ public final class AppController: NSObject, NSApplicationDelegate {
                                       finalizeTimeoutMs: Double(settings.finalizeTimeoutMs),
                                       engine: AsrEngineKind(settingsValue: settings.engine))
         let asr = AsrManager(settings: asrSettings, vocabulary: dictionary)
-        let capture = MicCapture(onChunk: { pcm in asr.feed(pcm: pcm) },
+        // The voice-activity witness (hearing tier 3): a second reference to
+        // each canonical chunk, strictly advisory, inert until the user runs
+        // `Wisprit vad download`. `feed` is a lock-only enqueue — the render
+        // thread never waits on it.
+        let vadMonitor = VadMonitor(scorer: SileroVadScorer())
+        let capture = MicCapture(onChunk: { pcm in
+                                     asr.feed(pcm: pcm)
+                                     vadMonitor.feed(pcm)
+                                 },
                                  // The 2026-08-05 failure class, finally wired
                                  // to something: the fact used to stop inside
                                  // MicCapture, where only a log line read it.
@@ -238,6 +246,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 if asr.armCapture() {
                     _ = capture.start()
                     secondary.start()
+                    vadMonitor.start()
                 }
             }
         }
@@ -254,6 +263,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 guard !asr.isRecordingUtterance else { return }
                 capture.stop()
                 secondary.stop()
+                vadMonitor.stop()
             }
         }
 
@@ -363,7 +373,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
         self.session = SessionController(
             events: events,
             asr: AsrManagerPort(asr, parakeet: parakeetChannel),
-            audio: MicCapturePort(capture, secondary: secondary),
+            audio: MicCapturePort(capture, secondary: secondary, vad: vadMonitor),
             inserter: SettingsInserterPort(inserter: Inserter(), settings: settings),
             history: history,
             metrics: metrics,
@@ -438,6 +448,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 },
                 // One definition of the grace, in `KeyupGraceSettings`.
                 releaseGrace: KeyupGraceSettings.seconds(settings),
+                adaptiveGrace: KeyupGraceAdaptiveSettings.isEnabled(settings),
                 // Consumed after `audio.start()` succeeded, so the session's
                 // own post-open rate is available — how the CVSD variant knows.
                 inputWarning: { [weak capture] in

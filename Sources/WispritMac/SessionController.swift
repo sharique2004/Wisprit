@@ -85,6 +85,20 @@ public enum InputDevicePolicySettings: String, CaseIterable, Sendable {
     }
 }
 
+/// `keyup_grace_adaptive` — extend the key-up grace past `keyup_grace_ms`
+/// while trailing audio is still speech, bounded by the 500 ms clamp
+/// (hearing tier 4). Default TRUE: the worst case is bounded extra latency
+/// the clamp always permitted, spent only on utterances where the user was
+/// demonstrably still talking, and `grace_extended_ms` measures the cost.
+public enum KeyupGraceAdaptiveSettings {
+    public static let key = "keyup_grace_adaptive"
+    public static let defaultEnabled = true
+
+    public static func isEnabled(_ settings: Settings) -> Bool {
+        settings.bool(key, or: defaultEnabled)
+    }
+}
+
 /// `parakeet_channel` — route the off-path vocabulary reconcile through the
 /// Parakeet TDT engine (corrections B1) instead of DictationTranscriber.
 /// Default TRUE, and harmless without models: the channel only activates once
@@ -207,6 +221,13 @@ public final class SessionController: @unchecked Sendable {
         /// one blocking sleep: Esc must still abort inside the grace, and a
         /// queued press must still be able to cut it short.
         public var releaseGrace: TimeInterval
+        /// Extend the grace past the base while trailing audio is still
+        /// speech (hearing tier 4): the base covers tap physics; the
+        /// extension — VAD-arbitrated when the witness is loaded, RMS-vs-floor
+        /// otherwise — covers a key released mid-syllable. Bounded by
+        /// `maxReleaseGrace` whatever happens, and Esc/re-press still cut in
+        /// on every ≤20 ms slice.
+        public var adaptiveGrace: Bool
         /// One line about the input device, or nil — shown once per device
         /// appearance, never per utterance. nil by default, so no wiring that
         /// omits it ever says anything.
@@ -228,6 +249,7 @@ public final class SessionController: @unchecked Sendable {
                     expandSnippets: @escaping @Sendable (String) -> String = { $0 },
                     expandIdentity: @escaping @Sendable (String) -> String = { $0 },
                     releaseGrace: TimeInterval = 0,
+                    adaptiveGrace: Bool = false,
                     inputWarning: @escaping @Sendable () -> String? = { nil },
                     inputVolumeAdvisory: @escaping @Sendable () -> Int? = { nil }) {
             self.holdDebounceMs = holdDebounceMs
@@ -240,6 +262,7 @@ public final class SessionController: @unchecked Sendable {
             self.expandSnippets = expandSnippets
             self.expandIdentity = expandIdentity
             self.releaseGrace = releaseGrace
+            self.adaptiveGrace = adaptiveGrace
             self.inputWarning = inputWarning
             self.inputVolumeAdvisory = inputVolumeAdvisory
         }
@@ -912,7 +935,29 @@ public final class SessionController: @unchecked Sendable {
     /// feel broken.
     static let maxReleaseGrace: TimeInterval = 0.5
 
+    /// Trailing non-speech this long ends the adaptive extension: shorter
+    /// than a breath between sentences (the key is UP — the user is done),
+    /// longer than a plosive's closure.
+    static let trailingSilenceHold: TimeInterval = 0.18
+    /// RMS fallback line for "still speech" when the VAD witness is absent:
+    /// level must clear the voiced floor AND stand off the session's own
+    /// noise floor — a fixed threshold alone reads a loud room as speech.
+    static let trailingSpeechFloorMultiple = 2.0
+
+    /// How much the adaptive phase extended the last grace beyond its base, in
+    /// ms — 0 when it didn't, nil when adaptivity is off. Read by
+    /// `writeMetrics` on the session thread; the latency cost must be a
+    /// measured series, not a vibe.
+    private(set) var lastGraceExtensionMs: Double?
+
     /// Keep the microphone open briefly after key-up.
+    ///
+    /// Phase A is the unconditional base (`keyup_grace_ms`): up to 100 ms of
+    /// already-captured audio sits undelivered in the tap, and that is
+    /// physics. Phase B (hearing tier 4, `keyup_grace_adaptive`) extends only
+    /// while trailing audio is still SPEECH — the syllable a fast key-up used
+    /// to cut — and ends at `trailingSilenceHold` of quiet, hard-capped by
+    /// `maxReleaseGrace` like everything else.
     ///
     /// Not one blocking sleep: the loop watches the event queue in ≤20 ms
     /// slices so Esc still aborts inside the grace (faster than it can today,
@@ -920,16 +965,66 @@ public final class SessionController: @unchecked Sendable {
     /// short rather than adding 120 ms to the next utterance's wait.
     @discardableResult
     func awaitReleaseGrace() -> GraceOutcome {
-        let grace = min(max(config.releaseGrace, 0), SessionController.maxReleaseGrace)
-        guard grace > 0 else { return .elapsed }
-        let deadline = Date().addingTimeInterval(grace)
+        let base = min(max(config.releaseGrace, 0), SessionController.maxReleaseGrace)
+        lastGraceExtensionMs = config.adaptiveGrace ? 0 : nil
+        guard base > 0 else { return .elapsed }
+        let graceStart = Date()
+        if let interrupted = waitSlices(until: graceStart.addingTimeInterval(base)) {
+            return interrupted
+        }
+        guard config.adaptiveGrace else { return .elapsed }
+
+        // Phase B: the microphone is still open (audio.stop() runs after this
+        // returns), so `audio.level` is live. Entered ONLY when the tail is
+        // still speech right now — a quiet tail pays base and nothing more,
+        // which keeps the common case's latency exactly where it was. The VAD
+        // witness arbitrates when loaded — RMS-vs-floor calls a loud room
+        // "speech" forever, which is exactly the false-extend the cap and the
+        // silence hold bound.
+        guard trailingAudioIsSpeech() else { return .elapsed }
+        let hardDeadline = graceStart.addingTimeInterval(SessionController.maxReleaseGrace)
+        var quietSince: Date?
+        while Date() < hardDeadline {
+            if trailingAudioIsSpeech() {
+                quietSince = nil
+            } else if let quiet = quietSince {
+                if Date().timeIntervalSince(quiet) >= SessionController.trailingSilenceHold { break }
+            } else {
+                quietSince = Date()
+            }
+            if let interrupted = waitSlices(until: min(hardDeadline,
+                                                       Date().addingTimeInterval(0.02))) {
+                lastGraceExtensionMs =
+                    max(0, Date().timeIntervalSince(graceStart) - base) * 1000.0
+                return interrupted
+            }
+        }
+        lastGraceExtensionMs = max(0, Date().timeIntervalSince(graceStart) - base) * 1000.0
+        return .elapsed
+    }
+
+    /// One Esc/re-press-aware wait; nil = the deadline elapsed undisturbed.
+    private func waitSlices(until deadline: Date) -> GraceOutcome? {
         while true {
             if events.drainCancel() { return .cancelled }
             if events.hasPendingPress { return .preempted }
             let remaining = deadline.timeIntervalSinceNow
-            guard remaining > 0 else { return .elapsed }
+            guard remaining > 0 else { return nil }
             Thread.sleep(forTimeInterval: min(remaining, 0.02))
         }
+    }
+
+    private func trailingAudioIsSpeech() -> Bool {
+        if let probability = audio.latestSpeechProbability {
+            return probability >= 0.5
+        }
+        let level = audio.level
+        guard level >= MetricsSummary.voicedPeakThreshold else { return false }
+        guard let floor = audio.noiseFloor, floor > 0 else {
+            // No floor yet (<300 ms session): the voiced threshold alone.
+            return true
+        }
+        return level >= floor * SessionController.trailingSpeechFloorMultiple
     }
 
     private func abort(reason: String) {
@@ -1485,7 +1580,12 @@ public final class SessionController: @unchecked Sendable {
             // rescued or not — says whether the feed dropped audio.
             tailDiscardMs: result.discardedTailMs,
             droppedAudioMs: result.droppedAudioMs,
-            rescueSource: result.rescueSource))
+            rescueSource: result.rescueSource,
+            // The witness pair rides beside the RMS pair; the grace cost is
+            // read here on the session thread, same custody as the port facts.
+            vadFirstSpeechMs: audio.vadFirstSpeechMs,
+            vadSpeechRatio: audio.vadSpeechRatio,
+            graceExtendedMs: lastGraceExtensionMs))
     }
 
     // MARK: - level ticker

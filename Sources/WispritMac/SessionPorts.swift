@@ -62,6 +62,15 @@ public protocol AudioPort: Sendable {
     /// arrived. On a classic-Bluetooth mic this is SCO bring-up made visible —
     /// what the "connecting headset mic" pill state keys on.
     var firstChunkMs: Double? { get }
+    /// The voice-activity witness's live verdict for the most recent ~256 ms
+    /// window, 0…1 — the adaptive grace's arbiter. nil when the witness is
+    /// not loaded (model not downloaded) or the port cannot know.
+    var latestSpeechProbability: Double? { get }
+    /// monitor-start → first speech-classified window, and the share of
+    /// windows classified speech — the honest counterparts to the RMS pair,
+    /// per utterance. All nil without the witness.
+    var vadFirstSpeechMs: Double? { get }
+    var vadSpeechRatio: Double? { get }
 }
 
 /// The capture session's device attribution, in platform-neutral words —
@@ -90,6 +99,9 @@ public extension AudioPort {
     var firstVoicedMs: Double? { nil }
     var deviceFacts: AudioDeviceFacts? { nil }
     var firstChunkMs: Double? { nil }
+    var latestSpeechProbability: Double? { nil }
+    var vadFirstSpeechMs: Double? { nil }
+    var vadSpeechRatio: Double? { nil }
 }
 
 public protocol RefinePort: Sendable {
@@ -337,23 +349,33 @@ public struct MicCapturePort: AudioPort {
     /// with it, so both mics live and die inside the one orange-indicator
     /// window. nil when dual capture is not wired.
     let secondary: SecondaryCapture?
+    /// The voice-activity witness — same lifecycle, strictly advisory, and
+    /// inert until its model is downloaded. nil when not wired.
+    let vad: VadMonitor?
 
-    public init(_ capture: MicCapture, secondary: SecondaryCapture? = nil) {
+    public init(_ capture: MicCapture, secondary: SecondaryCapture? = nil,
+                vad: VadMonitor? = nil) {
         self.capture = capture
         self.secondary = secondary
+        self.vad = vad
     }
 
     public func start() -> Bool {
         // The primary decides whether the utterance can happen at all; the
-        // parachute is best-effort and never blocks or fails a session.
+        // parachute and the witness are best-effort and never block or fail a
+        // session.
         let ok = capture.start()
-        if ok { secondary?.start() }
+        if ok {
+            secondary?.start()
+            vad?.start()
+        }
         return ok
     }
 
     public func stop() {
         capture.stop()
         secondary?.stop()
+        vad?.stop()
     }
     public var level: Double { Double(capture.level) }
     public var noiseFloor: Double? { capture.noiseFloor }
@@ -368,5 +390,8 @@ public struct MicCapturePort: AudioPort {
                                     .isClassicBluetooth(device.transport))
     }
     public var firstChunkMs: Double? { capture.firstChunkMs }
+    public var latestSpeechProbability: Double? { vad?.latestProbability }
+    public var vadFirstSpeechMs: Double? { vad?.firstSpeechMs }
+    public var vadSpeechRatio: Double? { vad?.speechRatio }
 }
 #endif

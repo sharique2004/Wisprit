@@ -44,7 +44,11 @@ let package = Package(
         // transitive binary framework must not ride every install while the
         // ship decision is human-corpus-gated (spikes-parakeet.md).
         .target(name: "WispritParakeet",
-                dependencies: ["WispritKit", .product(name: "FluidAudio", package: "FluidAudio")],
+                // WispritEngine supplies the `VadScoring` seam the Silero
+                // scorer conforms to (hearing tier 3) — the FluidAudio adapter
+                // module implements engine seams, never the other way around.
+                dependencies: ["WispritKit", "WispritEngine",
+                               .product(name: "FluidAudio", package: "FluidAudio")],
                 swiftSettings: v5),
 
         // Apple Intelligence polish modes (replaces the Python claude-CLI polish; on-device only).

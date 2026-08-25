@@ -174,6 +174,9 @@ final class FakeAudio: AudioPort, @unchecked Sendable {
     /// that measured nothing.
     var noiseFloorValue: Double?
     var firstVoicedMsValue: Double?
+    /// Scripted voice-activity witness; nil (the default) = no model loaded,
+    /// which sends the adaptive grace down its RMS fallback.
+    var speechProbabilityValue: Double?
 
     /// `MonotonicClock` stamps of the most recent start/stop. The keyup grace
     /// is a duration between two calls, so a test needs the clock the session
@@ -192,6 +195,17 @@ final class FakeAudio: AudioPort, @unchecked Sendable {
 
     var noiseFloor: Double? { lock.lock(); defer { lock.unlock() }; return noiseFloorValue }
     var firstVoicedMs: Double? { lock.lock(); defer { lock.unlock() }; return firstVoicedMsValue }
+    var latestSpeechProbability: Double? {
+        lock.lock(); defer { lock.unlock() }; return speechProbabilityValue
+    }
+
+    func setSpeechProbability(_ value: Double?) {
+        lock.lock(); speechProbabilityValue = value; lock.unlock()
+    }
+
+    func setLevel(_ value: Double) {
+        lock.lock(); level = value; lock.unlock()
+    }
 }
 
 final class FakeRefiner: RefinePort, @unchecked Sendable {
