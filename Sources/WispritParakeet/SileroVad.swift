@@ -22,15 +22,28 @@ public actor SileroVadScorer: VadScoring {
         WispritPaths.stateDir.appendingPathComponent("models/vad.downloaded")
     }
 
-    /// Where FluidAudio's ModelHub keeps the compiled model.
-    public static var cacheDirectory: URL {
+    /// FluidAudio's base directory; its ModelHub resolves `Models/silero-vad`
+    /// beneath it.
+    public static var fluidAudioBaseDirectory: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("FluidAudio/Models/silero-vad-coreml", isDirectory: true)
+            .appendingPathComponent("FluidAudio", isDirectory: true)
     }
 
+    /// Where the compiled model actually lands (verified on disk 2026-08-24:
+    /// the local folder is `silero-vad`, not the HF repo's `-coreml` name).
+    public static var cacheDirectory: URL {
+        fluidAudioBaseDirectory.appendingPathComponent("Models/silero-vad", isDirectory: true)
+    }
+
+    /// The marker AND a compiled model actually on disk. This gate is what
+    /// keeps `begin()` a file read: ModelHub's loader "handles downloading if
+    /// needed" even on the from-directory path, so an evicted cache must fail
+    /// HERE, before the loader could reach for the network.
     public static var isDownloaded: Bool {
-        FileManager.default.fileExists(atPath: markerURL.path)
-            && FileManager.default.fileExists(atPath: cacheDirectory.path)
+        guard FileManager.default.fileExists(atPath: markerURL.path) else { return false }
+        let entries = (try? FileManager.default
+            .contentsOfDirectory(atPath: cacheDirectory.path)) ?? []
+        return entries.contains { $0.hasSuffix(".mlmodelc") }
     }
 
     private let log = WLog.logger("parakeet.vad")
@@ -45,10 +58,12 @@ public actor SileroVadScorer: VadScoring {
         if manager == nil {
             guard !loadFailed, Self.isDownloaded else { return false }
             do {
-                // Local directory load only: the consent receipt above is what
-                // makes this a file read, never a network call.
+                // `modelDirectory` is FluidAudio's BASE dir (ModelHub appends
+                // `Models/silero-vad` itself). `isDownloaded` above already
+                // proved the compiled model is on disk, so this is a file
+                // read — the loader's own download fallback can never fire.
                 manager = try await VadManager(config: .default,
-                                               modelDirectory: Self.cacheDirectory)
+                                               modelDirectory: Self.fluidAudioBaseDirectory)
             } catch {
                 loadFailed = true
                 log.error("silero load failed: \(String(describing: error), privacy: .public)")
