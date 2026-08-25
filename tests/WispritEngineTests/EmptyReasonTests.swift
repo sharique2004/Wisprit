@@ -151,6 +151,59 @@ final class EmptyReasonTests: XCTestCase {
         XCTAssertNil(EmptyReason.classify(result: truncated, heldMs: 2_000))
     }
 
+    // MARK: the voice-activity witness (hearing tier 3)
+
+    /// Soft speech under the RMS floor used to read as `silent` — the exact
+    /// shape the witness exists to expose as the defect it is.
+    func testSoftSpeechUnderTheMeterBecomesTheDefectWithAWitness() {
+        let soft = UtteranceResult(text: "", engine: "apple_live",
+                                   finalizeMs: 90, peakLevel: 0.005)
+        XCTAssertEqual(EmptyReason.classify(result: soft, heldMs: 2_000), .silent,
+                       "without the witness, the pre-witness reading stands")
+        XCTAssertEqual(EmptyReason.classify(result: soft, heldMs: 2_000,
+                                            vadSpeechRatio: 0.6),
+                       .producedNothing,
+                       "speech went in, nothing came out — the defect, not silence")
+    }
+
+    /// A crowded room clears the RMS threshold on its floor alone; a hold the
+    /// witness classified speechless is honestly silent, not an engine defect.
+    func testALoudSpeechlessRoomIsHonestlySilent() {
+        let loudRoom = UtteranceResult(text: "", engine: "apple_live",
+                                       finalizeMs: 90, peakLevel: 0.4)
+        XCTAssertEqual(EmptyReason.classify(result: loudRoom, heldMs: 2_000),
+                       .producedNothing, "pre-witness: the meter's word was final")
+        XCTAssertEqual(EmptyReason.classify(result: loudRoom, heldMs: 2_000,
+                                            vadSpeechRatio: 0.0),
+                       .silent)
+        XCTAssertEqual(EmptyReason.classify(result: loudRoom, heldMs: 500,
+                                            vadSpeechRatio: 0.0),
+                       .shortHold, "the short-hold split survives the witness")
+    }
+
+    /// The witness never outranks the fault reasons — a crash explains an
+    /// empty completely, whatever the room sounded like.
+    func testTheWitnessNeverOutranksAFaultReason() {
+        let crashed = UtteranceResult(text: "", engine: "apple_live",
+                                      finalizeMs: 90, crashed: true, peakLevel: 0.005)
+        XCTAssertEqual(EmptyReason.classify(result: crashed, heldMs: 2_000,
+                                            vadSpeechRatio: 0.9),
+                       .crashed)
+    }
+
+    /// The marginal-audio nag stands down when the witness says nothing was
+    /// said: nothing was swallowed, and "too faint" would blame a quiet user
+    /// for a loud room.
+    func testASpeechlessHoldIsNeverMarginal() {
+        XCTAssertTrue(MarginalAudio.isMarginal(peakLevel: 0.06, noiseFloor: 0.02),
+                      "the meter shape alone is marginal, pre-witness")
+        XCTAssertFalse(MarginalAudio.isMarginal(peakLevel: 0.06, noiseFloor: 0.02,
+                                                vadSpeechRatio: 0.0))
+        XCTAssertTrue(MarginalAudio.isMarginal(peakLevel: 0.06, noiseFloor: 0.02,
+                                               vadSpeechRatio: 0.5),
+                      "with speech in it, the marginal call stands")
+    }
+
     // MARK: on-disk vocabulary
 
     func testRawValuesAreTheOnDiskVocabulary() {

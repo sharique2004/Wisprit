@@ -784,7 +784,8 @@ public final class SessionController: @unchecked Sendable {
             // tell the user the right thing while we are at it: a microphone
             // that delivered nothing and a hold nobody spoke into are not the
             // same problem, and only one of them is ours.
-            let reason = EmptyReason.classify(result: result, heldMs: heldMs)
+            let reason = EmptyReason.classify(result: result, heldMs: heldMs,
+                                              vadSpeechRatio: audio.vadSpeechRatio)
             flashEmpty(reason, peakLevel: result.peakLevel, noiseFloor: noiseFloor)
             writeMetrics(heldMs: heldMs, result: result, postMs: 0, insertMs: 0,
                          outcome: "empty", releaseToTextMs: nil,
@@ -1429,7 +1430,8 @@ public final class SessionController: @unchecked Sendable {
         // on the generic line — it was not faint, and saying it was would be the
         // same untruth in the other direction.
         case .producedNothing where MarginalAudio.isMarginal(peakLevel: peakLevel,
-                                                            noiseFloor: noiseFloor):
+                                                            noiseFloor: noiseFloor,
+                                                            vadSpeechRatio: audio.vadSpeechRatio):
             if let percent = config.inputVolumeAdvisory() {
                 pill?.flashTooQuiet(Self.tooQuietMessage(inputVolumePercent: percent))
             } else {
@@ -1559,7 +1561,9 @@ public final class SessionController: @unchecked Sendable {
             // that ratio is what says whether the 0.12/5 thresholds describe the
             // failure class or merely a quiet room.
             marginalAudio: MarginalAudio.isMarginal(peakLevel: result.peakLevel,
-                                                    noiseFloor: noiseFloor) ? true : nil,
+                                                    noiseFloor: noiseFloor,
+                                                    vadSpeechRatio: audio.vadSpeechRatio)
+                ? true : nil,
             // The rescue's own pair. `rescue_normalized` appears on declined
             // rescues too (see `UtteranceResult.rescueGainDb`), so the rate of
             // amplification stays readable independently of whether the batch

@@ -38,6 +38,17 @@ public enum EmptyReason: String, Sendable, CaseIterable {
     /// worked and the analyzer still returned no result.
     case producedNothing = "produced_nothing"
 
+    /// The voice-activity witness's say in the level clause (hearing tier 3).
+    /// At least this share of windows classified speech overrules a quiet
+    /// meter: soft speech under the RMS floor is the exact shape the witness
+    /// exists to catch, and calling it `silent` hides the defect.
+    public static let witnessSpeechRatioFloor = 0.2
+    /// At most this share overrules a loud meter the other way: a crowded
+    /// room's floor clears the RMS threshold all on its own, and calling that
+    /// `produced_nothing` (or nagging "too faint") blames the engine for a
+    /// user who said nothing.
+    public static let witnessSilenceRatioCeiling = 0.05
+
     /// Label one finished utterance, or `nil` if it produced text (there is
     /// nothing to explain).
     ///
@@ -46,8 +57,13 @@ public enum EmptyReason: String, Sendable, CaseIterable {
     /// given a chance, and only once all three are ruled out does the audio
     /// level get to speak. `producedNothing` is the residue — no other reason
     /// applies — which is exactly what makes its rate the alarm worth watching.
+    ///
+    /// `vadSpeechRatio` is the witness's share of speech-classified windows,
+    /// nil when the model is not loaded — every caller that cannot supply one
+    /// gets exactly the pre-witness behavior.
     public static func classify(result: UtteranceResult, heldMs: Double,
-                                shortHoldMs: Double = 1000) -> EmptyReason? {
+                                shortHoldMs: Double = 1000,
+                                vadSpeechRatio: Double? = nil) -> EmptyReason? {
         guard result.text.trimmingCharacters(in: .whitespaces).isEmpty else { return nil }
         if result.crashed { return .crashed }
         if result.timedOut { return .timedOut }
@@ -56,6 +72,16 @@ public enum EmptyReason: String, Sendable, CaseIterable {
         // the level clause (whose evidence the switch invalidated).
         if result.sawConfigurationChange { return .deviceChanged }
         if result.peakLevel < SpeechAnalyzerEngine.voicedPeakThreshold {
+            // Soft speech under the RMS floor: the witness heard words, the
+            // engine returned nothing — that is the defect, not silence.
+            if let ratio = vadSpeechRatio, ratio >= witnessSpeechRatioFloor {
+                return .producedNothing
+            }
+            return heldMs < shortHoldMs ? .shortHold : .silent
+        }
+        // A loud meter with no speech in it: the crowded-room floor cleared
+        // the threshold, the user said nothing — honestly silent.
+        if let ratio = vadSpeechRatio, ratio < witnessSilenceRatioCeiling {
             return heldMs < shortHoldMs ? .shortHold : .silent
         }
         return .producedNothing
@@ -94,7 +120,16 @@ public enum MarginalAudio {
     /// at all — and guessing one from a fumbled press is how a real user with a
     /// quiet-but-working setup starts getting nagged. Same for a floor of zero
     /// (digital silence under the speech): nothing swallowed anything.
-    public static func isMarginal(peakLevel: Float, noiseFloor: Double?) -> Bool {
+    /// `vadSpeechRatio`: the witness's share of speech windows, nil without a
+    /// model. A hold the witness classified as speechless is not marginal
+    /// whatever the meter ratio says — nothing was said, so nothing was
+    /// swallowed, and the "too faint" nag would be blaming a quiet user for a
+    /// loud room.
+    public static func isMarginal(peakLevel: Float, noiseFloor: Double?,
+                                  vadSpeechRatio: Double? = nil) -> Bool {
+        if let ratio = vadSpeechRatio, ratio < EmptyReason.witnessSilenceRatioCeiling {
+            return false
+        }
         guard peakLevel >= SpeechAnalyzerEngine.voicedPeakThreshold,
               peakLevel < peakCeiling,
               let floor = noiseFloor, floor > 0 else { return false }
