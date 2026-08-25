@@ -195,8 +195,21 @@ One real prompt-tuning lead: `i phone → iPhone` (a casing+join edit the applie
 admits) was not emitted — candidate for a deliberate prompt revision with its
 anchor lock updated.
 
-**Remaining:** phase 6 (Silero VAD via the FluidAudio module + adaptive key-up
-grace), phase 7 (link WispritParakeet, swap the vocabulary channel), phase 8
-decision gate. Both 6 and 7 ride the same one-line Package.swift link, and both
-need their model downloads, which are user actions in-app by design. Sharique's
-six-cell A/B recording and the AirPods-connected miclab probe are still pending.
+**2026-08-24, second tranche — phases 6–7 landed:** WispritParakeet linked
+(one manifest line); the reconcile pass prefers the Parakeet channel when its
+models answer and falls back to DictationTranscriber otherwise; `Wisprit
+parakeet download` / `Wisprit vad download` are the explicit model fetches
+(pinned-manifest verified / consent-marker gated — the app itself never touches
+the network). The Silero witness (`VadMonitor` + `SileroVadScorer`) rides
+beside the RMS meter as pure metadata; the key-up grace grew its adaptive
+phase (`keyup_grace_adaptive`, VAD-arbitrated, RMS-vs-floor fallback,
+500 ms-clamped, `grace_extended_ms` measured); and the empty/marginal
+classifiers take the witness ratio — soft speech under the meter becomes the
+visible defect, a speechless loud room becomes honestly silent. The
+`empty_reason` distribution shifts once models are downloaded: a recorded
+series discontinuity.
+
+**Remaining:** phase 8's decision gate (B2 agreement mask vs C1 local model,
+judged end-to-end per the note above) — and the three user actions: `Wisprit
+parakeet download` + `Wisprit vad download` on this machine, the
+AirPods-connected `miclab` probe, and the six-cell A/B recording.
