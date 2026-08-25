@@ -85,6 +85,21 @@ public enum InputDevicePolicySettings: String, CaseIterable, Sendable {
     }
 }
 
+/// `parakeet_channel` — route the off-path vocabulary reconcile through the
+/// Parakeet TDT engine (corrections B1) instead of DictationTranscriber.
+/// Default TRUE, and harmless without models: the channel only activates once
+/// `Wisprit parakeet download` has fetched and verified them (the explicit
+/// user action the no-silent-downloads rule requires), and any nil answer
+/// falls back to the DictationTranscriber pass.
+public enum ParakeetChannelSettings {
+    public static let key = "parakeet_channel"
+    public static let defaultEnabled = true
+
+    public static func isEnabled(_ settings: Settings) -> Bool {
+        settings.bool(key, or: defaultEnabled)
+    }
+}
+
 /// `refine_backend` — which generator sits behind the refine cage.
 /// String-keyed like its siblings; unknown values read as `apple` so a
 /// hand-edited config never selects a backend that does not exist.

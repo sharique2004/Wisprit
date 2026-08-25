@@ -9,6 +9,7 @@ import WispritIMProtocol
 import WispritKit
 import WispritMacInput
 import WispritMacUI
+import WispritParakeet
 import WispritPersistence
 import WispritPolish
 import WispritPostProcess
@@ -313,6 +314,28 @@ public final class AppController: NSObject, NSApplicationDelegate {
             contextCapture.prewarm()
         }
 
+        // Corrections B1: the Parakeet reconcile channel, preferred by the
+        // AsrManagerPort when it answers (~300 ms retro vs seconds, 14 vs 8
+        // spike-corpus hits). Constructed only when the models are already
+        // downloaded AND verified — `Wisprit parakeet download` is the
+        // explicit user action; nothing here ever touches the network. The
+        // first-ever warmup compiles CoreML (~16 s once per machine), so it
+        // runs detached at launch, off every path the user can feel.
+        var parakeetChannel: ParakeetVocabularyChannel?
+        if ParakeetChannelSettings.isEnabled(settings),
+           ParakeetModelStore(modelsDir: ParakeetModelStore.productionModelsDir)
+               .state() == .verified {
+            let channel = ParakeetVocabularyChannel(
+                decoder: ParakeetLiveDecoder(modelsDir: ParakeetModelStore.productionModelsDir),
+                terms: {
+                    dictionary.learnedEntries().filter { !$0.isPending }.map {
+                        ParakeetTerm(text: $0.term, aliases: $0.hear)
+                    }
+                })
+            parakeetChannel = channel
+            Task.detached(priority: .utility) { await channel.warmup() }
+        }
+
         // One pill port for every off-main producer — the session thread and
         // the edit-capture answers both speak through it.
         let pillPort = MainThreadPill(pill, isSuppressed: { settings.pillHidden })
@@ -339,7 +362,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
         self.session = SessionController(
             events: events,
-            asr: AsrManagerPort(asr),
+            asr: AsrManagerPort(asr, parakeet: parakeetChannel),
             audio: MicCapturePort(capture, secondary: secondary),
             inserter: SettingsInserterPort(inserter: Inserter(), settings: settings),
             history: history,

@@ -3,6 +3,7 @@ import WispritDictionary
 import WispritEngine
 import WispritKit
 import WispritMacInput
+import WispritParakeet
 import WispritPersistence
 import WispritRefine
 
@@ -255,7 +256,18 @@ extension DictionaryStore: VocabularyPort {
 
 public struct AsrManagerPort: AsrPort {
     let manager: AsrManager
-    public init(_ manager: AsrManager) { self.manager = manager }
+    /// The Parakeet reconcile channel (corrections B1) — preferred when wired
+    /// and its models answer, because it is an order of magnitude faster
+    /// (~300 ms vs seconds) and measurably higher-recall (14 vs 8 hits on the
+    /// spike corpus), so retro edits land while the text is still owned.
+    /// nil result → the DictationTranscriber channel, exactly as before: a
+    /// user who never downloaded the models keeps yesterday's behavior.
+    let parakeet: (any ParakeetReconciling)?
+
+    public init(_ manager: AsrManager, parakeet: (any ParakeetReconciling)? = nil) {
+        self.manager = manager
+        self.parakeet = parakeet
+    }
 
     public func begin(onPartial: @escaping @Sendable (String) -> Void) async {
         await manager.begin(onPartial: onPartial)
@@ -265,7 +277,16 @@ public struct AsrManagerPort: AsrPort {
     public func cancel() async { await manager.cancel() }
     public func reconcileVocabulary(_ retained: RetainedUtterance,
                                     extraTerms: [String]) async -> VocabularyReconciliation? {
-        await manager.reconcileVocabulary(retained, extraTerms: extraTerms)
+        if let parakeet,
+           let reconciled = await parakeet.reconcile(pcm: retained.pcm, extraTerms: extraTerms) {
+            // Field-for-field by design — the shape is the contract
+            // (ParakeetReconciliation's own doc).
+            return VocabularyReconciliation(transcript: reconciled.transcript,
+                                            termHits: reconciled.termHits,
+                                            termCount: reconciled.termCount,
+                                            elapsedMs: reconciled.elapsedMs)
+        }
+        return await manager.reconcileVocabulary(retained, extraTerms: extraTerms)
     }
 }
 

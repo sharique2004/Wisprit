@@ -64,6 +64,12 @@ let package = Package(
                 "WispritPersistence", "WispritRefine", "WispritEngine", "WispritEval",
                 "WispritContext",
                 "WispritMacInput", "WispritMacUI", "WispritPolish", "WispritIMProtocol",
+                // The adoption recipe's one manifest line
+                // (ParakeetVocabularyChannel.swift §Adoption): the FluidAudio
+                // xcframework now rides the install; the MODELS stay
+                // download-on-demand (`Wisprit parakeet download`), so the
+                // opt-in cost is disk for the framework, never silent network.
+                "WispritParakeet",
             ],
             swiftSettings: v5),
 

@@ -28,6 +28,8 @@ enum WispritMacMain {
             exit(runBootstrap())
         case "miclab":
             exit(MicLab.run(arguments: Array(arguments.dropFirst())))
+        case "parakeet":
+            exit(ParakeetCommand.run(arguments: Array(arguments.dropFirst())))
         case "hotkey":
             exit(runHotkeySmoke(arguments: Array(arguments.dropFirst())))
         case "insert":
@@ -62,6 +64,10 @@ enum WispritMacMain {
                                   report|all|record|verify) — see `Wisprit eval`
                                   for flags; record/verify are the human corpus
           Wisprit bootstrap       create ~/.wisprit and seed config + dictionary
+          Wisprit parakeet [status|download]
+                                  the Parakeet reconcile channel's models —
+                                  download is explicit, verified against the
+                                  pinned manifest, and never happens on its own
           Wisprit hotkey [secs]   print hotkey events (needs WISPRIT_MANUAL_INPUT=1)
           Wisprit insert "text"   insert text after a 3 s countdown (same gate)
 
