@@ -12,10 +12,14 @@ import WispritKit
 ///   hardcodes the Application Support cache — and each term encoded into
 ///   `ctcTokenIds` by hand (the ≈20 lines the spike promised).
 /// * Rescorer: `spotterRescueEnabled: false` is mandatory (vendor's own
-///   #702/#724 guidance; the spike measured 50 → 23 FPs), thresholds from
-///   `ContextBiasingConstants.rescorerConfig(forVocabSize:)`, and ONLY
-///   `ctcTokenEvaluateCandidates` is called — the evidence API. The rescored
-///   text never exists in this process.
+///   #702/#724 guidance; the spike measured 50 → 23 FPs). `confidentWordBiasGate`
+///   stays on — v0.18.2's default, the "no context bias against a word TDT
+///   heard confidently" fix. Thresholds are `VocabularyBoostingSession.Thresholds`
+///   filled with the size-config cbw/similarity and the spike's 0.10 s margin
+///   (the session's own 0.5 s default belongs to the rewrite API). ONLY
+///   `ctcTokenEvaluateCandidates` is called. `ctcTokenRescore` and
+///   `VocabularyBoostingSession.rescore` are not: those return rewritten text,
+///   and the reconciler remains the only writer.
 ///
 /// Zero-network double lock: `AsrModels.load` routes files through ModelHub,
 /// which silently downloads anything missing. Before ANY FluidAudio call this
@@ -46,6 +50,7 @@ public actor ParakeetLiveDecoder: ParakeetDecoding {
         let context: CustomVocabularyContext
         let rescorer: VocabularyRescorer
         let sizeConfig: ContextBiasingConstants.VocabSizeConfig
+        let thresholds: VocabularyBoostingSession.Thresholds
     }
 
     private let store: ParakeetModelStore
@@ -85,14 +90,18 @@ public actor ParakeetLiveDecoder: ParakeetDecoding {
             return ParakeetDecodeOutput(transcript: result.text)
         }
 
+        // Evidence only. Do not call `ctcTokenRescore` or `session.rescore` —
+        // both hand back a rewritten transcript, which this process must not have.
+        let thresholds = vocabulary.thresholds
         let evaluated = vocabulary.rescorer.ctcTokenEvaluateCandidates(
             transcript: result.text,
             tokenTimings: timings,
             logProbs: spot.logProbs,
             frameDuration: spot.frameDuration,
-            cbw: vocabulary.sizeConfig.cbw,
-            marginSeconds: ContextBiasingConstants.defaultMarginSeconds,
-            minSimilarity: vocabulary.sizeConfig.minSimilarity)
+            cbw: thresholds.cbw ?? vocabulary.sizeConfig.cbw,
+            marginSeconds: thresholds.marginSeconds,
+            minSimilarity: max(thresholds.minSimilarity ?? vocabulary.sizeConfig.minSimilarity,
+                               vocabulary.context.minSimilarity))
 
         let evidence = evaluated.candidates.map { candidate in
             ParakeetSpotEvidence(
@@ -160,14 +169,24 @@ public actor ParakeetLiveDecoder: ParakeetDecoding {
         }
         let context = CustomVocabularyContext(terms: vocabularyTerms)
         let sizeConfig = ContextBiasingConstants.rescorerConfig(forVocabSize: vocabularyTerms.count)
+        // Spotter rescue stays off. The confident-word gate is the v0.18.2
+        // default and is named here so a later default flip cannot turn it off
+        // by silence. The margin stays the spike's 0.10 s, not the rewrite
+        // session's 0.5 s default.
+        let thresholds = VocabularyBoostingSession.Thresholds(
+            cbw: sizeConfig.cbw,
+            minSimilarity: sizeConfig.minSimilarity,
+            marginSeconds: ContextBiasingConstants.defaultMarginSeconds)
         let rescorer = try await VocabularyRescorer.create(
             spotter: stack.spotter,
             vocabulary: context,
-            config: VocabularyRescorer.Config(spotterRescueEnabled: false),
+            config: VocabularyRescorer.Config(spotterRescueEnabled: false,
+                                             confidentWordBiasGate: true),
             ctcModelDirectory: stack.ctcDirectory)
 
         let built = VocabularyStack(terms: terms, context: context,
-                                    rescorer: rescorer, sizeConfig: sizeConfig)
+                                    rescorer: rescorer, sizeConfig: sizeConfig,
+                                    thresholds: thresholds)
         vocabularyStack = built
         return built
     }

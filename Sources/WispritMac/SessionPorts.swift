@@ -108,11 +108,21 @@ public protocol RefinePort: Sendable {
     /// Prewarm at record start so the model loads during the hold.
     func begin() async
     func refine(_ raw: String,
-                interrupt: @escaping @Sendable () -> InterruptSignal) async -> RefineResult
+                interrupt: @escaping @Sendable () -> InterruptSignal,
+                constraints: EditConstraints?) async -> RefineResult
     func cancel() async
     /// nil while the availability probe is still running (the menu shows the
     /// toggle anyway; only an explicit false swaps in the disabled row).
     func availability() async -> Bool?
+}
+
+extension RefinePort {
+    /// The default backend passes nil constraints. Conformers that only have
+    /// the full signature still get this short form.
+    public func refine(_ raw: String,
+                       interrupt: @escaping @Sendable () -> InterruptSignal) async -> RefineResult {
+        await refine(raw, interrupt: interrupt, constraints: nil)
+    }
 }
 
 public protocol InsertPort: Sendable {
@@ -308,8 +318,9 @@ public struct RefinerPort: RefinePort {
 
     public func begin() async { await refiner.begin() }
     public func refine(_ raw: String,
-                       interrupt: @escaping @Sendable () -> InterruptSignal) async -> RefineResult {
-        await refiner.refine(raw, interrupt: interrupt)
+                       interrupt: @escaping @Sendable () -> InterruptSignal,
+                       constraints: EditConstraints?) async -> RefineResult {
+        await refiner.refine(raw, interrupt: interrupt, editConstraints: constraints)
     }
     public func cancel() async { await refiner.cancel() }
     public func availability() async -> Bool? { await refiner.availability }

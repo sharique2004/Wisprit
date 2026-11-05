@@ -57,6 +57,7 @@ final class SessionControllerTests: XCTestCase {
              adaptiveGrace: Bool = false,
              inputWarning: @escaping @Sendable () -> String? = { nil },
              inputVolumeAdvisory: @escaping @Sendable () -> Int? = { nil },
+             editScriptGates: @escaping @Sendable () -> Bool = { false },
              // Swap in a different pill for the tests whose subject is what the
              // bubble renders rather than which calls it received.
              pillPort: (any PillPort)? = nil) {
@@ -92,7 +93,8 @@ final class SessionControllerTests: XCTestCase {
                     releaseGrace: releaseGrace,
                     adaptiveGrace: adaptiveGrace,
                     inputWarning: inputWarning,
-                    inputVolumeAdvisory: inputVolumeAdvisory))
+                    inputVolumeAdvisory: inputVolumeAdvisory,
+                    editScriptGates: editScriptGates))
             inserter.deferredLabel = { [weak session] in session?.deferredLabel }
         }
 
@@ -124,6 +126,38 @@ final class SessionControllerTests: XCTestCase {
         XCTAssertEqual(h.inserter.inserted, ["hello world"])
         XCTAssertEqual(h.history.added.map(\.text), ["hello world"])
         XCTAssertTrue(h.pill.snapshot().contains("flashSuccess"))
+    }
+
+    /// Confidence on the result is telemetry. The default backend is not handed
+    /// constraints, and the inserted string is the postprocess of the transcript.
+    func testDefaultBackendDoesNotConsultConfidence() {
+        let h = Harness()
+        h.asr.result = UtteranceResult(
+            text: "um hello world", engine: "apple_live", finalizeMs: 137,
+            confidence: TranscriptionConfidenceSummary(
+                runCount: 1, fractionBelowLoggingBucket: 0, minimumConfidence: 0.99),
+            confidenceRuns: [TranscriptionConfidenceRun(
+                utf16Location: 3, utf16Length: 5, confidence: 0.99)])
+        h.refiner.transform = { RefineResult(text: $0, outcome: .applied) }
+        h.utterance()
+        XCTAssertNil(h.refiner.lastConstraints)
+        XCTAssertEqual(h.inserter.inserted, ["hello world"])
+    }
+
+    /// `apple_edits` receives the runs. The fake refiner does not apply them,
+    /// so the inserted text stays the same string the default path produced.
+    func testEditScriptGatesForwardRunsAndDoNotChangeInsertedText() {
+        let h = Harness(editScriptGates: { true })
+        let runs = [TranscriptionConfidenceRun(utf16Location: 3, utf16Length: 5, confidence: 0.1)]
+        h.asr.result = UtteranceResult(
+            text: "um hello world", engine: "apple_live", finalizeMs: 137,
+            confidenceRuns: runs)
+        h.refiner.transform = { RefineResult(text: $0, outcome: .applied) }
+        h.utterance()
+        XCTAssertEqual(h.refiner.lastConstraints?.runs, runs)
+        XCTAssertNil(h.refiner.lastConstraints?.peer)
+        XCTAssertEqual(h.inserter.inserted, ["hello world"])
+        XCTAssertEqual(h.asr.reconcileTally, 0, "the harness leaves reconcile off, so no peer task starts")
     }
 
     func testBacktrackAndPressEnterWhenSmartFormattingIsOn() {

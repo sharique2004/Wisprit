@@ -46,7 +46,7 @@ public actor SystemPolishGenerator: PolishGenerating {
         }
 
         // One session per request: instructions are per-mode, and a reused
-        // session would spend the shared 4096-token context on the previous
+        // session would spend the model's context window on the previous
         // transcript. There is no prewarm — polish starts the moment the user
         // picks a mode, so there is no hold to warm up during.
         let live = LanguageModelSession(model: model,

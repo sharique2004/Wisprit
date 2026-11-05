@@ -43,7 +43,10 @@ public enum PolishFailureKind: Sendable, Equatable {
     case empty
     /// Apple Intelligence off / assets missing / device unsupported.
     case unavailable(String)
-    /// Past the word cap: input + output share one 4096-token context.
+    /// Past the word cap. The cap is a latency limit. The on-device window is
+    /// `SystemLanguageModel.contextSize` (macOS 26 SDK; the 26.0 back-deploy
+    /// returns 4096, and 26.4+ reports the model). Polish still refuses on the
+    /// word cap rather than truncating.
     case tooLong(Int)
     /// The model did not finish inside the budget.
     case timeout
@@ -107,10 +110,10 @@ public enum PolishResult: Sendable, Equatable {
 /// the same discipline as `RefineConfiguration`. Non-positive numbers fall back
 /// to the defaults.
 public struct PolishConfiguration: Sendable, Equatable {
-    /// Word cap. Polish reads whole transcripts out of history, and input +
-    /// instructions + output share one 4096-token context; past this the
-    /// request would be truncated rather than refused, which silently loses the
-    /// tail of the user's text.
+    /// Word cap — a latency limit, not a hardcoded context window. The window
+    /// is `SystemLanguageModel.contextSize` (read at runtime; 4096 is only the
+    /// back-deployed value before macOS 26.4). Past this cap the request is
+    /// refused rather than truncated, which would silently lose the tail.
     public var maxWords: Int
     /// Hard ceiling per request. 30 s is `polish._TIMEOUT_S`; polish is a
     /// deliberate, off-path action, so it may wait far longer than refine's 12 s.

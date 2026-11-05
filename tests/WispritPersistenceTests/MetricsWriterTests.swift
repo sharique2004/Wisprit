@@ -507,6 +507,26 @@ final class MetricsWriterTests: XCTestCase {
         XCTAssertTrue(line.contains(#""timed_out": true"#), line)
     }
 
+    func testConfidenceSummaryIsOmittedUntilARunExists() {
+        let absent = MetricsRecord(
+            ts: 0, heldMs: 1, engine: "apple_live", finalizeMs: 1, timedOut: false,
+            postMs: 0, insertMs: 0, outcome: "paste", chars: 4).jsonLine()
+        XCTAssertFalse(absent.contains("conf_runs"))
+        XCTAssertFalse(absent.contains("conf_below"))
+        XCTAssertFalse(absent.contains("conf_min"))
+
+        let present = MetricsRecord(
+            ts: 0, heldMs: 1, engine: "apple_live", finalizeMs: 1, timedOut: false,
+            postMs: 0, insertMs: 0, outcome: "paste", chars: 4,
+            confidenceRunCount: 2, confidenceBelowFraction: 0.5, confidenceMinimum: 0.25).jsonLine()
+        XCTAssertTrue(present.contains(#""conf_runs": 2"#), present)
+        XCTAssertTrue(present.contains(#""conf_below": 0.5000"#) || present.contains(#""conf_below": 0.5"#), present)
+        XCTAssertTrue(present.contains("conf_min"), present)
+        // Append-only: the new keys follow grace, and a row without them is a prefix
+        // of the schema. The absent row must not grow a trailing key.
+        XCTAssertFalse(absent.contains("conf_"))
+    }
+
     // MARK: Python round(x, 1) parity
 
     func testRoundingMatchesPythonRoundToOneDecimal() {

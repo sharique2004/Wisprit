@@ -454,7 +454,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 inputWarning: { [weak capture] in
                     narrowbandWarner.warning(negotiatedRateHz: capture?.negotiatedRateHz)
                 },
-                inputVolumeAdvisory: { inputVolumeAdvisor.lowVolumePercent() }))
+                inputVolumeAdvisory: { inputVolumeAdvisor.lowVolumePercent() },
+                editScriptGates: {
+                    settings.string(RefineBackendSettings.key, or: RefineBackendSettings.apple)
+                        == RefineBackendSettings.appleEdits
+                }))
 
         super.init()
 

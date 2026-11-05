@@ -133,6 +133,12 @@ public struct MetricsRecord: Sendable {
     public var vadFirstSpeechMs: Double?
     public var vadSpeechRatio: Double?
     public var graceExtendedMs: Double?
+    // Finalized SpeechTranscriber confidence, utterance rows only. Omitted
+    // when the recognizer attached no attribute. A logging bucket, not a gate:
+    // these fields never decide what was inserted.
+    public var confidenceRunCount: Int?
+    public var confidenceBelowFraction: Double?
+    public var confidenceMinimum: Double?
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
@@ -162,7 +168,10 @@ public struct MetricsRecord: Sendable {
                 rescueSource: String? = nil,
                 vadFirstSpeechMs: Double? = nil,
                 vadSpeechRatio: Double? = nil,
-                graceExtendedMs: Double? = nil) {
+                graceExtendedMs: Double? = nil,
+                confidenceRunCount: Int? = nil,
+                confidenceBelowFraction: Double? = nil,
+                confidenceMinimum: Double? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -212,6 +221,9 @@ public struct MetricsRecord: Sendable {
         self.vadFirstSpeechMs = vadFirstSpeechMs
         self.vadSpeechRatio = vadSpeechRatio
         self.graceExtendedMs = graceExtendedMs
+        self.confidenceRunCount = confidenceRunCount
+        self.confidenceBelowFraction = confidenceBelowFraction
+        self.confidenceMinimum = confidenceMinimum
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -299,6 +311,16 @@ public struct MetricsRecord: Sendable {
         if let graceExtendedMs, graceExtendedMs > 0 {
             entry["grace_extended_ms"] = .double(MetricsWriter.round1(graceExtendedMs))
         }
+        // Confidence summary (logging bucket only), after every key above.
+        // Absent when the recognizer attached no attribute, so every earlier
+        // row stays a byte-for-byte prefix of this schema.
+        if let confidenceRunCount { entry["conf_runs"] = .int(confidenceRunCount) }
+        if let confidenceBelowFraction {
+            entry["conf_below"] = .double(MetricsWriter.round4(confidenceBelowFraction))
+        }
+        if let confidenceMinimum {
+            entry["conf_min"] = .double(MetricsWriter.round4(confidenceMinimum))
+        }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -369,6 +391,10 @@ public enum MetricsField {
     public static let vadFirstSpeechMs = "vad_first_speech_ms"
     public static let vadSpeechRatio = "vad_speech_ratio"
     public static let graceExtendedMs = "grace_extended_ms"
+    // Logging-only confidence summary. Not a gate.
+    public static let confidenceRunCount = "conf_runs"
+    public static let confidenceBelowFraction = "conf_below"
+    public static let confidenceMinimum = "conf_min"
 }
 
 public final class MetricsWriter: @unchecked Sendable {

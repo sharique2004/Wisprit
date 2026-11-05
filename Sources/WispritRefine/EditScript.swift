@@ -60,12 +60,20 @@ public enum EditScriptApplier {
     /// the one evidence source that can admit an arbitrary-looking repair
     /// ("in forge" → "InsForge").
     public static func apply(_ edits: [EditScriptEdit], to text: String,
-                             isKnownTerm: (String) -> Bool) -> Outcome {
+                             isKnownTerm: (String) -> Bool,
+                             constraints: EditConstraints? = nil) -> Outcome {
+        // Spelled letter-runs stay on the refine bypass. If a run is in the
+        // transcript anyway, no edit lands — including a Parakeet collapse of
+        // "J-S-O-N" toward "JSON", which must not become an edit opportunity.
+        if RefineGuards.hasLetterRun(text) {
+            return Outcome(text: text, applied: 0, dropped: edits.count)
+        }
         var current = text
         var applied = 0
         var dropped = 0
         for edit in edits.prefix(maximumEdits) {
-            if applyOne(edit, to: &current, isKnownTerm: isKnownTerm) {
+            if applyOne(edit, to: &current, original: text,
+                        isKnownTerm: isKnownTerm, constraints: constraints) {
                 applied += 1
             } else {
                 dropped += 1
@@ -76,7 +84,9 @@ public enum EditScriptApplier {
     }
 
     private static func applyOne(_ edit: EditScriptEdit, to text: inout String,
-                                 isKnownTerm: (String) -> Bool) -> Bool {
+                                 original: String,
+                                 isKnownTerm: (String) -> Bool,
+                                 constraints: EditConstraints?) -> Bool {
         let find = edit.find.trimmingCharacters(in: .whitespacesAndNewlines)
         let replace = edit.replace.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !find.isEmpty, find != replace else { return false }
@@ -88,6 +98,12 @@ public enum EditScriptApplier {
         // "well x-ray"/"WellX-ray" incident generalizes here too). No anchor,
         // no edit: an unanchored repair is the model imagining a transcript.
         guard let range = anchoredRange(of: find, in: text) else { return false }
+
+        if let constraints, !isFillerDeletion(findWords, replace: replace),
+           !passesEditGates(find: find, replace: replace, original: original,
+                            constraints: constraints, isKnownTerm: isKnownTerm) {
+            return false
+        }
 
         guard admissible(findWords: findWords, replace: replace,
                          range: range, in: text, isKnownTerm: isKnownTerm)
@@ -109,6 +125,44 @@ public enum EditScriptApplier {
             text.replaceSubrange(range, with: replace)
         }
         return true
+    }
+
+    /// Filler deletions are unconditional: confidence and agreement do not
+    /// veto them. Deterministic postprocess is a different stage and is not
+    /// this function.
+    private static func isFillerDeletion(_ findWords: [String], replace: String) -> Bool {
+        replace.isEmpty && findWords.allSatisfy { deletableFillers.contains($0) }
+    }
+
+    /// `apple_edits` only, and only when `constraints` was supplied. Nil
+    /// constraints — the default backend never builds them — does not call this.
+    ///
+    /// Confidence is judged on the original transcript, not the string as
+    /// earlier edits have mutated it. No original anchor means the span is not
+    /// entirely high-confidence and not an agreement span.
+    private static func passesEditGates(find: String, replace: String, original: String,
+                                        constraints: EditConstraints,
+                                        isKnownTerm: (String) -> Bool) -> Bool {
+        guard let originalRange = anchoredRange(of: find, in: original) else { return true }
+        let utf16 = utf16Range(originalRange, in: original)
+        let slice = String(original[originalRange])
+        let high = TranscriptionConfidence.isEntirelyAtOrAboveEditGate(utf16, runs: constraints.runs)
+        if let agreement = constraints.agreement {
+            if agreement.isAgreementSpan(utf16) { return false }
+            if high && !agreement.wouldAccept(find: slice, replacement: replace) { return false }
+            return true
+        }
+        if high && !isKnownTerm(replace) { return false }
+        return true
+    }
+
+    private static func utf16Range(_ range: Range<String.Index>, in text: String) -> Range<Int> {
+        let view = text.utf16
+        let lower = view.distance(from: view.startIndex,
+                                  to: range.lowerBound.samePosition(in: view) ?? view.startIndex)
+        let upper = view.distance(from: view.startIndex,
+                                  to: range.upperBound.samePosition(in: view) ?? view.endIndex)
+        return lower..<upper
     }
 
     /// The four admissible repair shapes, in the order they are cheapest to

@@ -1,6 +1,7 @@
 #if canImport(FoundationModels)
 import Foundation
 import FoundationModels
+import WispritCorrections
 import WispritKit
 
 /// The edit-script instructions — the OTHER refine backend's contract
@@ -80,6 +81,7 @@ public actor EditScriptGenerator: RefineGenerating {
     private let log = WLog.logger("refine.edits")
     private let isKnownTerm: @Sendable (String) -> Bool
     private let candidateTerms: @Sendable () -> [String]
+    private var didLogContextSize = false
 
     /// `isKnownTerm` is the applier's dictionary evidence; `candidateTerms`
     /// feeds the prompt's biasing list (top-ranked vocabulary, may be empty).
@@ -90,6 +92,10 @@ public actor EditScriptGenerator: RefineGenerating {
     }
 
     public func probe() async -> RefineAvailability {
+        if !didLogContextSize {
+            didLogContextSize = true
+            log.info("FoundationModels contextSize=\(self.model.contextSize, privacy: .public)")
+        }
         switch SystemLanguageModel.default.availability {
         case .available:
             return RefineAvailability(available: true)
@@ -106,6 +112,10 @@ public actor EditScriptGenerator: RefineGenerating {
     }
 
     public func generate(_ transcript: String) async throws -> String {
+        try await generate(transcript, constraints: nil)
+    }
+
+    public func generate(_ transcript: String, constraints: EditConstraints?) async throws -> String {
         let text = transcript.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { throw RefineError.emptyResponse }
         if case .unavailable(let reason) = model.availability {
@@ -131,7 +141,8 @@ public actor EditScriptGenerator: RefineGenerating {
             let edits = response.content.edits.map {
                 EditScriptEdit(find: $0.find, replace: $0.replace)
             }
-            let outcome = EditScriptApplier.apply(edits, to: text, isKnownTerm: isKnownTerm)
+            let outcome = EditScriptApplier.apply(edits, to: text, isKnownTerm: isKnownTerm,
+                                                 constraints: resolved(constraints, transcript: text))
             if outcome.applied > 0 || outcome.dropped > 0 {
                 log.info("edit script: \(outcome.applied) applied, \(outcome.dropped) dropped")
             }
@@ -145,6 +156,34 @@ public actor EditScriptGenerator: RefineGenerating {
 
     public func discard() async {
         session = nil
+    }
+
+    public func exceedsContext(transcript: String) async -> Bool {
+        let window = model.contextSize
+        guard #available(macOS 26.4, iOS 26.4, *) else { return false }
+        let prompt = RefineEditInstructions.userTurn(for: transcript, candidateTerms: candidateTerms())
+        let reserved = RefinePrompt.maximumResponseTokens(for: transcript)
+        do {
+            let instructionTokens = try await model.tokenCount(for: Instructions(RefineEditInstructions.text))
+            let promptTokens = try await model.tokenCount(for: prompt)
+            return instructionTokens + promptTokens + reserved > window
+        } catch {
+            log.error("tokenCount failed; the word cap remains the skip")
+            return false
+        }
+    }
+
+    /// Copy constraints and, if a peer transcript is already published, attach
+    /// the reconciler's agreement. Does not wait. A missing peer leaves the
+    /// confidence rule as the only extra gate.
+    private func resolved(_ constraints: EditConstraints?, transcript: String) -> EditConstraints? {
+        guard var constraints else { return nil }
+        if constraints.agreement == nil, let peer = constraints.peer?.current() {
+            constraints.agreement = VocabularyReconciler.agreement(
+                live: transcript, peer: peer.transcript, termHits: peer.termHits,
+                knownTerm: isKnownTerm)
+        }
+        return constraints
     }
 }
 #endif

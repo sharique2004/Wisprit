@@ -158,8 +158,8 @@ public enum RefineError: Error, Equatable {
 /// Lifecycle mirrors the subprocess one exactly: `prewarm()` at record start,
 /// one `generate` per utterance, `discard()` on skip/abort. One session per
 /// utterance is mandatory in-process too — `LanguageModelSession` accumulates a
-/// transcript, and a reused session would spend the shared 4096-token context
-/// on previous dictations.
+/// transcript, and a reused session would spend the model's context window
+/// (`SystemLanguageModel.contextSize`) on previous dictations.
 public protocol RefineGenerating: Sendable {
     /// Ask the system whether the model is usable right now.
     func probe() async -> RefineAvailability
@@ -168,6 +168,22 @@ public protocol RefineGenerating: Sendable {
     func prewarm() async
     /// Run one utterance. Consumes the prewarmed session.
     func generate(_ transcript: String) async throws -> String
+    /// Same as `generate(_:)`, plus edit-script constraints. The default
+    /// implementation ignores `constraints`, which is what the full-text
+    /// backend does: the default path must not consult the edit gate.
+    func generate(_ transcript: String, constraints: EditConstraints?) async throws -> String
+    /// True when instructions + the prompt this generator will send + its
+    /// reserved output budget exceed `contextSize`. The default is false so a
+    /// fake, or an OS without `tokenCount`, keeps the word-cap skip only.
+    func exceedsContext(transcript: String) async -> Bool
     /// Drop any live session (record cancelled, refine skipped, shutdown).
     func discard() async
+}
+
+extension RefineGenerating {
+    public func generate(_ transcript: String, constraints: EditConstraints?) async throws -> String {
+        try await generate(transcript)
+    }
+
+    public func exceedsContext(transcript: String) async -> Bool { false }
 }

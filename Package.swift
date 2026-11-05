@@ -17,11 +17,12 @@ let package = Package(
     ],
     dependencies: [
         // Parakeet TDT v3 (vocabulary-channel replacement, spike-gated; see
-        // docs/research/spikes-parakeet.md). Pinned to the MeetingScribe-
-        // validated revision (v0.15.5-32). Build-time fetch only — runtime
-        // model downloads stay an explicit user action in ParakeetModelStore.
+        // docs/research/spikes-parakeet.md). Pinned to FluidAudio v0.18.2
+        // (1 Nov 2026, commit e396cf78 — the peeled tag, not the tag object).
+        // Build-time fetch only — runtime model downloads stay an explicit
+        // user action in ParakeetModelStore. Asset hashes stay the v3 int8 set.
         .package(url: "https://github.com/FluidInference/FluidAudio.git",
-                 revision: "5390df9752c8fc583596018360c5fd70d6fa6c75"),
+                 revision: "e396cf780c4abf8e395087467c0585d3b0d17f68"),
     ],
     targets: [
         // Shared foundation — owned by the orchestrator, frozen for agents.
@@ -32,7 +33,7 @@ let package = Package(
         .target(name: "WispritDictionary", dependencies: ["WispritKit"], swiftSettings: v5),
         .target(name: "WispritCorrections", dependencies: ["WispritKit"], swiftSettings: v5),
         .target(name: "WispritPersistence", dependencies: ["WispritKit"], swiftSettings: v5),
-        .target(name: "WispritRefine", dependencies: ["WispritKit"], swiftSettings: v5),
+        .target(name: "WispritRefine", dependencies: ["WispritKit", "WispritCorrections"], swiftSettings: v5),
         .target(name: "WispritEngine", dependencies: ["WispritKit"], swiftSettings: v5),
         // Accuracy measurement: WER/CER/term-recall scoring, corpus model, scoreboard,
         // refine battery cases. Pure — no audio, no models, no network.

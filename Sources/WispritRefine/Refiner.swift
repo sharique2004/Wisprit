@@ -140,7 +140,8 @@ public actor Refiner {
     /// new dictation is queued: finish NOW with verbatim text). `.none` keeps
     /// waiting.
     public func refine(_ raw: String,
-                       interrupt: (@Sendable () -> InterruptSignal)? = nil) async -> RefineResult {
+                       interrupt: (@Sendable () -> InterruptSignal)? = nil,
+                       editConstraints: EditConstraints? = nil) async -> RefineResult {
         if raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             await cancel()
             return RefineResult(text: raw, outcome: .empty)
@@ -168,9 +169,16 @@ public actor Refiner {
         let words = RefineGuards.estimatedWords(raw)
         let config = configuration()
         if words > config.maxWords {
-            // Latency is generation-bound (~20 ms/word, serialized system-wide —
-            // parallel chunking measured to NOT help), and the shared context is
-            // 4096 tokens. Long dictations keep the fast deterministic path.
+            // Latency cap, not a context-window measurement. Generation is
+            // ~20 ms/word and serialized system-wide — parallel chunking
+            // measured to NOT help. Long dictations keep the fast path.
+            await cancel()
+            return RefineResult(text: raw, outcome: .tooLong)
+        }
+        if await generator.exceedsContext(transcript: raw) {
+            // Instructions + prompt + reserved output do not fit the model's
+            // own contextSize. Same verbatim outcome as the latency cap.
+            log.info("refine skipped: prompt exceeds contextSize")
             await cancel()
             return RefineResult(text: raw, outcome: .tooLong)
         }
@@ -178,7 +186,8 @@ public actor Refiner {
         let budget = min(Double(config.timeoutMs) / 1000.0,
                          Self.timeoutBase + Self.timeoutPerWord * Double(words))
 
-        switch await race(raw, deadlineSeconds: budget, interrupt: interrupt) {
+        switch await race(raw, deadlineSeconds: budget, interrupt: interrupt,
+                          constraints: editConstraints) {
         case .interrupted(let outcome):
             // Abandon the model: the generation task is cancelled and the
             // session dropped, so the next press prewarms a fresh one.
@@ -272,7 +281,8 @@ public actor Refiner {
     /// the poller races the generation task and cancels it on the way out.
     private func race(_ raw: String,
                       deadlineSeconds: Double,
-                      interrupt: (@Sendable () -> InterruptSignal)?) async -> RaceResult {
+                      interrupt: (@Sendable () -> InterruptSignal)?,
+                      constraints: EditConstraints?) async -> RaceResult {
         enum Leg: Sendable {
             case generation(Result<String, any Error>)
             case interrupted(RefineOutcome)
@@ -281,7 +291,9 @@ public actor Refiner {
         let generator = self.generator
         return await withTaskGroup(of: Leg.self) { group in
             group.addTask {
-                do { return .generation(.success(try await generator.generate(raw))) }
+                do {
+                    return .generation(.success(try await generator.generate(raw, constraints: constraints)))
+                }
                 catch { return .generation(.failure(error)) }
             }
             group.addTask {

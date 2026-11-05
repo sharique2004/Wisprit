@@ -426,4 +426,19 @@ final class VocabularyReconcilerTests: XCTestCase {
                        "a curly apostrophe folds exactly like a straight one")
         XCTAssertEqual(VocabularyReconciler.Tokenizer.normalForm("  —  "), "")
     }
+
+    func testAgreementUsesTheSamePlanAndFreezesMatchedTokens() {
+        let live = "Ping the in forge team about the timeline."
+        let peer = "Ping the InsForge team about the timeline."
+        let reading = VocabularyReconciler.agreement(
+            live: live, peer: peer, termHits: ["InsForge": 1], knownTerm: { _ in false })
+        XCTAssertEqual(reading.accepted.map(\.find), ["in forge"])
+        XCTAssertEqual(reading.accepted.map(\.replacement), ["InsForge"])
+        let ping = reading.tokens.first { $0.utf16.lowerBound == 0 }
+        XCTAssertEqual(ping?.agreed, true)
+        XCTAssertFalse(reading.isAgreementSpan(9..<17), "the disagreed block is not frozen")
+        XCTAssertTrue(reading.isAgreementSpan(0..<4))
+        XCTAssertTrue(reading.wouldAccept(find: "in forge", replacement: "InsForge"))
+        XCTAssertFalse(reading.wouldAccept(find: "in forge", replacement: "JSON"))
+    }
 }

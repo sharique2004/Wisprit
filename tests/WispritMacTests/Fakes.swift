@@ -221,6 +221,7 @@ final class FakeRefiner: RefinePort, @unchecked Sendable {
     private(set) var cancelCount = 0
     private(set) var refineCount = 0
     private(set) var lastInput: String?
+    private(set) var lastConstraints: EditConstraints?
     var availabilityValue: Bool?
 
     func begin() async { bump(&beginCount) }
@@ -228,8 +229,9 @@ final class FakeRefiner: RefinePort, @unchecked Sendable {
     func availability() async -> Bool? { readAvailability() }
 
     func refine(_ raw: String,
-                interrupt: @escaping @Sendable () -> InterruptSignal) async -> RefineResult {
-        let (honours, transform) = noteRefine(raw)
+                interrupt: @escaping @Sendable () -> InterruptSignal,
+                constraints: EditConstraints?) async -> RefineResult {
+        let (honours, transform) = noteRefine(raw, constraints: constraints)
         if honours {
             switch interrupt() {
             case .cancel: return RefineResult(text: raw, outcome: .cancelled)
@@ -249,10 +251,11 @@ final class FakeRefiner: RefinePort, @unchecked Sendable {
         return availabilityValue
     }
 
-    private func noteRefine(_ raw: String) -> (Bool, @Sendable (String) -> RefineResult) {
+    private func noteRefine(_ raw: String, constraints: EditConstraints?) -> (Bool, @Sendable (String) -> RefineResult) {
         lock.lock(); defer { lock.unlock() }
         refineCount += 1
         lastInput = raw
+        lastConstraints = constraints
         return (honoursInterrupt, transform)
     }
 }

@@ -242,6 +242,40 @@ public enum VocabularyReconciler {
         return VocabularyRetroPlan(edits: edits, refusal: edits.isEmpty ? firstRefusal : nil)
     }
 
+    /// Live-vs-peer agreement for the edit-script backend.
+    ///
+    /// Uses this file's tokenizer and LCS — not a second aligner. `accepted`
+    /// is exactly what `plan` would already write, so a high-confidence
+    /// disagreement is eligible only when this planner would have made that
+    /// substitution itself. Agreement tokens are untouchable by the caller.
+    public static func agreement(live: String,
+                                peer: String,
+                                termHits: [String: Int],
+                                knownTerm: (String) -> Bool) -> TranscriptAgreement {
+        let liveTokens = Tokenizer.tokens(in: live)
+        let otherTokens = Tokenizer.tokens(in: peer)
+        let matched = longestCommonSubsequence(liveTokens.map(\.normalized),
+                                               otherTokens.map(\.normalized))
+        let agreed = Set(matched.map(\.live))
+        let chars = Array(live)
+        let tokens = liveTokens.enumerated().map { index, token in
+            TranscriptAgreement.Token(utf16: utf16Range(token.range, chars: chars),
+                                     agreed: agreed.contains(index))
+        }
+        let plan = plan(inserted: live, reconciled: peer, termHits: termHits, knownTerm: knownTerm)
+        let accepted = plan.edits.map {
+            TranscriptAgreement.Accepted(find: $0.replace, replacement: $0.with)
+        }
+        return TranscriptAgreement(tokens: tokens, accepted: accepted)
+    }
+
+    /// Character-index range (into `Array(source)`) to a UTF-16 range in `source`.
+    private static func utf16Range(_ range: Range<Int>, chars: [Character]) -> Range<Int> {
+        let lower = String(chars[0..<range.lowerBound]).utf16.count
+        let length = String(chars[range]).utf16.count
+        return lower..<(lower + length)
+    }
+
     // MARK: - One block
 
     /// A run of tokens the two readings disagree about, bounded by tokens they

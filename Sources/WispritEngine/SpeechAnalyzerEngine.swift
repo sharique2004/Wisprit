@@ -43,11 +43,15 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
             log.error("SpeechTranscriber unavailable (needs a 16-core ANE; false on the Simulator)")
             return false
         }
+        // `.transcriptionConfidence` is module-wide: the SDK has no finals-only
+        // switch. Volatile partials still publish `String(characters)` and do
+        // not walk attributes, so live typing does not collect stats. The
+        // summary is read off finalized results only (SpeechConfidenceReader).
         let module = SpeechTranscriber(
             locale: Locale(identifier: settings.locale),
             transcriptionOptions: [],
             reportingOptions: [.volatileResults, .fastResults],
-            attributeOptions: [])
+            attributeOptions: [.transcriptionConfidence])
         guard let format = await SpeechAnalyzer.bestAvailableAudioFormat(compatibleWith: [module]) else {
             log.error("no compatible audio format for locale \(self.settings.locale, privacy: .public)")
             return false
@@ -64,9 +68,14 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
         let collector = Task {
             do {
                 for try await result in module.results {
-                    let text = String(result.text.characters)
+                    // Plain text either way. Attributes are inspected only on
+                    // finals; a volatile walk would sit on the live-typing path.
+                    let text = SpeechConfidenceReader.plainText(result.text)
                     if result.isFinal {
-                        if let full = await sink.appendFinal(text) { onPartial(full) }
+                        let runs = SpeechConfidenceReader.runs(in: result.text)
+                        if let full = await sink.appendFinal(text, confidenceRuns: runs) {
+                            onPartial(full)
+                        }
                     } else {
                         if let full = await sink.setVolatile(text) { onPartial(full) }
                     }
@@ -220,11 +229,14 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
         session.collector.cancel()
 
         let (finals, lastPartial, error) = await sink.snapshot()
+        let pieces = await sink.finalPieces()
+        let joined = FinalConfidence.joined(pieces)
         let finalizeMs = Date().timeIntervalSince(t0) * 1000.0
 
-        var text = finals.map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }
-            .joined(separator: " ")
+        // Same trim-and-join as before (`FinalConfidence.joinedText`). The
+        // confidence runs are indexed into that string and are not consulted
+        // when choosing the characters.
+        var text = joined.text
         let timedOut = !completed
         let crashed = completed && error != nil
         let starved = fedBytes < Self.minimumAudioBytes
@@ -250,13 +262,19 @@ public final class SpeechAnalyzerEngine: AsrEngine, @unchecked Sendable {
         if discardedTailMs != nil || droppedAudioMs != nil {
             log.warning("live feed lost audio (tail \(discardedTailMs ?? 0, format: .fixed(precision: 0)) ms, dropped \(droppedAudioMs ?? 0, format: .fixed(precision: 0)) ms) — the retained utterance is still complete")
         }
-        return UtteranceResult(text: text.trimmingCharacters(in: .whitespaces),
+        let spoken = text.trimmingCharacters(in: .whitespaces)
+        // Runs index the finalized prefix, before a salvaged volatile tail and
+        // before this outer trim (the join does not leave outer whitespace).
+        // Nothing here rewrites `spoken`.
+        return UtteranceResult(text: spoken,
                                engine: Self.engineName, finalizeMs: finalizeMs,
                                timedOut: timedOut, crashed: crashed,
                                starvedInput: starved, peakLevel: peakLevel,
                                producedNothing: producedNothing,
                                discardedTailMs: discardedTailMs,
-                               droppedAudioMs: droppedAudioMs)
+                               droppedAudioMs: droppedAudioMs,
+                               confidence: TranscriptionConfidence.summary(of: joined.runs),
+                               confidenceRuns: joined.runs)
     }
 
     public func cancel() async {
@@ -401,6 +419,7 @@ final class AudioMeter: @unchecked Sendable {
 /// Accumulates finals + the current volatile window and derives the text-so-far.
 actor TranscriptSink {
     private var finals: [String] = []
+    private var pieces: [FinalPiece] = []
     private var joinedFinals = ""
     private var volatileText = ""
     private var lastEmitted = ""
@@ -415,14 +434,19 @@ actor TranscriptSink {
     /// repeating itself would be the same defect in a smaller costume.
     private(set) var changes: UInt64 = 0
 
-    func appendFinal(_ text: String) -> String? {
+    func appendFinal(_ text: String,
+                     confidenceRuns: [TranscriptionConfidenceRun] = []) -> String? {
         changes &+= 1
         finals.append(text)
-        joinedFinals = finals.map { $0.trimmingCharacters(in: .whitespaces) }
-            .filter { !$0.isEmpty }.joined(separator: " ")
+        pieces.append(FinalPiece(text: text, runs: confidenceRuns))
+        joinedFinals = FinalConfidence.joinedText(finals)
         volatileText = ""
         return emit(joinedFinals)
     }
+
+    /// Final segments in arrival order, with whatever confidence they carried.
+    /// Empty runs mean the recognizer attached no attribute on that segment.
+    func finalPieces() -> [FinalPiece] { pieces }
 
     func setVolatile(_ text: String) -> String? {
         changes &+= 1

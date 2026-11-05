@@ -238,6 +238,10 @@ public final class SessionController: @unchecked Sendable {
         /// something — and read-only: nothing in Wisprit sets the slider.
         /// nil by default, exactly like `inputWarning`.
         public var inputVolumeAdvisory: @Sendable () -> Int?
+        /// True only when `refine_backend` is `apple_edits`. The default
+        /// (`apple`) leaves this false, and the session then passes nil edit
+        /// constraints — confidence does not change inserted text.
+        public var editScriptGates: @Sendable () -> Bool
 
         public init(holdDebounceMs: @escaping @Sendable () -> Double = { 150 },
                     isEnabled: @escaping @Sendable () -> Bool = { true },
@@ -251,7 +255,8 @@ public final class SessionController: @unchecked Sendable {
                     releaseGrace: TimeInterval = 0,
                     adaptiveGrace: Bool = false,
                     inputWarning: @escaping @Sendable () -> String? = { nil },
-                    inputVolumeAdvisory: @escaping @Sendable () -> Int? = { nil }) {
+                    inputVolumeAdvisory: @escaping @Sendable () -> Int? = { nil },
+                    editScriptGates: @escaping @Sendable () -> Bool = { false }) {
             self.holdDebounceMs = holdDebounceMs
             self.isEnabled = isEnabled
             self.postProcessOptions = postProcessOptions
@@ -265,6 +270,7 @@ public final class SessionController: @unchecked Sendable {
             self.adaptiveGrace = adaptiveGrace
             self.inputWarning = inputWarning
             self.inputVolumeAdvisory = inputVolumeAdvisory
+            self.editScriptGates = editScriptGates
         }
     }
 
@@ -683,13 +689,25 @@ public final class SessionController: @unchecked Sendable {
         if let refiner {
             let events = self.events
             let corrected = correction.text
+            // Nil on the default backend. `apple_edits` gets the finalized
+            // confidence runs and, when the vocabulary channel is on, a slot
+            // the off-path reconcile may fill. The slot is not awaited: Parakeet
+            // stays off the insert path. The post-insert reconcile below is
+            // unchanged and remains the only retro writer. This early pass is
+            // a second decode, only while the edit-script backend is selected,
+            // so a peer that finishes during the model call can freeze
+            // agreement spans. If it has not finished, the mask stays off.
+            let editConstraints: EditConstraints? = config.editScriptGates()
+                ? EditConstraints(runs: result.confidenceRuns,
+                                  peer: startEditPeer(retained: retained, extraTerms: ctx.terms))
+                : nil
             // The pill says which stage is running: refine is the longest one in
             // the pipeline and the only one a user can mistake for a hang (§2.4).
             pill?.showRefining()
             let outcome = runBlocking {
                 await refiner.refine(corrected, interrupt: {
                     SessionController.interruptSignal(for: events.pollInterrupt())
-                })
+                }, constraints: editConstraints)
             }
             refined = outcome.text
             aiOutcome = outcome.outcome
@@ -1190,6 +1208,23 @@ public final class SessionController: @unchecked Sendable {
         }
     }
 
+    /// Start the vocabulary-channel pass without waiting. Returns nil when
+    /// reconciliation is off, so a test harness that disables the detached
+    /// task does not grow one. The slot is published if the pass finishes
+    /// before the edit-script applier reads it; otherwise the mask stays off
+    /// and the ordinary post-insert reconcile still runs.
+    private func startEditPeer(retained: RetainedUtterance, extraTerms: [String]) -> EditPeerSlot? {
+        guard config.reconcileVocabulary else { return nil }
+        let slot = EditPeerSlot()
+        let asr = self.asr
+        Task.detached(priority: .utility) {
+            guard let reconciliation = await asr.reconcileVocabulary(retained, extraTerms: extraTerms)
+            else { return }
+            slot.publish(transcript: reconciliation.transcript, termHits: reconciliation.termHits)
+        }
+        return slot
+    }
+
     private func cancelRefiner() {
         guard let refiner else { return }
         runBlocking { await refiner.cancel() }
@@ -1589,7 +1624,10 @@ public final class SessionController: @unchecked Sendable {
             // read here on the session thread, same custody as the port facts.
             vadFirstSpeechMs: audio.vadFirstSpeechMs,
             vadSpeechRatio: audio.vadSpeechRatio,
-            graceExtendedMs: lastGraceExtensionMs))
+            graceExtendedMs: lastGraceExtensionMs,
+            confidenceRunCount: result.confidence?.runCount,
+            confidenceBelowFraction: result.confidence?.fractionBelowLoggingBucket,
+            confidenceMinimum: result.confidence?.minimumConfidence))
     }
 
     // MARK: - level ticker

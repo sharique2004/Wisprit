@@ -1,3 +1,4 @@
+import Speech
 import XCTest
 import WispritKit
 @testable import WispritEngine
@@ -333,6 +334,34 @@ final class TranscriptSinkTests: XCTestCase {
         XCTAssertEqual(finals, ["one."])
         XCTAssertEqual(partial, "two")
         XCTAssertNil(err)
+    }
+
+    func testConfidenceRunsDoNotChangeTheJoinedTranscript() async {
+        let plain = TranscriptSink()
+        let decorated = TranscriptSink()
+        let runs = [TranscriptionConfidenceRun(utf16Location: 6, utf16Length: 8, confidence: 0.2)]
+        let without = await plain.appendFinal("Hello Sharique")
+        let with = await decorated.appendFinal("Hello Sharique", confidenceRuns: runs)
+        XCTAssertEqual(without, with)
+        let joined = FinalConfidence.joined(await decorated.finalPieces())
+        XCTAssertEqual(joined.text, "Hello Sharique")
+        XCTAssertEqual(joined.text, FinalConfidence.joinedText(["Hello Sharique"]))
+        XCTAssertEqual(joined.runs, runs)
+    }
+
+    func testAttributedConfidenceDoesNotChangeThePlainString() {
+        var attributed = AttributedString("Hello Sharique")
+        let bare = AttributedString("Hello Sharique")
+        if let range = attributed.range(of: "Sharique") {
+            attributed[range].transcriptionConfidence = 0.25
+        }
+        XCTAssertEqual(SpeechConfidenceReader.plainText(attributed),
+                       SpeechConfidenceReader.plainText(bare))
+        XCTAssertEqual(SpeechConfidenceReader.plainText(attributed), "Hello Sharique")
+        let runs = SpeechConfidenceReader.runs(in: attributed)
+        XCTAssertEqual(runs.count, 1)
+        XCTAssertEqual(runs.first?.confidence, 0.25)
+        XCTAssertEqual(SpeechConfidenceReader.runs(in: bare), [])
     }
 
     func testErrorIsStickyToTheFirstOne() async {

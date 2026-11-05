@@ -111,6 +111,20 @@ final class RefinerCageTests: XCTestCase {
         XCTAssertEqual(generated, 0)
     }
 
+    func testLetterRunStillBypassesWhenEditConstraintsArePassed() async {
+        let generator = FakeGenerator(behavior: .reply("Sharifue"))
+        let refiner = makeRefiner(generator)
+        let text = "actually it's S-H-A-R-I-Q-U-E"
+        let result = await refiner.refine(
+            text,
+            editConstraints: EditConstraints(runs: [
+                TranscriptionConfidenceRun(utf16Location: 0, utf16Length: 8, confidence: 0.1)
+            ]))
+        XCTAssertEqual(result, RefineResult(text: text, outcome: .hasLetterRun))
+        let generated = await generator.generateCount
+        XCTAssertEqual(generated, 0)
+    }
+
     func testTooLongReturnsVerbatim() async {
         let generator = FakeGenerator(behavior: .reply("short"))
         let refiner = makeRefiner(generator)

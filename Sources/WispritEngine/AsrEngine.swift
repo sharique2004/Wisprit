@@ -100,6 +100,13 @@ public struct UtteranceResult: Sendable, Equatable {
     /// what the user saw (dual capture).
     public var rescueSource: String?
 
+    /// Finalized-run summary. Nil when the recognizer attached no confidence
+    /// attributes. Never an input to the inserted string.
+    public var confidence: TranscriptionConfidenceSummary?
+    /// Per-run scores indexed into the finalized prefix of `text`, in UTF-16.
+    /// The default refine backend does not read this. `apple_edits` may.
+    public var confidenceRuns: [TranscriptionConfidenceRun]
+
     /// Either loss counter non-zero: the live feed did not carry everything
     /// the microphone delivered, whatever the text looks like.
     public var liveFeedLostAudio: Bool {
@@ -114,7 +121,9 @@ public struct UtteranceResult: Sendable, Equatable {
                 rescueGainDb: Double? = nil,
                 discardedTailMs: Double? = nil,
                 droppedAudioMs: Double? = nil,
-                rescueSource: String? = nil) {
+                rescueSource: String? = nil,
+                confidence: TranscriptionConfidenceSummary? = nil,
+                confidenceRuns: [TranscriptionConfidenceRun] = []) {
         self.text = text; self.engine = engine; self.finalizeMs = finalizeMs
         self.timedOut = timedOut; self.crashed = crashed
         self.starvedInput = starvedInput; self.peakLevel = peakLevel
@@ -124,6 +133,8 @@ public struct UtteranceResult: Sendable, Equatable {
         self.discardedTailMs = discardedTailMs
         self.droppedAudioMs = droppedAudioMs
         self.rescueSource = rescueSource
+        self.confidence = confidence
+        self.confidenceRuns = confidenceRuns
     }
 }
 

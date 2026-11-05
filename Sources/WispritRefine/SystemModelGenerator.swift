@@ -22,10 +22,12 @@ public actor SystemModelGenerator: RefineGenerating {
     private let model = SystemLanguageModel(guardrails: .permissiveContentTransformations)
     private var session: LanguageModelSession?
     private let log = WLog.logger("refine")
+    private var didLogContextSize = false
 
     public init() {}
 
     public func probe() async -> RefineAvailability {
+        logContextSizeOnce()
         // SystemLanguageModel.default reports the same asset/enablement state as
         // the permissive-guardrails instance; guardrails are a request-time
         // policy, not a capability.
@@ -56,9 +58,10 @@ public actor SystemModelGenerator: RefineGenerating {
         }
 
         // One session per utterance: LanguageModelSession accumulates a
-        // transcript, so reusing it would spend the shared 4096-token context on
-        // previous dictations. Not prewarmed (first run after enabling) means
-        // paying the setup cost inline, exactly like the old spawn-on-demand.
+        // transcript, so reusing it would spend the model's context window
+        // (`contextSize`, not a hardcoded 4096) on previous dictations. Not
+        // prewarmed (first run after enabling) means paying the setup cost
+        // inline, exactly like the old spawn-on-demand.
         let live = session ?? LanguageModelSession(model: model,
                                                    instructions: RefineInstructions.text)
         session = nil
@@ -83,6 +86,32 @@ public actor SystemModelGenerator: RefineGenerating {
 
     public func discard() async {
         session = nil
+    }
+
+    /// `tokenCount` shipped in macOS 26.4 / iOS 26.4. On 26.0–26.3 the word cap
+    /// in `Refiner` remains the only skip; this returns false rather than
+    /// guessing a window. The deployment target stays macOS 26.
+    public func exceedsContext(transcript: String) async -> Bool {
+        let window = model.contextSize
+        guard #available(macOS 26.4, iOS 26.4, *) else { return false }
+        let prompt = RefinePrompt.userTurn(for: transcript)
+        let reserved = RefinePrompt.maximumResponseTokens(for: transcript)
+        do {
+            let instructionTokens = try await model.tokenCount(for: Instructions(RefineInstructions.text))
+            let promptTokens = try await model.tokenCount(for: prompt)
+            return instructionTokens + promptTokens + reserved > window
+        } catch {
+            log.error("tokenCount failed; the word cap remains the skip")
+            return false
+        }
+    }
+
+    private func logContextSizeOnce() {
+        guard !didLogContextSize else { return }
+        didLogContextSize = true
+        // Read, don't hardcode. The 26.0 back-deploy returns 4096; 26.4+ returns
+        // whatever this OS's on-device model actually has.
+        log.info("FoundationModels contextSize=\(self.model.contextSize, privacy: .public)")
     }
 }
 
