@@ -1323,3 +1323,337 @@ git `e7ffe1b` · os `25F84` · prompt `b2a089b526058cb6b3251381e389c6359144dca20
 | disfluency | 5 | 9.76% | — | 0.00% |
 | self-correction | 10 | 5.13% | — | 0.00% |
 | long-form | 1 | 8.33% | 1.000 | 0.00% |
+
+## 2026-11-06T11:25:57Z — ls-test-clean/all — apple_live — `refine=off,dict=off`
+
+git `c8c2ee2` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `librispeech`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| corrected | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| refined | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| final | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+
+### By category (raw stage)
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| test-clean | 200 | 2.25% | — | 0.00% |
+
+## 2026-11-06T11:26:00Z — ls-test-clean/all — apple_live — `refine=on,dict=on`
+
+git `c8c2ee2` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `librispeech`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| corrected | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| refined | 200 | 3950 | 99 | 2.51% | 5.57% | — | 0.000 | 0.00% |
+| final | 200 | 3950 | 101 | 2.56% | 5.60% | — | 0.000 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| test-clean | 200 | 2.56% | — | 0.00% |
+
+## 2026-11-06T11:26:03Z — ls-test-clean/all — apple_live — `refine=off,dict=on`
+
+git `c8c2ee2` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `librispeech`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| corrected | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| refined | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| final | 200 | 3950 | 91 | 2.30% | 5.20% | — | 0.000 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| test-clean | 200 | 2.30% | — | 0.00% |
+
+Lexicon: system — the fuzzy layer's ordinary-word veto matches the shipped app; compare only with rows run the same way.
+
+## 2026-11-06T11:26:06Z — ls-test-other/all — apple_live — `refine=off,dict=off`
+
+git `c8c2ee2` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `librispeech`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| corrected | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| refined | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| final | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+
+### By category (raw stage)
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| test-other | 200 | 5.47% | — | 0.00% |
+
+## 2026-11-06T11:26:09Z — ls-test-other/all — apple_live — `refine=on,dict=on`
+
+git `c8c2ee2` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `librispeech`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| corrected | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| refined | 200 | 3492 | 205 | 5.87% | 7.61% | — | 0.000 | 0.00% |
+| final | 200 | 3492 | 226 | 6.47% | 7.93% | — | 0.000 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| test-other | 200 | 6.47% | — | 0.00% |
+
+## 2026-11-06T11:26:11Z — ls-test-other/all — apple_live — `refine=off,dict=on`
+
+git `c8c2ee2` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `librispeech`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| corrected | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| refined | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| final | 200 | 3492 | 211 | 6.04% | 7.12% | — | 0.000 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| test-other | 200 | 6.04% | — | 0.00% |
+
+Lexicon: system — the fuzzy layer's ordinary-word veto matches the shipped app; compare only with rows run the same way.
+
+## 2026-11-06T11:27:21Z — ls-test-clean/all — apple_live — `refine=off,dict=on`
+
+git `5870b21` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `librispeech`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| corrected | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| refined | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| final | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| test-clean | 200 | 2.25% | — | 0.00% |
+
+Lexicon: system — the fuzzy layer's ordinary-word veto matches the shipped app; compare only with rows run the same way.
+
+## 2026-11-06T11:30:53Z — ls-test-clean/all — apple_live — `refine=on,dict=on`
+
+git `5870b21` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `librispeech`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| corrected | 200 | 3950 | 89 | 2.25% | 5.18% | — | 0.000 | 0.00% |
+| refined | 200 | 3950 | 99 | 2.51% | 5.57% | — | 0.000 | 0.00% |
+| final | 200 | 3950 | 99 | 2.51% | 5.57% | — | 0.000 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| test-clean | 200 | 2.51% | — | 0.00% |
+
+## 2026-11-06T11:30:58Z — ls-test-other/all — apple_live — `refine=off,dict=on`
+
+git `5870b21` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `librispeech`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| corrected | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| refined | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| final | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| test-other | 200 | 5.47% | — | 0.00% |
+
+Lexicon: system — the fuzzy layer's ordinary-word veto matches the shipped app; compare only with rows run the same way.
+
+## 2026-11-06T11:34:22Z — ls-test-other/all — apple_live — `refine=on,dict=on`
+
+git `5870b21` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `librispeech`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| corrected | 200 | 3492 | 191 | 5.47% | 6.83% | — | 0.000 | 0.00% |
+| refined | 200 | 3492 | 205 | 5.87% | 7.61% | — | 0.000 | 0.00% |
+| final | 200 | 3492 | 206 | 5.90% | 7.64% | — | 0.000 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| test-other | 200 | 5.90% | — | 0.00% |
+
+## 2026-11-06T11:34:30Z — tts-samantha/all — apple_live — `refine=off,dict=off`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `5870b21` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| final | 54 | 484 | 56 | 11.57% | 7.16% | 0.056 | 0.333 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 31.71% | 0.000 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 18.64% | 0.000 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 12.24% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 5.88% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 19.51% | — | 0.00% |
+| self-correction | 10 | 5.13% | — | 0.00% |
+| long-form | 1 | 16.67% | 0.000 | 0.00% |
+
+## 2026-11-06T11:34:30Z — tts-samantha/all — apple_live — `refine=off,dict=on`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `5870b21` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| final | 54 | 484 | 35 | 7.23% | 5.99% | 0.611 | 0.407 | 0.00% |
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 9.76% | 0.750 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 11.86% | 0.500 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 10.20% | — | 0.00% |
+| spelled-runs | 4 | 4.17% | — | 0.00% |
+| numbers-dates | 4 | 5.88% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 19.51% | — | 0.00% |
+| self-correction | 10 | 2.56% | — | 0.00% |
+| long-form | 1 | 5.56% | 1.000 | 0.00% |
+
+## 2026-11-06T11:36:44Z — tts-samantha/all — apple_live — `refine=on,dict=off`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `5870b21` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 81 | 16.74% | 14.59% | 0.222 | 0.315 | 0.00% |
+| final | 54 | 484 | 47 | 9.71% | 6.38% | 0.222 | 0.389 | 0.00% |
+
+Refine battery: **0.868** (weighted)
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 31.71% | 0.000 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 8.47% | 0.750 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 12.24% | — | 0.00% |
+| spelled-runs | 4 | 8.33% | — | 0.00% |
+| numbers-dates | 4 | 0.00% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 7.32% | — | 0.00% |
+| self-correction | 10 | 10.26% | — | 0.00% |
+| long-form | 1 | 16.67% | 0.000 | 0.00% |
+
+## 2026-11-06T11:37:26Z — tts-samantha/all — apple_live — `refine=on,dict=on`
+
+> **TTS corpus — plumbing check only, not an accuracy claim**
+
+git `5870b21` · os `26A428` · prompt `b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf` · dictionary 9 terms · scorer v1 · corpus source `tts`
+
+| stage | n | ref words | errors | WER | CER | term recall | zero-edit | empty |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| raw | 54 | 484 | 101 | 20.87% | 18.09% | 0.056 | 0.241 | 0.00% |
+| corrected | 54 | 484 | 98 | 20.25% | 17.51% | 0.056 | 0.259 | 0.00% |
+| refined | 54 | 484 | 81 | 16.74% | 14.59% | 0.222 | 0.315 | 0.00% |
+| final | 54 | 484 | 29 | 5.99% | 5.49% | 0.667 | 0.444 | 0.00% |
+
+Refine battery: **0.868** (weighted)
+
+### By category
+
+| category | n | WER | term recall | empty |
+|---|---:|---:|---:|---:|
+| proper-nouns | 5 | 9.76% | 0.750 | 0.00% |
+| control-names | 4 | 12.90% | 0.250 | 0.00% |
+| tech-jargon | 6 | 6.78% | 0.750 | 0.00% |
+| homophones | 5 | 0.00% | — | 0.00% |
+| addresses | 5 | 10.20% | — | 0.00% |
+| spelled-runs | 4 | 4.17% | — | 0.00% |
+| numbers-dates | 4 | 0.00% | — | 0.00% |
+| postal-address | 1 | 0.00% | — | 0.00% |
+| commands | 4 | 0.00% | — | 0.00% |
+| disfluency | 5 | 7.32% | — | 0.00% |
+| self-correction | 10 | 7.69% | — | 0.00% |
+| long-form | 1 | 5.56% | 1.000 | 0.00% |
+
+## 2026-11-06 — ANNOTATION: macOS 27 rows, the fuzzy-layer fix, and provenance
+
+Not a run. Read with docs/eval/AUDIT-2026-11-06.md.
+
+- **New OS build.** Every row of this date is `26A428` (macOS 27.0); every
+  earlier row is `25F84`. Per the rule at the top of this file they are
+  different experiments. The raw engine did not regress: ls-test-clean
+  2.25% / ls-test-other 5.47% raw (`refine=off,dict=off`), tts-samantha raw
+  byte-identical to BASELINE.json.
+- **Before/after pairs.** The `c8c2ee2` LibriSpeech sections carry the
+  fuzzy dictionary layer as it shipped before the fix (`c8c2ee2` changes
+  capture only; its corrections code is `32c01ab`'s). The `5870b21` sections
+  carry the fix. Both read the same ASR cache (transcribed once, fresh `--out`,
+  by a `32c01ab` build), so every difference between a pair is the
+  dictionary stage. The `--lexicon system` sections use the app's own
+  ordinary-word list and are only comparable with each other.
+- **The owner's dictionary** (139 terms) was measured the same way, locally,
+  and is not recorded here because the dictionary is private: dictionary-stage
+  damage 2.25% → 3.11% / 5.47% → 6.27% before, 2.25% → 2.33% / 5.47% →
+  5.50% after (`refine=off,dict=on`, `--lexicon system`).
+- **Refine battery.** On `26A428` the live battery scores 0.8682, below the
+  0.8885 floor (`WISPRIT_REHEARSAL=1`), identically with `32c01ab`'s code for
+  every module in its dependency closure: the on-device model changed with the
+  OS. The prompt is untouched; this is open, not accepted. The matrix's
+  3-repeat battery agrees (0.868), and tts-samantha's refined stage moved
+  13.43% → 16.74% between `25F84` and `26A428` with the prompt unchanged.
+- **Net, shipped matrix (`refine=on,dict=on`, fixture, compiled lexicon):**
+  ls-test-clean final 2.56% → 2.51%, ls-test-other 6.47% → 5.90%; the refined
+  stage is identical in each pair, so the whole difference is the fix.
+- **Correction to `c8c2ee2`'s message:** the Bluetooth format wait hit 24 of
+  the parachute's 32 opens, not "24 of 24" presses.

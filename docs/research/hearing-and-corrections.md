@@ -213,3 +213,17 @@ series discontinuity.
 judged end-to-end per the note above) — and the three user actions: `Wisprit
 parakeet download` + `Wisprit vad download` on this machine, the
 AirPods-connected `miclab` probe, and the six-cell A/B recording.
+
+**2026-11-06, macOS 27 field audit (docs/eval/AUDIT-2026-11-06.md):** the
+models are downloaded and the Parakeet channel is live. Two seams found and
+fixed. (1) The dual-capture parachute, built on `AVAudioEngine`, stalled ~3 s
+per headset press in macOS 27's `SetBluetoothAudioFormatAndWait` on the
+session thread, and the engine's private default-device aggregate zero-filled
+and mis-attributed every capture; the microphone is now opened with an
+input-only AUHAL (`capture_backend`, default `hal`; the parachute always), on
+its own queue for the parachute. (2) The fuzzy dictionary layer (A1) rewrote
+ordinary English on real speech ("you can" → Ubuntu): windows now align word
+by word and inflections of ordinary words are vetoed. The `miclab` headset
+probe is now a backend A/B and is still the owner's to run; the refine
+battery reads 0.8682 on macOS 27 (model change, below the 0.8885 floor) —
+open.
