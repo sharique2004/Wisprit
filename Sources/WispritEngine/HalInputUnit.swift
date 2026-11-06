@@ -170,15 +170,17 @@ final class HalInputUnit: @unchecked Sendable {
             &callback, UInt32(MemoryLayout<AURenderCallbackStruct>.size)))
         try check("AudioUnitInitialize", AudioUnitInitialize(unit))
 
-        // The largest slice the IO thread can ask for. 4096 frames is the
-        // AUHAL's documented default; never size below it.
+        // The largest slice the IO thread can ask for: the AUHAL's own limit,
+        // never below its documented 4096-frame default, and never below twice
+        // the device's IO buffer (a device configured for large buffers would
+        // otherwise have every slice skipped by `render`'s capacity guard).
         var maxFrames: UInt32 = 4096
         size = UInt32(MemoryLayout<UInt32>.size)
         if AudioUnitGetProperty(unit, kAudioUnitProperty_MaximumFramesPerSlice,
                                 kAudioUnitScope_Global, 0, &maxFrames, &size) != noErr {
             maxFrames = 4096
         }
-        scratchCapacity = Int(max(maxFrames, 4096))
+        scratchCapacity = Int(max(maxFrames, 4096, 2 * (Self.bufferFrameSize(device) ?? 0)))
         scratch = .allocate(capacity: scratchCapacity)
 
         let deliver = self.deliver
@@ -300,6 +302,18 @@ final class HalInputUnit: @unchecked Sendable {
         guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr
         else { return false }
         return value != 0
+    }
+
+    private static func bufferFrameSize(_ device: AudioDeviceID) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyBufferFrameSize,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain)
+        var value: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        guard AudioObjectGetPropertyData(device, &address, 0, nil, &size, &value) == noErr
+        else { return nil }
+        return value
     }
 
     private static func nominalRate(_ device: AudioDeviceID) -> Double? {
