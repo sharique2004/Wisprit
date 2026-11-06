@@ -371,20 +371,41 @@ final class StatusMenuModelTests: XCTestCase {
         func spec(_ state: AppState) -> MenuIconSpec {
             StatusMenuModel.iconSpec(for: StatusIconState(state: state))
         }
-        XCTAssertEqual(spec(.idle), MenuIconSpec(symbolName: "mic", isTemplate: true))
-        XCTAssertEqual(spec(.finalizing), MenuIconSpec(symbolName: "mic.fill", isTemplate: true))
-        XCTAssertEqual(spec(.inserting), MenuIconSpec(symbolName: "mic.fill", isTemplate: true))
+        XCTAssertEqual(spec(.idle), MenuIconSpec(glyph: .ready, isTemplate: true))
+        XCTAssertEqual(spec(.recording), MenuIconSpec(glyph: .listening, isTemplate: false))
+        XCTAssertEqual(spec(.finalizing), MenuIconSpec(glyph: .working, isTemplate: true))
+        XCTAssertEqual(spec(.inserting), MenuIconSpec(glyph: .working, isTemplate: true))
+    }
+
+    /// Every flag combination lands on one of the six glyphs, and every glyph
+    /// is reachable — no state draws a symbol from outside the mark.
+    func testEveryGlyphIsReachableAndNothingElseIs() {
+        var seen = Set<MenuGlyph>()
+        for state in AppState.allCases {
+            for enabled in [true, false] {
+                for setup in [true, false] {
+                    for secure in [true, false] {
+                        let icon = StatusIconState(state: state, dictationEnabled: enabled,
+                                                   needsSetup: setup, secureInput: secure)
+                        seen.insert(StatusMenuModel.iconSpec(for: icon).glyph)
+                    }
+                }
+            }
+        }
+        XCTAssertEqual(seen, Set(MenuGlyph.allCases))
     }
 
     /// The one non-template image in the app, and the second sanctioned orange:
-    /// the mic is open, so the tally is lit (§1.6).
+    /// the mic is open, so the tally is lit (§1.6). Template-ness follows the
+    /// glyph, never the caller.
     func testOnlyRecordingIsNonTemplate() {
         for state in AppState.allCases {
             let spec = StatusMenuModel.iconSpec(for: StatusIconState(state: state))
             XCTAssertEqual(spec.isTemplate, state != .recording, "\(state)")
         }
-        XCTAssertEqual(StatusMenuModel.iconSpec(for: StatusIconState(state: .recording)),
-                       MenuIconSpec(symbolName: "mic.fill", isTemplate: false))
+        for glyph in MenuGlyph.allCases {
+            XCTAssertEqual(MenuIconSpec(glyph: glyph).isTemplate, glyph != .listening, "\(glyph)")
+        }
     }
 
     /// `needsSetup > disabled > recording > working > secureInput > idle`,
@@ -395,19 +416,24 @@ final class StatusMenuModelTests: XCTestCase {
                                          dictationEnabled: false,
                                          needsSetup: true,
                                          secureInput: true)
-        XCTAssertEqual(StatusMenuModel.iconSpec(for: everything).symbolName,
-                       "exclamationmark.circle")
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: everything),
+                       MenuIconSpec(glyph: .needsSetup, isTemplate: true))
 
         var disabled = everything
         disabled.needsSetup = false
-        XCTAssertEqual(StatusMenuModel.iconSpec(for: disabled).symbolName, "mic.slash")
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: disabled).glyph, .disabled)
         XCTAssertTrue(StatusMenuModel.iconSpec(for: disabled).isTemplate,
                       "a switched-off app is not recording, whatever the state says")
 
         var enabled = disabled
         enabled.dictationEnabled = true
-        XCTAssertEqual(StatusMenuModel.iconSpec(for: enabled).symbolName, "mic.fill")
-        XCTAssertFalse(StatusMenuModel.iconSpec(for: enabled).isTemplate)
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: enabled),
+                       MenuIconSpec(glyph: .listening, isTemplate: false))
+
+        var working = enabled
+        working.state = .finalizing
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: working).glyph, .working,
+                       "a running session outranks the secure-input lock")
     }
 
     /// R12: while some app holds Secure Keyboard Entry the event tap never
@@ -418,43 +444,39 @@ final class StatusMenuModelTests: XCTestCase {
     func testSecureInputLocksTheIdleIconAndOnlyTheIdleIcon() {
         let locked = StatusIconState(state: .idle, secureInput: true)
         XCTAssertEqual(StatusMenuModel.iconSpec(for: locked),
-                       MenuIconSpec(symbolName: StatusMenuModel.secureInputSymbolName,
-                                    isTemplate: true),
+                       MenuIconSpec(glyph: .secureInput, isTemplate: true),
                        "information, not alarm: the lock stays a template")
 
         for state in AppState.allCases where state != .idle {
             let live = StatusIconState(state: state, secureInput: true)
-            XCTAssertNotEqual(StatusMenuModel.iconSpec(for: live).symbolName,
-                              StatusMenuModel.secureInputSymbolName,
+            XCTAssertNotEqual(StatusMenuModel.iconSpec(for: live).glyph, .secureInput,
                               "\(state): a running session outranks the lock")
         }
 
         var blocked = locked
         blocked.needsSetup = true
-        XCTAssertEqual(StatusMenuModel.iconSpec(for: blocked).symbolName,
-                       "exclamationmark.circle")
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: blocked).glyph, .needsSetup)
 
         var off = locked
         off.dictationEnabled = false
-        XCTAssertEqual(StatusMenuModel.iconSpec(for: off).symbolName, "mic.slash")
+        XCTAssertEqual(StatusMenuModel.iconSpec(for: off).glyph, .disabled)
 
         XCTAssertEqual(StatusMenuModel.iconSpec(for: StatusIconState()),
-                       MenuIconSpec(symbolName: "mic", isTemplate: true),
+                       MenuIconSpec(glyph: .ready, isTemplate: true),
                        "no secure input, no lock")
     }
 
-    /// Retired from the button, kept as the title fallback — and still the only
-    /// thing a caller holding a raw state string can ask for.
-    func testTheEmojiGlyphsSurviveAsTheFallback() {
+    /// VoiceOver hears the state, not just the app's name — the image is the
+    /// only thing on the button.
+    func testEveryGlyphHasItsOwnAccessibilityLabel() {
+        let labels = MenuGlyph.allCases.map(\.accessibilityLabel)
+        XCTAssertEqual(Set(labels).count, labels.count)
+        for label in labels { XCTAssertTrue(label.hasPrefix("Wisprit"), label) }
+    }
+
+    /// Retired from the button, kept for callers holding a raw state string.
+    func testTheEmojiGlyphsSurviveForStringCallers() {
         XCTAssertEqual(StatusMenuModel.glyph(for: .recording), "🔴")
-        XCTAssertEqual(StatusMenuModel.iconPointSize, 16)
-        XCTAssertEqual(StatusMenuModel.micIconPointSize, 12.8)
-        XCTAssertEqual(StatusMenuModel.micIconHeightScale, 0.8)
-        XCTAssertEqual(StatusMenuModel.micIconPointSize * StatusMenuModel.micIconHeightScale, 10.24, accuracy: 0.001)
-        XCTAssertEqual(StatusMenuModel.displayedPointSize(for: "mic"), 12.8)
-        XCTAssertEqual(StatusMenuModel.displayedPointSize(for: "mic.fill"), 12.8)
-        XCTAssertEqual(StatusMenuModel.displayedPointSize(for: "mic.slash"), 12.8)
-        XCTAssertEqual(StatusMenuModel.displayedPointSize(for: "lock.fill"), 16)
-        XCTAssertEqual(StatusMenuModel.displayedPointSize(for: "exclamationmark.circle"), 16)
+        XCTAssertEqual(StatusMenuModel.glyph(forStateNamed: "finalizing"), "…")
     }
 }

@@ -211,20 +211,58 @@ public struct StatusMenuState: Equatable, Sendable {
     }
 }
 
+/// Which variant of the Wisprit mark the menu-bar button draws.
+///
+/// Every state is the same mark — the tally dot and three voice bars that the
+/// notch and the app icon also carry — with one part changed, so the status
+/// item never turns into an unrelated symbol. `WispritMark` owns the geometry.
+public enum MenuGlyph: String, Equatable, Sendable, CaseIterable {
+    /// Idle and ready: the dot and the bars at rest.
+    case ready
+    /// The mic is open: the dot is lit `hot`. The one non-template image.
+    case listening
+    /// Finalizing or inserting: the bars have fallen to the floor, so the
+    /// mark reads as `• · · ·`, the ellipsis the emoji glyph always was.
+    case working
+    /// The master toggle is off: the mark, struck through.
+    case disabled
+    /// Some setup item blocks dictation: the dot becomes a `!` badge.
+    case needsSetup
+    /// Secure Keyboard Entry is swallowing the key: the dot becomes a lock.
+    case secureInput
+
+    /// VoiceOver's name for the status item in this state.
+    public var accessibilityLabel: String {
+        switch self {
+        case .ready: return "Wisprit"
+        case .listening: return "Wisprit, listening"
+        case .working: return "Wisprit, transcribing"
+        case .disabled: return "Wisprit, dictation off"
+        case .needsSetup: return "Wisprit, setup needed"
+        case .secureInput: return "Wisprit, blocked by secure input"
+        }
+    }
+}
+
 /// What the menu-bar button draws — `docs/design/ui-redesign.md` §5.1.
 ///
 /// A pair, not an image: the decision stays pure (and tested in
 /// `WispritMacUITests`) while the AppKit layer owns `NSImage`.
 public struct MenuIconSpec: Equatable, Sendable {
-    public var symbolName: String
+    public var glyph: MenuGlyph
     /// `true` for every state but recording. macOS tints a template image for
     /// the menu-bar appearance; the recording icon is the one image in the app
-    /// that must stay `hot` in both appearances (§1.6 site 2).
+    /// whose dot must stay `hot` in both appearances (§1.6 site 2).
     public var isTemplate: Bool
 
-    public init(symbolName: String, isTemplate: Bool) {
-        self.symbolName = symbolName
+    public init(glyph: MenuGlyph, isTemplate: Bool) {
+        self.glyph = glyph
         self.isTemplate = isTemplate
+    }
+
+    /// The template rule in one place: only an open mic carries colour.
+    public init(glyph: MenuGlyph) {
+        self.init(glyph: glyph, isTemplate: glyph != .listening)
     }
 }
 
@@ -279,63 +317,37 @@ public enum StatusMenuModel {
 
     // MARK: - the menu-bar icon (§5.1)
 
-    /// The symbol the secure-input lock state draws (R12). A plain lock rather
-    /// than a badged mic: SF Symbols ships no `mic.badge.lock`, and the state
-    /// it reports is "your keys are being withheld from every app", which the
-    /// lock says on its own. Template — the condition is information, not an
-    /// alarm; nothing is broken and nothing needs fixing in Wisprit.
-    public static let secureInputSymbolName = "lock.fill"
-
-    /// The image the status button draws, by state.
+    /// The mark the status button draws, by state.
     ///
     /// Priority when states collide is fixed and total:
     /// `needsSetup > disabled > recording > working > secureInput > idle`. A
     /// Mac that cannot dictate says so before it says anything else, and the
-    /// orange recording icon is never shown for a run that is not actually
-    /// recording.
+    /// lit tally is never shown for a run that is not actually recording.
     ///
     /// The secure-input lock sits below every live session state on purpose:
     /// a session that is visibly recording proves the key WAS seen, so a lock
     /// over it would be the icon lying about the thing it exists to report.
     /// It sits above `idle` because idle-while-locked is exactly the "pressed
-    /// the key, literally nothing happened" moment the state is for.
+    /// the key, literally nothing happened" moment the state is for. The lock
+    /// stays a template — the condition is information, not an alarm; nothing
+    /// in Wisprit is broken (R12).
     ///
-    /// `glyph(for:)` above is kept — the emoji is still the title fallback when
-    /// a symbol cannot be made — but `StatusMenu` reads this.
+    /// `glyph(for:)` above is kept for callers holding a raw state string, but
+    /// `StatusMenu` reads this: the mark is drawn in code, so there is no
+    /// missing-symbol case left for an emoji title to cover.
     public static func iconSpec(for icon: StatusIconState) -> MenuIconSpec {
-        if icon.needsSetup {
-            return MenuIconSpec(symbolName: "exclamationmark.circle", isTemplate: true)
-        }
-        if !icon.dictationEnabled {
-            return MenuIconSpec(symbolName: "mic.slash", isTemplate: true)
-        }
+        if icon.needsSetup { return MenuIconSpec(glyph: .needsSetup) }
+        if !icon.dictationEnabled { return MenuIconSpec(glyph: .disabled) }
         switch icon.state {
         case .recording:
             // The one non-template status image in the app (§1.6 site 2): the
             // mic is open, so the tally is lit.
-            return MenuIconSpec(symbolName: "mic.fill", isTemplate: false)
+            return MenuIconSpec(glyph: .listening)
         case .finalizing, .inserting:
-            return MenuIconSpec(symbolName: "mic.fill", isTemplate: true)
+            return MenuIconSpec(glyph: .working)
         case .idle:
-            if icon.secureInput {
-                return MenuIconSpec(symbolName: secureInputSymbolName, isTemplate: true)
-            }
-            return MenuIconSpec(symbolName: "mic", isTemplate: true)
+            return MenuIconSpec(glyph: icon.secureInput ? .secureInput : .ready)
         }
-    }
-
-    /// Point size for status images that are not the microphone (§5.1).
-    public static let iconPointSize: Double = 16
-    /// Width basis for the menu-bar microphone. Height is `micIconHeightScale`
-    /// of this, so the glyph is shorter without another uniform shrink.
-    public static let micIconPointSize: Double = 12.8
-    /// Drawn height relative to the 12.8 pt microphone. 0.8 → about 10.2 pt.
-    public static let micIconHeightScale: Double = 0.8
-
-    /// Displayed point size. Only the microphone glyphs shrink; the lock and
-    /// the setup warning stay at `iconPointSize`.
-    public static func displayedPointSize(for symbolName: String) -> Double {
-        symbolName.hasPrefix("mic") ? micIconPointSize : iconPointSize
     }
 
     /// `preview = row["text"].replace("\n", " ")`, then a 48-character budget
