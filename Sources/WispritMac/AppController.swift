@@ -178,6 +178,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
             else { return nil }
             return InputDeviceProbe.builtInInput()
         }
+        // The input-only AUHAL by default; `capture_backend = engine` restores
+        // the AVAudioEngine path (docs/eval/AUDIT-2026-11-06.md). Per press.
+        capture.backend = { CaptureBackendSettings.backend(settings) }
         // Dual capture (docs/research/hearing-and-corrections.md): while the
         // headset mic dictates over classic Bluetooth, the Mac mic silently
         // records into a retention buffer as a parachute — it can only ever

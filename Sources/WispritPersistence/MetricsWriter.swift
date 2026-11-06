@@ -139,6 +139,14 @@ public struct MetricsRecord: Sendable {
     public var confidenceRunCount: Int?
     public var confidenceBelowFraction: Double?
     public var confidenceMinimum: Double?
+    // 2026-11-06, capture-path attribution. Utterance rows only. Which Core
+    // Audio path opened the mic ("hal" input-only AUHAL, "engine" the
+    // AVAudioEngine aggregate path) and how long the mic took to deliver its
+    // first buffer — the SCO bring-up clock `MicCapture` always measured but
+    // no row ever carried. Together they make a backend A/B readable from the
+    // field log alone (docs/eval/AUDIT-2026-11-06.md).
+    public var captureBackend: String?
+    public var firstChunkMs: Double?
 
     public init(ts: Double = Date().timeIntervalSince1970,
                 heldMs: Double, engine: String, finalizeMs: Double, timedOut: Bool,
@@ -171,7 +179,9 @@ public struct MetricsRecord: Sendable {
                 graceExtendedMs: Double? = nil,
                 confidenceRunCount: Int? = nil,
                 confidenceBelowFraction: Double? = nil,
-                confidenceMinimum: Double? = nil) {
+                confidenceMinimum: Double? = nil,
+                captureBackend: String? = nil,
+                firstChunkMs: Double? = nil) {
         self.ts = ts
         self.heldMs = heldMs
         self.engine = engine
@@ -224,6 +234,8 @@ public struct MetricsRecord: Sendable {
         self.confidenceRunCount = confidenceRunCount
         self.confidenceBelowFraction = confidenceBelowFraction
         self.confidenceMinimum = confidenceMinimum
+        self.captureBackend = captureBackend
+        self.firstChunkMs = firstChunkMs
     }
 
     /// The exact line `session.py` writes, newline included.
@@ -321,6 +333,10 @@ public struct MetricsRecord: Sendable {
         if let confidenceMinimum {
             entry["conf_min"] = .double(MetricsWriter.round4(confidenceMinimum))
         }
+        // Capture-path attribution (2026-11-06), after every key above — the
+        // append-only rule once more.
+        if let captureBackend { entry["capture_backend"] = .string(captureBackend) }
+        if let firstChunkMs { entry["first_chunk_ms"] = .double(MetricsWriter.round1(firstChunkMs)) }
         return WispritJSON.serializeCompact(.object(entry)) + "\n"
     }
 }
@@ -395,6 +411,9 @@ public enum MetricsField {
     public static let confidenceRunCount = "conf_runs"
     public static let confidenceBelowFraction = "conf_below"
     public static let confidenceMinimum = "conf_min"
+    // Capture-path attribution (2026-11-06).
+    public static let captureBackend = "capture_backend"
+    public static let firstChunkMs = "first_chunk_ms"
 }
 
 public final class MetricsWriter: @unchecked Sendable {

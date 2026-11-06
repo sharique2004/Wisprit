@@ -12,10 +12,18 @@ public struct VocabularyReconciliation: Sendable, Equatable {
     public var termHits: [String: Int]
     public var termCount: Int
     public var elapsedMs: Double
+    /// Which recognizer produced `transcript` — `apple_dictation` here, the
+    /// Parakeet channel's own name when it answered. The `vocab_retro` row
+    /// used to hard-code `apple_dictation` whatever ran, so the November
+    /// rows could not say whether the downloaded Parakeet models were in use
+    /// (their 75–377 ms timings say they were).
+    public var engine: String
 
-    public init(transcript: String, termHits: [String: Int], termCount: Int, elapsedMs: Double) {
+    public init(transcript: String, termHits: [String: Int], termCount: Int, elapsedMs: Double,
+                engine: String = VocabularyChannel.engineName) {
         self.transcript = transcript; self.termHits = termHits
         self.termCount = termCount; self.elapsedMs = elapsedMs
+        self.engine = engine
     }
 }
 

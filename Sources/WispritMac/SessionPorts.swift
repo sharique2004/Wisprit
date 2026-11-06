@@ -71,6 +71,10 @@ public protocol AudioPort: Sendable {
     /// per utterance. All nil without the witness.
     var vadFirstSpeechMs: Double? { get }
     var vadSpeechRatio: Double? { get }
+    /// Which Core Audio path the session's capture opened on ("hal" /
+    /// "engine", after any fallback) — the backend A/B's field attribution.
+    /// nil for ports that cannot know.
+    var captureBackend: String? { get }
 }
 
 /// The capture session's device attribution, in platform-neutral words —
@@ -102,6 +106,7 @@ public extension AudioPort {
     var latestSpeechProbability: Double? { nil }
     var vadFirstSpeechMs: Double? { nil }
     var vadSpeechRatio: Double? { nil }
+    var captureBackend: String? { nil }
 }
 
 public protocol RefinePort: Sendable {
@@ -306,7 +311,8 @@ public struct AsrManagerPort: AsrPort {
             return VocabularyReconciliation(transcript: reconciled.transcript,
                                             termHits: reconciled.termHits,
                                             termCount: reconciled.termCount,
-                                            elapsedMs: reconciled.elapsedMs)
+                                            elapsedMs: reconciled.elapsedMs,
+                                            engine: ParakeetVocabularyChannel.engineName)
         }
         return await manager.reconcileVocabulary(retained, extraTerms: extraTerms)
     }
@@ -404,5 +410,6 @@ public struct MicCapturePort: AudioPort {
     public var latestSpeechProbability: Double? { vad?.latestProbability }
     public var vadFirstSpeechMs: Double? { vad?.firstSpeechMs }
     public var vadSpeechRatio: Double? { vad?.speechRatio }
+    public var captureBackend: String? { capture.activeBackend?.rawValue }
 }
 #endif
