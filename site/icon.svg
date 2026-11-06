@@ -1,7 +1,24 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="14" fill="#14171b"/>
-  <!-- a held key, mic-hot -->
-  <rect x="14" y="14" width="36" height="36" rx="9" fill="#f5f6f8"/>
-  <circle cx="45" cy="19" r="4" fill="#f07818"/>
-  <path d="M24 40c2.5-8 4-12 8-12s5.5 4 8 12" stroke="#191c20" stroke-width="3.2" stroke-linecap="round" fill="none"/>
+  <!-- The Wisprit mark: the tally dot and three voice bars (8 / 14 / 10),
+       the same picture as the menu-bar glyph and the app icon. Ice tile on
+       light chrome, graphite tile (the notch's colours) on dark. The dot is
+       never orange here: orange means the mic is live, and a favicon isn't. -->
+  <style>
+    .tile { fill: #D8DDE4 } .sheen { opacity: 1 } .mark { fill: #15181C }
+    @media (prefers-color-scheme: dark) {
+      .tile { fill: #0B0D10 } .sheen { opacity: 0.2 } .mark { fill: #E8EAED }
+    }
+  </style>
+  <defs>
+    <linearGradient id="sheen" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="1"/>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+  <rect class="tile" width="64" height="64" rx="14.5"/>
+  <rect class="sheen" width="64" height="64" rx="14.5" fill="url(#sheen)"/>
+  <circle class="mark" cx="13.76" cy="32" r="7.2"/>
+  <rect class="mark" x="30.56" y="22.4" width="4.8" height="19.2" rx="2.4"/>
+  <rect class="mark" x="40.16" y="15.2" width="4.8" height="33.6" rx="2.4"/>
+  <rect class="mark" x="49.76" y="20" width="4.8" height="24" rx="2.4"/>
 </svg>
