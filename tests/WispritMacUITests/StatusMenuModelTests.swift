@@ -448,5 +448,13 @@ final class StatusMenuModelTests: XCTestCase {
     func testTheEmojiGlyphsSurviveAsTheFallback() {
         XCTAssertEqual(StatusMenuModel.glyph(for: .recording), "🔴")
         XCTAssertEqual(StatusMenuModel.iconPointSize, 16)
+        XCTAssertEqual(StatusMenuModel.micIconPointSize, 12.8)
+        XCTAssertEqual(StatusMenuModel.micIconHeightScale, 0.8)
+        XCTAssertEqual(StatusMenuModel.micIconPointSize * StatusMenuModel.micIconHeightScale, 10.24, accuracy: 0.001)
+        XCTAssertEqual(StatusMenuModel.displayedPointSize(for: "mic"), 12.8)
+        XCTAssertEqual(StatusMenuModel.displayedPointSize(for: "mic.fill"), 12.8)
+        XCTAssertEqual(StatusMenuModel.displayedPointSize(for: "mic.slash"), 12.8)
+        XCTAssertEqual(StatusMenuModel.displayedPointSize(for: "lock.fill"), 16)
+        XCTAssertEqual(StatusMenuModel.displayedPointSize(for: "exclamationmark.circle"), 16)
     }
 }

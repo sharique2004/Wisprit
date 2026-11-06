@@ -41,6 +41,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
     let monitor: HotkeyMonitor
     let session: SessionController
     let pill: Pill
+    /// Listening outline. The pill panel is still constructed so the demo and
+    /// its model tests keep a home, but the running app never orders it front.
+    let notchOutline: NotchOutline
     let liveTyping: LiveTypingSession
     let tierCache: BundleCapabilityCache
     /// Phase-4 context awareness — inert until the consent flow flips
@@ -281,6 +284,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
             onCancel: { events.put(HotkeyEvent(.esc)) },
             onConfirm: { events.put(HotkeyEvent(.release)) }))
         self.pill = pill
+        let notchOutline = NotchOutline()
+        self.notchOutline = notchOutline
 
         // Rungs 1–2 of the insertion ladder. Nothing here touches an input
         // source until `live_typing` is on AND onboarding has run — the setting
@@ -348,7 +353,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
         // One pill port for every off-main producer — the session thread and
         // the edit-capture answers both speak through it.
-        let pillPort = MainThreadPill(pill, isSuppressed: { settings.pillHidden })
+        let pillPort = MainThreadPill(pill,
+                                      notch: notchOutline,
+                                      isSuppressed: { settings.pillHidden })
 
         // Phase-5 edit capture: committed snapshots (the IM rung's own read
         // channel) and next-utterance field diffs (the paste rung, consent-
@@ -483,7 +490,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
         self.windowModel = windowModel
         windowModel.onPillHiddenChange = { [weak self] hidden in
             WispritUI.callOnMain {
-                if hidden { self?.pill.hide() } else { self?.pill.showIdle() }
+                self?.pill.hide()
+                if hidden { self?.notchOutline.hide() }
             }
         }
         self.windowController = MainWindowController(model: windowModel)
@@ -613,15 +621,11 @@ public final class AppController: NSObject, NSApplicationDelegate {
         do {
             let outcome = try LearnedTermCleanup.run(store: dictionary)
             log.info("learned-term cleanup: \(outcome.summary, privacy: .public)")
-            pill.transientNotice(outcome.changed
-                ? "Cleaned up learned spellings"
-                : "Nothing to clean up")
         } catch {
             log.error("""
                 learned-term cleanup failed, dictionary untouched: \
                 \(String(describing: error), privacy: .public)
                 """)
-            pill.transientNotice("Could not clean up learned spellings")
         }
     }
 
@@ -771,13 +775,6 @@ public final class AppController: NSObject, NSApplicationDelegate {
         startAvailabilityRefresh()
         startSecureInputWatch()
 
-        // A menu-bar-only app with a notch-hidden icon starts INVISIBLY — users
-        // read that as "not starting" (it happened). The pill flash is the
-        // proof-of-life: no window, no permission, just 1.6 s at the pill spot.
-        WispritUI.callOnMain { [pill] in
-            pill.transientNotice("Wisprit ready — hold 🌐 to dictate")
-        }
-
         // Listen for `clientLost` from the input method. This registers a local
         // message port and nothing else — no input source is touched until the
         // user has enabled live typing and holds the dictation key.
@@ -785,6 +782,13 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
         session.start()
         log.info("Wisprit ready — hold \(self.settings.hotkey, privacy: .public) to dictate.")
+        // Screenshot aid. Unset in normal use, so a launch does not leave the
+        // outline up. It draws the recording contour without opening the mic
+        // and without ordering the pill on screen.
+        if ProcessInfo.processInfo.environment["WISPRIT_PREVIEW_NOTCH"] == "1" {
+            notchOutline.show()
+            notchOutline.updateLevel(0.12)
+        }
     }
 
     private func auditPermissions() {
@@ -968,7 +972,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
     func polishLast(modeKey: String) {
         let mode = PolishMode.named(modeKey)
         guard let text = history.lastText(), !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            pill.transientNotice(PolishFailureKind.empty.notice)
+            log.info("\(PolishFailureKind.empty.notice, privacy: .public)")
             return
         }
         let polisher = self.polisher
@@ -978,10 +982,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
             switch result {
             case .success(let polished):
                 StatusMenu.copyToPasteboard(polished)
-                self.pill.transientNotice(PolishMenu.successNotice(for: mode))
+                self.log.info("\(PolishMenu.successNotice(for: mode), privacy: .public)")
             case .failure(let reason, let kind):
-                self.log.warning("polish failed: \(kind.notice, privacy: .public)")
-                self.pill.transientNotice(reason)
+                self.log.warning("polish failed: \(kind.notice, privacy: .public) — \(reason, privacy: .public)")
             }
         }
     }
@@ -994,7 +997,6 @@ public final class AppController: NSObject, NSApplicationDelegate {
     /// item, not an accident of it.
     func enableLiveTyping() {
         guard let plan = InputMethodInstaller.plan() else {
-            pill.transientNotice("No input method in this build")
             log.error("""
                 cannot enable live typing: no WispritIM.app at \
                 \(IMStagedBundle.relativePath, privacy: .public) — rebuild with scripts/build_app.sh
@@ -1004,18 +1006,18 @@ public final class AppController: NSObject, NSApplicationDelegate {
         guard !plan.isNoop else {
             LiveTypingSettings.setEnabled(settings, true)
             refreshLiveTypingStatus()
-            pill.transientNotice("Live Typing is ready")
+            log.info("Live Typing is ready")
             return
         }
         let outcome = InputMethodInstaller.run(plan)
         if outcome.ok {
             LiveTypingSettings.setEnabled(settings, true)
-            pill.transientNotice("Live Typing enabled")
+            log.info("Live Typing enabled")
         } else {
             // "run Doctor" pointed at a terminal ritual; the Setup page is the
             // same doctor rendered natively, so say that AND open it — the
             // remedy should not be a scavenger hunt (native-feel P6 / R9).
-            pill.transientNotice("Could not enable Live Typing — see Setup")
+            log.error("Could not enable Live Typing — see Setup")
             openWindow(tab: .setup)
         }
         refreshLiveTypingStatus()
@@ -1038,7 +1040,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
     /// all, and the sheet says so.
     func enableContextAwareness() {
         guard !ContextEnvironment.isDisabled else {
-            pill.transientNotice("Context Awareness is disabled (WISPRIT_NO_CONTEXT=1)")
+            log.info("Context Awareness is disabled (WISPRIT_NO_CONTEXT=1)")
             return
         }
         guard !ContextSettings.isEnabled(settings) else { return }
@@ -1058,7 +1060,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
         }
         ContextSettings.setEnabled(settings, true)
         contextCapture.prewarm()
-        pill.transientNotice("Context Awareness enabled")
+        log.info("Context Awareness enabled")
         statusMenu?.rebuild()
     }
 
@@ -1138,44 +1140,71 @@ public final class AppController: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Routes every pill call through `WispritUI.callOnMain`, so the session thread
-/// never touches AppKit directly. The Pill reference rides inside this
-/// `@unchecked Sendable` box; only the main-thread block ever dereferences it.
+/// Routes dictation UI through `WispritUI.callOnMain`.
+///
+/// The session thread never touches AppKit. Listening (`showPrewarming` /
+/// `showRecording` / `updateLevel`) draws the notch outline. Every other call
+/// — idle, finalizing, flashes, notices — orders the pill out and takes the
+/// outline down, so neither can stick on screen after the key comes up.
+/// `pill_hidden` still suppresses the outline; it no longer reveals a pill.
 final class MainThreadPill: PillPort, @unchecked Sendable {
     private let pill: Pill
-    /// `pill_hidden`, read live. The 20 Hz level tick is the one pill call
+    private let notch: NotchOutline
+    /// `pill_hidden`, read live. The 20 Hz level tick is the one call
     /// frequent enough that hopping it to main only to be dropped there is
     /// worth avoiding — and reading the setting here rather than at
     /// construction is what makes the Settings toggle take effect without a
     /// relaunch.
     private let isSuppressed: @Sendable () -> Bool
 
-    init(_ pill: Pill, isSuppressed: @escaping @Sendable () -> Bool = { false }) {
+    init(_ pill: Pill, notch: NotchOutline, isSuppressed: @escaping @Sendable () -> Bool = { false }) {
         self.pill = pill
+        self.notch = notch
         self.isSuppressed = isSuppressed
     }
 
-    private func onMain(_ work: @escaping @Sendable @MainActor (Pill) -> Void) {
-        WispritUI.callOnMain { [self] in work(self.pill) }
+    private func onMain(_ work: @escaping @Sendable @MainActor (Pill, NotchOutline) -> Void) {
+        WispritUI.callOnMain { [self] in work(self.pill, self.notch) }
     }
 
-    func showRecording() { onMain { $0.showRecording() } }
+    func showRecording() { showListening() }
+    func showPrewarming() { showListening() }
+
+    private func showListening() {
+        onMain { pill, notch in
+            pill.hide()
+            guard !self.isSuppressed() else {
+                notch.hide()
+                return
+            }
+            notch.show()
+        }
+    }
+
     func updateLevel(_ level: Double) {
         guard !isSuppressed() else { return }
-        onMain { $0.updateLevel(level) }
+        onMain { _, notch in notch.updateLevel(level) }
     }
-    func livePartial(_ text: String) { onMain { $0.livePartial(text) } }
-    func showFinalizing() { onMain { $0.showFinalizing() } }
-    func flashSuccess() { onMain { $0.flashSuccess() } }
-    func flashError(_ message: String) { onMain { $0.flashError(message) } }
-    func transientNotice(_ text: String) { onMain { $0.transientNotice(text) } }
-    func flashMissed(_ message: String) { onMain { $0.flashMissed(message) } }
-    func flashTooQuiet(_ message: String) { onMain { $0.flashTooQuiet(message) } }
-    func hide() { onMain { $0.hide() } }
-    func showIdle() { onMain { $0.showIdle() } }
-    func showPrewarming() { onMain { $0.showPrewarming() } }
-    func showRefining() { onMain { $0.showRefining() } }
-    func flashBlockedSecure() { onMain { $0.flashBlockedSecure() } }
+
+    func livePartial(_ text: String) { _ = text }
+    func transientNotice(_ text: String) { _ = text }
+
+    func showFinalizing() { dismiss() }
+    func flashSuccess() { dismiss() }
+    func flashError(_ message: String) { _ = message; dismiss() }
+    func flashMissed(_ message: String) { _ = message; dismiss() }
+    func flashTooQuiet(_ message: String) { _ = message; dismiss() }
+    func hide() { dismiss() }
+    func showIdle() { dismiss() }
+    func showRefining() { dismiss() }
+    func flashBlockedSecure() { dismiss() }
+
+    private func dismiss() {
+        onMain { pill, notch in
+            pill.hide()
+            notch.hide()
+        }
+    }
 }
 
 /// Stand-in when FoundationModels is not linkable; the cage treats it as an

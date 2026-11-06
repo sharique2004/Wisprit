@@ -66,6 +66,15 @@ public enum IMStagedBundle {
 
 enum TIS {
     static func source(withID id: String) -> TISInputSource? {
+        // Callers that are not already on main go through `select` / `status`,
+        // which hop first. Returning the source object across a queue would
+        // hand a non-Sendable HIToolbox ref to another thread.
+        dispatchPrecondition(condition: .onQueue(.main))
+        return sourceOnMain(withID: id)
+    }
+
+    /// Caller is already on the main thread (`InputSourceThreading`).
+    private static func sourceOnMain(withID id: String) -> TISInputSource? {
         let filter = [kTISPropertyInputSourceID as String: id] as CFDictionary
         guard let list = TISCreateInputSourceList(filter, true)?.takeRetainedValue()
             as? [TISInputSource]
@@ -75,27 +84,35 @@ enum TIS {
 
     @discardableResult
     static func select(_ id: String) -> Bool {
-        guard !LiveTypingEnvironment.isDisabled, let source = source(withID: id) else { return false }
-        return TISSelectInputSource(source) == noErr
+        InputSourceProbe.InputSourceThreading.onMain {
+            guard !LiveTypingEnvironment.isDisabled, let source = sourceOnMain(withID: id) else { return false }
+            return TISSelectInputSource(source) == noErr
+        }
     }
 
     @discardableResult
     static func deselect(_ id: String) -> Bool {
-        guard !LiveTypingEnvironment.isDisabled, let source = source(withID: id) else { return false }
-        return TISDeselectInputSource(source) == noErr
+        InputSourceProbe.InputSourceThreading.onMain {
+            guard !LiveTypingEnvironment.isDisabled, let source = sourceOnMain(withID: id) else { return false }
+            return TISDeselectInputSource(source) == noErr
+        }
     }
 
     @discardableResult
     static func register(bundleAt url: URL) -> Bool {
-        guard !LiveTypingEnvironment.isDisabled else { return false }
-        return TISRegisterInputSource(url as CFURL) == noErr
+        InputSourceProbe.InputSourceThreading.onMain {
+            guard !LiveTypingEnvironment.isDisabled else { return false }
+            return TISRegisterInputSource(url as CFURL) == noErr
+        }
     }
 
     /// PROMPTS THE USER. Onboarding only.
     @discardableResult
     static func enable(_ id: String) -> Bool {
-        guard !LiveTypingEnvironment.isDisabled, let source = source(withID: id) else { return false }
-        return TISEnableInputSource(source) == noErr
+        InputSourceProbe.InputSourceThreading.onMain {
+            guard !LiveTypingEnvironment.isDisabled, let source = sourceOnMain(withID: id) else { return false }
+            return TISEnableInputSource(source) == noErr
+        }
     }
 }
 

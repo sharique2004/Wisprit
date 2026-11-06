@@ -8,13 +8,25 @@ import Carbon
 /// This file calls `TISCreateInputSourceList` and nothing else. It never
 /// registers, enables, selects or deselects anything — those are the app's
 /// onboarding decisions, planned purely in `WispritIMProtocol.IMOnboarding` and
-/// executed by the app with the user watching. Reading is safe from anywhere,
-/// including `--status` on a developer's machine.
+/// executed by the app with the user watching.
+///
+/// HIToolbox aborts the process if Text Input Sources are touched from two
+/// threads, and once an event loop exists it asserts the main queue. Every
+/// entry point here hops to the main thread first. A caller that is already
+/// there (doctor, the menu timer) pays nothing.
 public enum InputSourceProbe {
 
     public static func status(sourceID: String = WispritIMNaming.inputSourceID,
                               layout: IMInstallLayout = .user,
                               stagedVersion: String? = nil) -> InputMethodStatus {
+        InputSourceThreading.onMain {
+            statusOnMain(sourceID: sourceID, layout: layout, stagedVersion: stagedVersion)
+        }
+    }
+
+    private static func statusOnMain(sourceID: String,
+                                    layout: IMInstallLayout,
+                                    stagedVersion: String?) -> InputMethodStatus {
         let installed = layout.installedBundle
         // Under the sandbox the file check reads false even when the bundle is
         // right there — but if this process IS that bundle, we have our answer.
@@ -56,6 +68,20 @@ public enum InputSourceProbe {
     private static func boolProperty(_ source: TISInputSource, _ key: CFString) -> Bool {
         guard let raw = TISGetInputSourceProperty(source, key) else { return false }
         return unsafeBitCast(raw, to: CFBoolean.self) == kCFBooleanTrue
+    }
+
+    /// Serialize every Text Input Sources call onto the main thread.
+    ///
+    /// `Thread.isMainThread` is the guard against `DispatchQueue.main.sync`
+    /// deadlocking a caller that is already on main. A background caller
+    /// (the dictation session thread) waits; the menu-bar timer, which is
+    /// already on main, runs inline. The two can no longer be inside
+    /// `TISCreateInputSourceList` at the same time.
+    public enum InputSourceThreading {
+        public static func onMain<T>(_ body: () -> T) -> T {
+            if Thread.isMainThread { return body() }
+            return DispatchQueue.main.sync(execute: body)
+        }
     }
 
     private static func version(ofBundleAt url: URL) -> String? {

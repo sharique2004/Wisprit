@@ -324,8 +324,19 @@ public enum StatusMenuModel {
         }
     }
 
-    /// Point size and weight for the status image (§5.1).
+    /// Point size for status images that are not the microphone (§5.1).
     public static let iconPointSize: Double = 16
+    /// Width basis for the menu-bar microphone. Height is `micIconHeightScale`
+    /// of this, so the glyph is shorter without another uniform shrink.
+    public static let micIconPointSize: Double = 12.8
+    /// Drawn height relative to the 12.8 pt microphone. 0.8 → about 10.2 pt.
+    public static let micIconHeightScale: Double = 0.8
+
+    /// Displayed point size. Only the microphone glyphs shrink; the lock and
+    /// the setup warning stay at `iconPointSize`.
+    public static func displayedPointSize(for symbolName: String) -> Double {
+        symbolName.hasPrefix("mic") ? micIconPointSize : iconPointSize
+    }
 
     /// `preview = row["text"].replace("\n", " ")`, then a 48-character budget
     /// with an ellipsis in the 48th slot.

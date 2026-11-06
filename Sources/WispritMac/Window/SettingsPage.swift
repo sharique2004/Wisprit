@@ -452,22 +452,16 @@ struct SettingsPage: View {
         }
     }
 
-    // MARK: - The pill
+    // MARK: - Listening
 
     private var pill: some View {
-        SectionGroup("The pill") {
-            SectionRow("Keep the bar on screen",
-                       description: "A small capsule stays on the desktop, like Flow. It expands while you talk.") {
+        SectionGroup("Listening") {
+            SectionRow("Outline while the key is held",
+                       description: "A hairline traces the notch while the key is held, then leaves.") {
                 Toggle("", isOn: Binding(get: { !model.pillHidden },
                                          set: { model.setPillHidden(!$0) }))
                     .labelsHidden()
-            }
-            SectionRow("Reset its position",
-                       description: "Puts it back at the bottom of the screen.") {
-                Button("Reset") { model.resetPillPosition() }
-                    .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .disabled(!model.hasPillPosition)
+                    .accessibilityLabel("Outline while the key is held")
             }
         }
     }

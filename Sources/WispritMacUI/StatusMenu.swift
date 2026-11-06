@@ -162,10 +162,12 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
     private static func image(for spec: MenuIconSpec) -> NSImage? {
         guard let image = NSImage(systemSymbolName: spec.symbolName,
                                   accessibilityDescription: "Wisprit") else { return nil }
+        let pointSize = StatusMenuModel.displayedPointSize(for: spec.symbolName)
         let configured = image.withSymbolConfiguration(
-            .init(pointSize: StatusMenuModel.iconPointSize, weight: .regular)) ?? image
+            .init(pointSize: pointSize, weight: .regular)) ?? image
         configured.isTemplate = spec.isTemplate
-        return configured
+        guard spec.symbolName.hasPrefix("mic") else { return configured }
+        return configured.withHeightScale(StatusMenuModel.micIconHeightScale)
     }
 
     /// `_rebuild_menu`: throw the menu away and rebuild it from fresh state.
@@ -295,6 +297,20 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
 }
 
 private extension NSImage {
+    /// Same width, shorter height, glyph scaled to fill and so centered.
+    /// A point size cannot change height on its own. 0.8 is mild enough that
+    /// the microphone still reads.
+    func withHeightScale(_ scale: CGFloat) -> NSImage {
+        guard size.width > 1, size.height > 1, scale > 0, scale < 1 else { return self }
+        let target = NSSize(width: size.width, height: size.height * scale)
+        let shortened = NSImage(size: target, flipped: false) { [self] rect in
+            draw(in: rect)
+            return true
+        }
+        shortened.isTemplate = isTemplate
+        return shortened
+    }
+
     /// A coloured copy. The draw block re-runs on every draw, so a dynamic
     /// `NSColor` still resolves against the appearance in effect at that moment.
     func tinted(with color: NSColor) -> NSImage {
