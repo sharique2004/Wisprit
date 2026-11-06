@@ -132,6 +132,112 @@ final class FuzzyVocabularyCorrectorTests: XCTestCase {
         XCTAssertEqual(c.applyCorrections(to: text), text)
     }
 
+    // MARK: - real-speech false triggers (docs/eval/AUDIT-2026-11-06.md)
+
+    /// A shared opening word carried the whole-window score: on LibriSpeech
+    /// the shipped layer turned every one of these into a dictionary term.
+    /// Each window must now align word by word with its hear phrase.
+    func testACommonOpeningWordNoLongerCarriesAWindowMatch() {
+        // The production lexicon knows these as words; the single-token tier
+        // is vetoed by it, so what is under test here is the WINDOW tier,
+        // which consults no lexicon at all.
+        let lexicon: Set<String> = [
+            "you", "can", "come", "and", "nail", "me", "up", "in", "the", "coffin", "no",
+            "did", "not", "hear", "bell", "so", "take", "him", "with", "teach", "stay",
+            "here", "pick", "any", "route", "want", "tonight", "he", "walked", "across",
+            "land", "she", "looked", "at", "man", "dawn", "this", "was", "end", "of", "it",
+            "then", "thought", "home", "went", "well", "to", "even", "if", "rains", "we",
+            "go", "very", "good", "said", "duke", "a", "tolerable", "some", "ways", "they",
+            "were", "forming", "ranks", "can't",
+        ]
+        let entries: [FuzzyVocabularyCorrector.Entry] = [
+            FuzzyVocabularyCorrector.Entry(term: "Ubuntu", hears: ["you bun to", "you bantu"]),
+            FuzzyVocabularyCorrector.Entry(term: "De Anza", hears: ["de anza", "the anza"]),
+            FuzzyVocabularyCorrector.Entry(term: "Anthropic", hears: ["and thropic"]),
+            FuzzyVocabularyCorrector.Entry(term: "hackathon", hears: ["hacker thought"]),
+            FuzzyVocabularyCorrector.Entry(term: "WellX", hears: ["well x", "well ex"]),
+            FuzzyVocabularyCorrector.Entry(term: "EventKit", hears: ["event kit"]),
+            FuzzyVocabularyCorrector.Entry(term: "Verilog", hears: ["very log"]),
+            FuzzyVocabularyCorrector.Entry(term: "InsForge", hears: ["ins forge", "in forge"]),
+        ]
+        let c = FuzzyVocabularyCorrector(
+            base: IdentityBase(),
+            entries: { entries },
+            isKnownTerm: { word in entries.contains { $0.term.lowercased() == word.lowercased() } },
+            isOrdinaryWord: { lexicon.contains($0.lowercased()) })
+        for sentence in [
+            "You can come and nail me up in the coffin.",
+            "No, did you not hear the bell?",
+            "So take him with you and teach him.",
+            "You can't stay here.",
+            "Pick any route you want tonight.",
+            "He walked across the land.",
+            "She looked at the man and the dawn.",
+            "And this was the end of it.",
+            "Then he thought of home.",
+            "It went well to the end.",
+            "Even if it rains, we go.",
+            "Very good, said the duke.",
+            "A tolerable man in some ways.",
+            "They were in forming ranks.",
+        ] {
+            XCTAssertEqual(c.applyCorrections(to: sentence), sentence)
+        }
+    }
+
+    /// The near-misses the window tier exists for still land.
+    func testAWordByWordNearMissStillRepairs() {
+        let c = corrector([
+            FuzzyVocabularyCorrector.Entry(term: "Wisprit", hears: ["whisper it"]),
+            FuzzyVocabularyCorrector.Entry(term: "InsForge", hears: ["ins forge"]),
+        ])
+        XCTAssertEqual(c.applyCorrections(to: "open wisper it now"), "open Wisprit now")
+        XCTAssertEqual(c.applyCorrections(to: "deploy to ins forges now"), "deploy to InsForge now")
+    }
+
+    /// The lexicon lists base forms; an inflection of an ordinary word is
+    /// still an ordinary word. "remained" used to clear the veto and match the
+    /// recorded hear "remain" (→ "RamAIn"); "sharks" only stayed safe in the
+    /// test above because the test lexicon lists the plural.
+    func testAnInflectionOfAnOrdinaryWordIsNeverReplaced() {
+        let lexicon: Set<String> = ["the", "remain", "shark", "letter", "verse", "stamp", "interest"]
+        let c = FuzzyVocabularyCorrector(
+            base: IdentityBase(),
+            entries: {[
+                FuzzyVocabularyCorrector.Entry(term: "RamAIn", hears: ["remain", "ram main"]),
+                FuzzyVocabularyCorrector.Entry(term: "Sharique", hears: ["Shariq"]),
+                FuzzyVocabularyCorrector.Entry(term: "Letta", hears: ["letter", "leta"]),
+                FuzzyVocabularyCorrector.Entry(term: "Vercel", hears: ["versell"]),
+                FuzzyVocabularyCorrector.Entry(term: "Intrsekt", hears: ["intersect"]),
+            ]},
+            isKnownTerm: { _ in false },
+            isOrdinaryWord: { lexicon.contains($0.lowercased()) })
+        for sentence in [
+            "The guests remained silent.",
+            "the sharks circled",
+            "She read the letters twice.",
+            "He recited the verses.",
+            "They stamped the forms.",
+            "Their interests differ.",
+        ] {
+            XCTAssertEqual(c.applyCorrections(to: sentence), sentence)
+        }
+        // A genuine inflected mishear of a TERM is untouched by the veto.
+        XCTAssertEqual(c.applyCorrections(to: "tell Shariqs about it"), "tell Sharique about it")
+    }
+
+    func testInflectionStemsCoverTheRegularSuffixes() {
+        let stems = { FuzzyVocabularyCorrector.inflectionStems($0) }
+        XCTAssertTrue(stems("remained").contains("remain"))
+        XCTAssertTrue(stems("letters").contains("letter"))
+        XCTAssertTrue(stems("carried").contains("carry"))
+        XCTAssertTrue(stems("stopped").contains("stop"))
+        XCTAssertTrue(stems("making").contains("make"))
+        XCTAssertTrue(stems("sarah's").contains("sarah"))
+        XCTAssertTrue(stems("quickly").contains("quick"))
+        XCTAssertTrue(stems("shreek").isEmpty)
+    }
+
     // MARK: - layering and idempotence
 
     /// The exact pass runs first and owns its spans; fuzzy only fills what it
