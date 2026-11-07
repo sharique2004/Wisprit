@@ -523,7 +523,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
     /// The window's system seams. Kept static and closure-shaped so the model
     /// never sees the controller (and so tests can build it with fakes).
-    private static func makeWindowPorts(history: History,
+    static func makeWindowPorts(history: History,
                                         settings: Settings,
                                         tierCache: BundleCapabilityCache,
                                         dictionary: DictionaryStore,

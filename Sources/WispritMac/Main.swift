@@ -40,6 +40,8 @@ enum WispritMacMain {
             MainActor.assumeIsolated { PillDemo.run(arguments: Array(arguments.dropFirst())) }
         case "notch-demo":
             MainActor.assumeIsolated { NotchDemo.run(arguments: Array(arguments.dropFirst())) }
+        case "render-window":
+            MainActor.assumeIsolated { WindowRender.run(arguments: Array(arguments.dropFirst())) }
         case "--version", "version":
             print("Wisprit \(WispritVersion.string)")
             exit(0)
