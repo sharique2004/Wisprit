@@ -475,7 +475,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
         self.statusMenu = StatusMenu(actions: makeMenuActions())
         let windowModel = WispritWindowModel(
             settings: settings,
-            dictionary: DictionaryEditor(store: dictionary),
+            // The fuzzy layer's lexicon, so the page's "everyday word" review
+            // and the engine's ordinary-word veto are one answer.
+            dictionary: DictionaryEditor(store: dictionary, ordinaryWords: OrdinaryWords(lexicon)),
             snippets: snippets,
             identity: identity,
             ports: AppController.makeWindowPorts(history: history,

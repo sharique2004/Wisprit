@@ -127,32 +127,64 @@ final class DictionaryPageTests: XCTestCase {
         XCTAssertEqual(terms(.alphabetical, search: "christoph"), ["Krzysztof"])
     }
 
-    // MARK: - badges
+    // MARK: - tags and the usage column
 
-    func testBadgesComeFromTheFieldsTheStorePersists() {
+    func testTagsComeFromTheFieldsTheStorePersists() {
         let rows = fixture()
-        XCTAssertEqual(DictionaryList.badges(for: rows[0]), [.used(3)])
-        XCTAssertEqual(DictionaryList.badges(for: rows[1]), [.learned, .used(14)])
-        XCTAssertEqual(DictionaryList.badges(for: rows[2]), [], "nothing true, nothing shown")
+        XCTAssertEqual(DictionaryList.tag(for: rows[0]).title, "added by you",
+                       "no `source` is the user's own entry")
+        XCTAssertEqual(DictionaryList.tag(for: rows[1]).title, "learned from a spelling")
+        XCTAssertEqual(DictionaryList.tag(for: rows[1]).symbol, "character.cursor.ibeam")
     }
 
-    /// A quarantined entry corrects nothing and has never been used, so
-    /// "Learned" and "Used" would both be lies even though `source` says
-    /// `spoken_spelling`.
-    func testAPendingEntryWearsOnlyThePendingBadge() {
-        XCTAssertEqual(DictionaryList.badges(for: fixture()[3]), [.pending])
-        XCTAssertEqual(DictionaryBadgeKind.pending.symbol, "clock")
-        XCTAssertEqual(DictionaryBadgeKind.learned.symbol, "sparkles")
-        XCTAssertNil(DictionaryBadgeKind.used(2).symbol)
+    /// A quarantined entry corrects nothing and has never been used, so its
+    /// provenance and a use count would both mislead: "heard once" is the
+    /// whole story, and the usage column is empty.
+    func testAPendingEntrySaysItWasHeardOnce() {
+        let pending = fixture()[3]
+        XCTAssertEqual(DictionaryList.tag(for: pending).symbol, "clock")
+        XCTAssertTrue(DictionaryList.tag(for: pending).title.hasPrefix("heard once"))
+        XCTAssertNil(DictionaryList.usage(pending).count)
+        XCTAssertNil(DictionaryList.usage(pending).date)
     }
 
-    func testHeardPhrasesCollapseAfterThree() {
+    func testTheUsageColumnSaysCountAndWhenAndNothingWhenUnused() {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let locale = Locale(identifier: "en_US_POSIX")
+        let now = date("2026-11-07T12:00:00Z")
+        let usage = DictionaryList.usage(fixture()[1], now: now, calendar: calendar,
+                                         locale: locale)
+
+        XCTAssertEqual(usage.count, "used 14×")
+        XCTAssertEqual(usage.date, "Aug 7")
+        XCTAssertEqual(usage.help, "Used 14 times, last Aug 7")
+        XCTAssertNil(DictionaryList.usage(fixture()[2]).count, "no record, no column of 0×")
+
+        func short(_ iso: String) -> String {
+            DictionaryList.shortDate(date(iso), now: now, calendar: calendar, locale: locale)
+        }
+        XCTAssertEqual(short("2026-11-07T01:00:00Z"), "today")
+        XCTAssertEqual(short("2026-11-06T23:00:00Z"), "yesterday")
+        XCTAssertEqual(short("2026-11-03T09:00:00Z"), "4 days ago")
+        XCTAssertEqual(short("2026-08-23T09:00:00Z"), "Aug 23")
+        XCTAssertEqual(short("2025-08-23T09:00:00Z"), "Aug 23, 2025")
+    }
+
+    func testHeardPhrasesCollapseAfterFour() {
         XCTAssertEqual(DictionaryList.chips(["a", "b"]).visible, ["a", "b"])
         XCTAssertEqual(DictionaryList.chips(["a", "b"]).overflow, 0)
 
-        let many = DictionaryList.chips(["a", "b", "c", "d", "e"])
-        XCTAssertEqual(many.visible, ["a", "b", "c"])
+        let many = DictionaryList.chips(["a", "b", "c", "d", "e", "f"])
+        XCTAssertEqual(many.visible, ["a", "b", "c", "d"])
         XCTAssertEqual(many.overflow, 2)
+        XCTAssertEqual(many.hidden, ["e", "f"])
+    }
+
+    func testTheCountLabelNamesTheFilter() {
+        XCTAssertEqual(DictionaryList.countLabel(139, filter: .all), "139 terms")
+        XCTAssertEqual(DictionaryList.countLabel(1, filter: .learned), "1 learned term")
+        XCTAssertEqual(DictionaryList.countLabel(2, filter: .added), "2 terms added by you")
     }
 
     // MARK: - the sheet
@@ -320,11 +352,11 @@ final class DictionaryPageTests: XCTestCase {
         XCTAssertEqual(model.dictionaryRows.map(\.term), ["Krzysztof"])
     }
 
-    // MARK: - the learn-proposals banner (Phase 5)
+    // MARK: - learn proposals in the review (Phase 5)
 
-    /// The banner's copy, as functions of values: singular vs plural, and the
+    /// The proposals' copy, as functions of values: singular vs plural, and the
     /// evidence line that shows what the recognizer actually wrote.
-    func testTheProposalsBannerCopy() {
+    func testTheProposalsCopy() {
         XCTAssertEqual(DictionaryList.proposalsHeadline(1), "1 new word heard in your edits")
         XCTAssertEqual(DictionaryList.proposalsHeadline(3), "3 new words heard in your edits")
 
