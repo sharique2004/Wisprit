@@ -66,6 +66,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
     /// the user is waiting on a Dock click.
     private var windowModel: WispritWindowModel!
     private var windowController: MainWindowController!
+    /// The app the user was in before Wisprit came forward — where Paste
+    /// again puts text back.
+    private let previousApp = PreviousAppTracker()
     /// One window-raise per launch for a broken hotkey tap; the ghost-tap
     /// watchdog can fire repeatedly and must not keep stealing focus.
     private var inputMonitoringSurfaced = false
@@ -468,7 +471,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 editScriptGates: {
                     settings.string(RefineBackendSettings.key, or: RefineBackendSettings.apple)
                         == RefineBackendSettings.appleEdits
-                }))
+                },
+                // Where each dictation went — the Dictations row's app icon.
+                frontmostBundleID: { AppController.frontmostBundleID() }))
 
         super.init()
 
@@ -498,6 +503,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
             }
         }
         self.windowController = MainWindowController(model: windowModel)
+        previousApp.start()
 
         let statusMenu = self.statusMenu!
         session.onStateChange = { [weak self] state in
@@ -581,31 +587,78 @@ public final class AppController: NSObject, NSApplicationDelegate {
                 metrics.writeOnboarding(firstLaunchToDictateMs: deltaMs,
                                         stepsSkipped: skipped,
                                         relaunchCount: relaunches)
-            })
+            },
+            dictations: { history.dictations(limit: $0) },
+            metricsStamp: {
+                let attributes = try? FileManager.default.attributesOfItem(
+                    atPath: metrics.metricsPath.path)
+                return attributes?[.modificationDate] as? Date
+            },
+            metricsRows: { metrics.readAll() })
     }
 
-    /// Home's per-row "paste at cursor" (§3.3).
+    /// Dictations' Paste again (↵ or the inspector button): put the text back
+    /// into the app the user was in before they came to Wisprit.
     ///
-    /// Two things this cannot skip. The Hub window is key when the button is
-    /// clicked, so the app has to hand the front back before anything is
-    /// posted — `deactivate()` (never `hide`, which would take the pill down
-    /// with it, see `MainWindowController.windowWillClose`) — and the settle is
-    /// the same measured 0.25 s the window uses in the other direction. And the
-    /// insert itself sleeps for the clipboard-restore delay (500 ms by
-    /// default), so it runs off the main thread, which is carrying the hotkey
-    /// tap and the live-typing stream.
+    /// The window is key when this runs, and ⌘V goes to whichever app is
+    /// frontmost — so the one thing this must never do is post while that is
+    /// still Wisprit (the text would land in the search field). It used to
+    /// `deactivate()` and post 0.25 s later regardless; under cooperative
+    /// activation (macOS 14+) a bare deactivate does not reliably hand the
+    /// front to anyone. Now:
+    ///
+    ///  1. the app the user was in (`PreviousAppTracker`) is activated
+    ///     explicitly — yield, then `activate(from:)`, the cooperative pair —
+    ///     or, when there is none, the old `deactivate()`;
+    ///  2. the frontmost app is polled until it is that app
+    ///     (`PasteAgainHandoff`), then a short settle lets its key window take
+    ///     focus;
+    ///  3. only then is the text inserted, off the main thread (the insert
+    ///     sleeps for the clipboard-restore delay, and main carries the hotkey
+    ///     tap and the live-typing stream).
+    ///
+    /// If Wisprit still has the front when the wait runs out, nothing is
+    /// pasted; the text goes on the clipboard instead, so ⌘V still works by
+    /// hand. Never `hide` — that would take the pill down with it (see
+    /// `MainWindowController.windowWillClose`).
     ///
     /// `WispritWindowModel.pasteAtCursor` refuses mid-utterance, so this never
     /// races the session's own clipboard swap.
     private func pasteFromWindow(_ text: String) {
         guard !text.isEmpty else { return }
         let inserter = SettingsInserterPort(inserter: Inserter(), settings: settings)
-        NSApp.deactivate()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) {
-            DispatchQueue.global(qos: .userInitiated).async {
-                _ = inserter.insert(text)
+        let own = ProcessInfo.processInfo.processIdentifier
+        let target = previousApp.app.flatMap { $0.isTerminated ? nil : $0 }
+        if let target {
+            NSApp.yieldActivation(to: target)
+            target.activate(from: .current, options: [])
+        } else {
+            NSApp.deactivate()
+        }
+        let started = Date()
+        let log = self.log
+        func poll() {
+            let elapsed = Date().timeIntervalSince(started)
+            let front = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            switch PasteAgainHandoff.decide(frontmost: front, own: own,
+                                            target: target?.processIdentifier,
+                                            elapsed: elapsed) {
+            case .wait:
+                DispatchQueue.main.asyncAfter(deadline: .now() + PasteAgainHandoff.pollInterval) {
+                    poll()
+                }
+            case .paste:
+                DispatchQueue.main.asyncAfter(deadline: .now() + PasteAgainHandoff.settle(after: elapsed)) {
+                    DispatchQueue.global(qos: .userInitiated).async {
+                        _ = inserter.insert(text)
+                    }
+                }
+            case .giveUp:
+                StatusMenu.copyToPasteboard(text)
+                log.warning("paste again: Wisprit kept the front; copied to the clipboard instead")
             }
         }
+        poll()
     }
 
     /// Perform one checklist fix. `enableLiveTyping` and the relaunch are the
@@ -1278,5 +1331,70 @@ struct UnavailablePolishGenerator: PolishGenerating {
         throw PolishError.unavailable("FoundationModels unavailable in this build")
     }
     func discard() async {}
+}
+
+// MARK: - Paste again
+
+/// Remembers the last app other than Wisprit to become active — the app the
+/// user was in before they came to the window, which is where Paste again
+/// puts text back. One workspace observer for the life of the process; no
+/// polling, and nothing is read about the app beyond its process.
+final class PreviousAppTracker {
+    private(set) var app: NSRunningApplication?
+    private var observer: NSObjectProtocol?
+
+    func start() {
+        guard observer == nil else { return }
+        let own = ProcessInfo.processInfo.processIdentifier
+        if let front = NSWorkspace.shared.frontmostApplication, front.processIdentifier != own {
+            app = front
+        }
+        observer = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil, queue: .main) { [weak self] note in
+            guard let activated = note.userInfo?[NSWorkspace.applicationUserInfoKey]
+                    as? NSRunningApplication,
+                  activated.processIdentifier != own else { return }
+            self?.app = activated
+        }
+    }
+
+    deinit {
+        if let observer { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+    }
+}
+
+/// When Paste again may post: the pure half of `pasteFromWindow`'s wait.
+enum PasteAgainHandoff {
+    enum Step: Equatable {
+        /// Wisprit (or not yet the target) still has the front.
+        case wait
+        /// Someone else has the front: post after the settle.
+        case paste
+        /// The window never got out of the way. Do not post.
+        case giveUp
+    }
+
+    static let pollInterval: TimeInterval = 0.05
+    /// Long enough for an activation the system is going to grant at all.
+    static let timeout: TimeInterval = 1.5
+    /// The measured 0.25 s the window waits in the other direction, counted
+    /// from the request: an app that took 0.2 s to come forward gets 0.05 s
+    /// more, never less than 0.1 s for its key window to take focus.
+    static func settle(after elapsed: TimeInterval) -> TimeInterval {
+        max(0.1, 0.25 - elapsed)
+    }
+
+    /// Post only once the front is not Wisprit. While a specific app was
+    /// asked for, keep waiting for THAT app until the timeout; at the timeout,
+    /// any app that is not Wisprit will do, and Wisprit itself never does.
+    static func decide(frontmost: pid_t?, own: pid_t, target: pid_t?,
+                       elapsed: TimeInterval) -> Step {
+        if let front = frontmost, front != own,
+           target == nil || front == target || elapsed >= timeout {
+            return .paste
+        }
+        return elapsed >= timeout ? .giveUp : .wait
+    }
 }
 #endif
