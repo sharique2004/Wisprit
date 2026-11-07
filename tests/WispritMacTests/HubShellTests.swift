@@ -348,3 +348,27 @@ final class SettingsPageWriteTests: XCTestCase {
         XCTAssertNotNil(model.lastProbeAt)
     }
 }
+
+/// The toolbar capsule's copy — short enough to share the toolbar, never
+/// shorter than the truth.
+final class StatusCapsuleCopyTests: XCTestCase {
+    func testOwnerPrefixesAreDropped() {
+        XCTAssertEqual(StatusCapsule.shortDeviceName("Sharique’s AirPods Max"), "AirPods Max")
+        XCTAssertEqual(StatusCapsule.shortDeviceName("Sam's iPhone Microphone"), "iPhone Microphone")
+        XCTAssertEqual(StatusCapsule.shortDeviceName("MacBook Pro Microphone"), "MacBook Pro Microphone")
+        XCTAssertEqual(StatusCapsule.shortDeviceName("’s "), "’s")
+    }
+
+    func testTheLabelNamesTheMicWhenThereIsOne() {
+        XCTAssertEqual(StatusCapsule.label(status: .ready, deviceName: "Sharique’s AirPods Max"),
+                       "AirPods Max")
+        XCTAssertEqual(StatusCapsule.label(status: .listening, deviceName: ""), "Listening")
+        XCTAssertEqual(StatusCapsule.label(status: .needsSetup, deviceName: "X"), "Needs setup")
+        XCTAssertEqual(StatusCapsule.label(status: .dictationOff, deviceName: "X"), "Dictation off")
+    }
+
+    func testTheTooltipKeepsTheFullSentence() {
+        XCTAssertEqual(StatusCapsule.tooltip(status: .ready, deviceName: "Sharique’s AirPods Max"),
+                       "Ready. Dictating with Sharique’s AirPods Max. Click to open Setup.")
+    }
+}

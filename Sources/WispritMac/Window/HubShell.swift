@@ -106,20 +106,55 @@ struct StatusCapsule: View {
             }
             .padding(.horizontal, Theme.Space.s4)
         }
-        .help(status == .needsSetup ? "Something needs fixing — open Setup" : "Setup and health")
-        .accessibilityLabel("Wisprit is \(status.label.lowercased()). Open setup.")
+        .help(Self.tooltip(status: status, deviceName: model.facts.inputDeviceName))
+        .accessibilityLabel(Self.tooltip(status: status, deviceName: model.facts.inputDeviceName))
     }
 
     private func label(for status: WispritWindowModel.SidebarStatus) -> String {
+        Self.label(status: status, deviceName: model.facts.inputDeviceName)
+    }
+
+    /// What the capsule says. It shares the toolbar with page actions and a
+    /// search field, so it carries the least that is still true: the dot
+    /// already says ready (green) or listening (orange), and the words name
+    /// the microphone — the one thing the dot cannot.
+    static func label(status: WispritWindowModel.SidebarStatus, deviceName: String) -> String {
         switch status {
         case .needsSetup:
-            return "Needs setup · Fix"
-        case .ready, .listening:
-            let mic = model.facts.inputDeviceName
-            return mic.isEmpty ? status.label : "\(status.label) · \(mic)"
+            return "Needs setup"
         case .dictationOff:
-            return status.label
+            return "Dictation off"
+        case .ready, .listening:
+            let mic = shortDeviceName(deviceName)
+            return mic.isEmpty ? status.label : mic
         }
+    }
+
+    /// The full sentence, for the tooltip and VoiceOver.
+    static func tooltip(status: WispritWindowModel.SidebarStatus, deviceName: String) -> String {
+        let mic = deviceName.trimmingCharacters(in: .whitespaces)
+        switch status {
+        case .needsSetup: return "Something needs fixing. Click to open Setup."
+        case .dictationOff: return "Dictation is off. Click to open Setup."
+        case .ready:
+            return mic.isEmpty ? "Ready. Click to open Setup."
+                : "Ready. Dictating with \(mic). Click to open Setup."
+        case .listening:
+            return mic.isEmpty ? "Listening." : "Listening with \(mic)."
+        }
+    }
+
+    /// "Sharique’s AirPods Max" → "AirPods Max". Owner prefixes are what
+    /// macOS adds to every personal device; the model name is what people say.
+    static func shortDeviceName(_ name: String) -> String {
+        let trimmed = name.trimmingCharacters(in: .whitespaces)
+        for apostrophe in ["’s ", "'s "] {
+            if let range = trimmed.range(of: apostrophe) {
+                let rest = trimmed[range.upperBound...].trimmingCharacters(in: .whitespaces)
+                if !rest.isEmpty { return rest }
+            }
+        }
+        return trimmed
     }
 
     private func color(for status: WispritWindowModel.SidebarStatus) -> Color {
