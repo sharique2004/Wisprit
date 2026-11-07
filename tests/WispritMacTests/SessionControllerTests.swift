@@ -58,6 +58,7 @@ final class SessionControllerTests: XCTestCase {
              inputWarning: @escaping @Sendable () -> String? = { nil },
              inputVolumeAdvisory: @escaping @Sendable () -> Int? = { nil },
              editScriptGates: @escaping @Sendable () -> Bool = { false },
+             frontmostBundleID: @escaping @Sendable () -> String? = { nil },
              // Swap in a different pill for the tests whose subject is what the
              // bubble renders rather than which calls it received.
              pillPort: (any PillPort)? = nil) {
@@ -94,7 +95,8 @@ final class SessionControllerTests: XCTestCase {
                     adaptiveGrace: adaptiveGrace,
                     inputWarning: inputWarning,
                     inputVolumeAdvisory: inputVolumeAdvisory,
-                    editScriptGates: editScriptGates))
+                    editScriptGates: editScriptGates,
+                    frontmostBundleID: frontmostBundleID))
             inserter.deferredLabel = { [weak session] in session?.deferredLabel }
         }
 

@@ -82,6 +82,14 @@ public final class WispritWindowModel: ObservableObject {
         /// Track B owns the writer; this seam is the only way the row is
         /// written, so the schema stays owned in one place.
         public var writeOnboardingRow: @Sendable (Double, Int, Int) -> Void
+        /// Dictations: the newest N transcripts with their detail and delivery
+        /// facts (`History.dictations`). Called off the main actor.
+        public var dictations: @Sendable (Int) -> [DictationRow]
+        /// `metrics.log`'s modification date — the Dictations page re-parses
+        /// the log only when this moves.
+        public var metricsStamp: @Sendable () -> Date?
+        /// Every line of `metrics.log` (`MetricsWriter.readAll`). Off the main actor.
+        public var metricsRows: @Sendable () -> [JSONObject]
 
         public init(fullProbe: @escaping @Sendable () async -> DoctorFacts = { DoctorFacts() },
                     fastProbe: @escaping @Sendable (DoctorFacts) -> DoctorFacts = { $0 },
@@ -97,7 +105,10 @@ public final class WispritWindowModel: ObservableObject {
                     dismissLearnProposal: @escaping @Sendable (String) -> Void = { _ in },
                     dataStores: @escaping @Sendable () -> [DataStoreStatus] = { [] },
                     purgeDataStore: @escaping @Sendable (DataStoreID) -> Void = { _ in },
-                    writeOnboardingRow: @escaping @Sendable (Double, Int, Int) -> Void = { _, _, _ in }) {
+                    writeOnboardingRow: @escaping @Sendable (Double, Int, Int) -> Void = { _, _, _ in },
+                    dictations: @escaping @Sendable (Int) -> [DictationRow] = { _ in [] },
+                    metricsStamp: @escaping @Sendable () -> Date? = { nil },
+                    metricsRows: @escaping @Sendable () -> [JSONObject] = { [] }) {
             self.fullProbe = fullProbe
             self.fastProbe = fastProbe
             self.globeKey = globeKey
@@ -113,6 +124,9 @@ public final class WispritWindowModel: ObservableObject {
             self.dataStores = dataStores
             self.purgeDataStore = purgeDataStore
             self.writeOnboardingRow = writeOnboardingRow
+            self.dictations = dictations
+            self.metricsStamp = metricsStamp
+            self.metricsRows = metricsRows
         }
     }
 
@@ -281,6 +295,9 @@ public final class WispritWindowModel: ObservableObject {
     /// Home's search box (§3.3). Not a filter the model applies: `HomeModel`
     /// owns the matching rule and the page calls it.
     @Published public var historySearch = ""
+    /// The Dictations page's rows, selection and inspector state — its own
+    /// object, defined in `WindowModel+Dictations.swift`.
+    public let dictationsFeed = DictationsFeed()
 
     // Onboarding
     @Published public private(set) var isOnboarding = false
@@ -643,6 +660,10 @@ public final class WispritWindowModel: ObservableObject {
             // it means the limit, not the table, decided where the list stopped.
             self.historyHasMore = page.0.count >= limit
         }
+        // A search covers everything retained, not just the page on screen.
+        dictationsFeed.reload(limit: historySearch.isEmpty ? limit : max(limit, historyLimit),
+                              rows: ports.dictations,
+                              metricsStamp: ports.metricsStamp, metricsRows: ports.metricsRows)
     }
 
     public func loadMoreHistory() {

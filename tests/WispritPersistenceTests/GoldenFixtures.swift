@@ -139,7 +139,27 @@ enum Golden {
     /// this file's history section has taken: `historyTableSQL` above still has
     /// to come back byte-identical from a Swift-created database, which is the
     /// proof that a Python-era file and a Swift-era one are still the same file.
-    static let historyMasterNames = ["sqlite_sequence", "transcripts", "utterance_detail"]
+    static let historyMasterNames = ["sqlite_sequence", "transcript_meta", "transcripts",
+                                     "utterance_detail"]
+
+    /// `sqlite_master.sql` for the delivery-facts table (the Dictations page's
+    /// app icon and timings). A side table, not a column, for the same reason
+    /// `utterance_detail` is: `historyTableSQL` must stay byte-identical.
+    static let historyMetaTableSQL = """
+    CREATE TABLE transcript_meta (
+        transcript_id      INTEGER PRIMARY KEY,
+        app_bundle_id      TEXT,
+        outcome            TEXT,
+        release_to_text_ms REAL,
+        finalize_ms        REAL,
+        ai_ms              REAL,
+        post_ms            REAL,
+        insert_ms          REAL,
+        ai                 TEXT,
+        input_device       TEXT,
+        created            REAL
+    )
+    """
     static let historyJournalMode = "wal"
 
     /// `sqlite_master.sql` for the per-utterance detail table, read back out of a

@@ -257,6 +257,10 @@ public final class SessionController: @unchecked Sendable {
         /// (`apple`) leaves this false, and the session then passes nil edit
         /// constraints — confidence does not change inserted text.
         public var editScriptGates: @Sendable () -> Bool
+        /// The frontmost app's bundle id, read once the text has landed so the
+        /// Dictations page can show where each dictation went. nil by default:
+        /// a wiring that omits it records no app, never a wrong one.
+        public var frontmostBundleID: @Sendable () -> String?
 
         public init(holdDebounceMs: @escaping @Sendable () -> Double = { 150 },
                     isEnabled: @escaping @Sendable () -> Bool = { true },
@@ -271,7 +275,8 @@ public final class SessionController: @unchecked Sendable {
                     adaptiveGrace: Bool = false,
                     inputWarning: @escaping @Sendable () -> String? = { nil },
                     inputVolumeAdvisory: @escaping @Sendable () -> Int? = { nil },
-                    editScriptGates: @escaping @Sendable () -> Bool = { false }) {
+                    editScriptGates: @escaping @Sendable () -> Bool = { false },
+                    frontmostBundleID: @escaping @Sendable () -> String? = { nil }) {
             self.holdDebounceMs = holdDebounceMs
             self.isEnabled = isEnabled
             self.postProcessOptions = postProcessOptions
@@ -286,6 +291,7 @@ public final class SessionController: @unchecked Sendable {
             self.inputWarning = inputWarning
             self.inputVolumeAdvisory = inputVolumeAdvisory
             self.editScriptGates = editScriptGates
+            self.frontmostBundleID = frontmostBundleID
         }
     }
 
@@ -914,6 +920,22 @@ public final class SessionController: @unchecked Sendable {
                           raw: raw, corrected: correction.text, refined: refined,
                           inserted: insertion.ok ? text : "",
                           vocab: nil, ai: aiOutcome.rawValue, termsHit: [])
+        // Where it went and how long each stage took, for the Dictations
+        // page's row icon and inspector. The same numbers the metrics row just
+        // carried, persisted against the transcript so the page never has to
+        // guess which metrics line belongs to which row. The frontmost app is
+        // read here, after delivery and off the paste path — the text has
+        // landed in it a few milliseconds ago.
+        history.addMeta(transcriptId: transcriptId, TranscriptMeta(
+            appBundleID: config.frontmostBundleID(),
+            outcome: insertion.outcome,
+            releaseToTextMs: (tText - tRelease) * 1000.0,
+            finalizeMs: result.finalizeMs,
+            aiMs: (tAi - tAsr) * 1000.0,
+            postMs: (tPost - tAi) * 1000.0,
+            insertMs: (tText - tPost) * 1000.0,
+            ai: aiOutcome.rawValue,
+            inputDevice: audio.deviceFacts?.name))
 
         // What the paste-rung observation will need at the NEXT finalize.
         setLastDelivery(insertion.ok ? (text, insertion.outcome) : nil)

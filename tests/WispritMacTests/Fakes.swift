@@ -383,6 +383,19 @@ final class FakeHistory: HistoryPort, @unchecked Sendable {
         return true
     }
 
+    private var storedMetas: [(transcriptId: Int64, meta: TranscriptMeta)] = []
+    var metas: [(transcriptId: Int64, meta: TranscriptMeta)] {
+        lock.lock(); defer { lock.unlock() }; return storedMetas
+    }
+
+    @discardableResult
+    func addMeta(transcriptId: Int64, _ meta: TranscriptMeta) -> Bool {
+        guard transcriptId > 0 else { return false }
+        lock.lock(); defer { lock.unlock() }
+        storedMetas.append((transcriptId, meta))
+        return true
+    }
+
     func lastText() -> String? { lock.lock(); defer { lock.unlock() }; return last }
 }
 

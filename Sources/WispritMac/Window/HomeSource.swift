@@ -149,6 +149,111 @@ enum HomeSource {
         "day\(days == 1 ? "" : "s")"
     }
 
+    // MARK: - Dictations: history → the neutral record
+
+    /// `[DictationRow]` → `[DictationRecord]`, newest first. The detail triple
+    /// and the delivery facts are carried when they exist and left nil when
+    /// they do not — the page tells "not recorded" apart from "nothing".
+    static func records(_ rows: [DictationRow]) -> [DictationRecord] {
+        rows.map { row in
+            let entry = row.entry
+            let detail = row.detail
+            let meta = row.meta
+            var timing: DictationTiming?
+            if let meta {
+                let persisted = DictationTiming(releaseToTextMs: meta.releaseToTextMs,
+                                                recognizeMs: meta.finalizeMs,
+                                                cleanupMs: meta.aiMs)
+                timing = persisted.isEmpty ? nil : persisted
+            }
+            var delivered: Bool?
+            if let detail { delivered = !detail.inserted.isEmpty }
+            if let outcome = meta?.outcome, ["blocked_secure", "error"].contains(outcome) {
+                delivered = false
+            }
+            return DictationRecord(
+                id: entry.id, ts: entry.ts, text: entry.text, engine: entry.engine,
+                durationMs: entry.durationMs,
+                heard: detail.map(\.raw).flatMap { $0.isEmpty ? nil : $0 },
+                corrected: detail?.corrected, refined: detail?.refined,
+                delivered: delivered,
+                ai: meta?.ai ?? detail?.ai,
+                appBundleID: meta?.appBundleID.flatMap { $0.isEmpty ? nil : $0 },
+                outcome: meta?.outcome,
+                timing: timing,
+                inputDevice: meta?.inputDevice)
+        }
+    }
+
+    // MARK: - Dictations: metrics.log → the neutral line
+
+    /// Every utterance line of `metrics.log`, oldest first. The reference-less
+    /// rows (`vocab_retro`, `edit_observed`, `onboarding`) describe no hold and
+    /// are dropped here, so nothing downstream can mistake one for a capture.
+    static func utterances(_ rows: [JSONObject]) -> [MetricsUtterance] {
+        rows.compactMap { row -> MetricsUtterance? in
+            guard let outcome = string(row, "outcome"),
+                  !MetricsSummary.nonUtteranceOutcomes.contains(outcome),
+                  let ts = number(row, "ts") else { return nil }
+            return MetricsUtterance(
+                ts: ts,
+                heldMs: number(row, "held_ms") ?? 0,
+                outcome: outcome,
+                emptyReason: string(row, "empty_reason"),
+                audioMs: number(row, "audio_ms"),
+                releaseToTextMs: number(row, "release_to_text_ms"),
+                finalizeMs: number(row, "finalize_ms"),
+                aiMs: number(row, "ai_ms"),
+                ai: string(row, "ai"),
+                refineDelta: number(row, "refine_delta").map { Int($0) },
+                inputDevice: string(row, "input_device"),
+                marginalAudio: isTrue(row, "marginal_audio"),
+                configChanged: isTrue(row, "config_changed"))
+        }
+    }
+
+    private static func number(_ row: JSONObject, _ key: String) -> Double? {
+        switch row[key] {
+        case .double(let value)?: return value
+        case .int(let value)?: return Double(value)
+        default: return nil
+        }
+    }
+
+    private static func string(_ row: JSONObject, _ key: String) -> String? {
+        guard case .string(let value)? = row[key] else { return nil }
+        return value
+    }
+
+    private static func isTrue(_ row: JSONObject, _ key: String) -> Bool {
+        switch row[key] {
+        case .bool(let value)?: return value
+        case .int(let value)?: return value != 0
+        default: return false
+        }
+    }
+
+    // MARK: - Dictations: captions
+
+    /// `HH:mm · N words` — a dictation row's caption. The chips follow it.
+    static func dictationCaption(_ record: DictationRecord, calendar: Calendar) -> String {
+        [time(record.date, calendar: calendar), words(record.wordCount)].joined(separator: " · ")
+    }
+
+    /// `HH:mm · 1.3 s of audio · the mic was still connecting`, or for a
+    /// folded run `HH:mm–HH:mm · 4 tries · it was quiet the whole time`.
+    static func missCaption(_ miss: MissedCapture, calendar: Calendar) -> String {
+        guard miss.count > 1 else {
+            return [time(miss.date, calendar: calendar),
+                    "\(DictationsModel.heldLength(ms: miss.heldMs)) of audio",
+                    miss.copy.short].joined(separator: " · ")
+        }
+        let first = time(Date(timeIntervalSince1970: miss.firstTs), calendar: calendar)
+        let last = time(miss.date, calendar: calendar)
+        let span = first == last ? last : "\(first)–\(last)"
+        return [span, "\(miss.count) tries", miss.copy.short].joined(separator: " · ")
+    }
+
     // MARK: - add to dictionary
 
     /// What the add-a-term popover starts with.

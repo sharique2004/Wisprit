@@ -2,6 +2,7 @@
 import AppKit
 import SwiftUI
 import WispritDictionary
+import WispritKit
 import WispritMacUI
 import WispritPersistence
 
@@ -22,7 +23,7 @@ import WispritPersistence
 /// the height cap to draw a long pane whole).
 @MainActor
 enum WindowRender {
-    static let usage = "usage: Wisprit render-window <home|dictionary|insights|setup|settings> <out.png> [--size WxH] [--light] [--settle SECONDS] [--pane NAME] [--full]"
+    static let usage = "usage: Wisprit render-window <home|dictionary|insights|setup|settings> <out.png> [--size WxH] [--light] [--settle SECONDS] [--pane NAME] [--full] [--select first|missed|changed] [--heard] [--search TEXT] [--history PATH]"
 
     static func run(arguments: [String]) -> Never {
         guard arguments.count >= 2 else {
@@ -36,6 +37,13 @@ enum WindowRender {
         var settle: TimeInterval = 2.5
         var pane: SettingsPane?
         var full = false
+        // Dictations only: open the inspector on a row, show its Heard side,
+        // or render with a filter typed.
+        var preselect: DictationsFeed.Preselect?
+        var showsHeard = false
+        var search: String?
+        // A history file other than the live one — a fixture, or a copy.
+        var historyPath = WispritPaths.historyPath
         var index = 2
         while index < arguments.count {
             switch arguments[index] {
@@ -55,6 +63,16 @@ enum WindowRender {
                 }
                 pane = named
                 index += 1
+            case "--select" where index + 1 < arguments.count:
+                preselect = DictationsFeed.Preselect(rawValue: arguments[index + 1])
+                index += 1
+            case "--heard": showsHeard = true
+            case "--history" where index + 1 < arguments.count:
+                historyPath = URL(fileURLWithPath: arguments[index + 1])
+                index += 1
+            case "--search" where index + 1 < arguments.count:
+                search = arguments[index + 1]
+                index += 1
             default: break
             }
             index += 1
@@ -65,8 +83,12 @@ enum WindowRender {
 
         let settings = Settings.load()
         let dictionary = DictionaryStore()
-        let history = History(settings: settings,
-                              detailEnabled: HistoryDetailSettings.isEnabled(settings))
+        // Read-only: a render must never write the user's live database, not
+        // even an additive CREATE TABLE.
+        let history = History(path: historyPath,
+                              settings: settings,
+                              detailEnabled: HistoryDetailSettings.isEnabled(settings),
+                              readOnly: true)
         let model = WispritWindowModel(
             settings: settings,
             dictionary: DictionaryEditor(store: dictionary),
@@ -123,6 +145,12 @@ enum WindowRender {
         window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
         window.orderFrontRegardless()
 
+        model.dictationsFeed.preselect = preselect
+        model.dictationsFeed.showsHeard = showsHeard
+        if let search {
+            model.historySearch = search
+            model.dictationsFeed.preselectQuery = search
+        }
         model.windowDidOpen()
         Task { await model.refreshFull() }
         RunLoop.main.run(until: Date().addingTimeInterval(settle))
