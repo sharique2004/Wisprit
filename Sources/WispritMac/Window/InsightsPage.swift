@@ -4,10 +4,16 @@ import SwiftUI
 import WispritMacUI
 import WispritPersistence
 
-/// Insights — `docs/design/ui-redesign.md` §3.5.
+/// Insights — headlines first, details on demand.
 ///
-/// The page is three things stacked on top of each other, and only the last one
-/// is a view:
+/// The page used to be a dashboard in the engine's own words (`im_streaming`,
+/// `starved`, a red "empty 25" bar across the top). It is now three or four
+/// one-sentence headlines, each with one simple chart and — when something
+/// went wrong — what to try, then the activity grid, then a "Technical
+/// details" disclosure that keeps every number the old page had, in plain
+/// labels.
+///
+/// Three layers, and only the last one is a view:
 ///
 ///  1. `InsightsMapper` — the neutral seam. `WispritMacUI` cannot name
 ///     `MetricsSummary`, so this file summarizes `metrics.log` and hands the
@@ -19,16 +25,12 @@ import WispritPersistence
 ///  2. `InsightsPageModel` — the read. `MetricsWriter.readAll()` parses the
 ///     whole file, so it runs on `Task.detached(priority: .utility)`, is gated
 ///     on the file's `contentModificationDate`, and only ever runs while this
-///     page is on screen and the window's own tick is armed (§3.5's threading
-///     paragraph; the tick is off for the duration of an utterance).
-///  3. The tiles, which decide nothing. `InsightsModel.tiles(from:)` already
-///     decided which tile exists, which one degrades to a placeholder and what
-///     the placeholder says; everything below just draws the case it is given.
-///
-/// `DoctorFacts.metrics` is deliberately NOT reused: it is a fixed 14-day
-/// window and it rides the expensive full probe (§3.5's note).
+///     page is on screen and the window's own tick is armed.
+///  3. The cards, which decide nothing. `InsightsModel.headlines` and
+///     `.details` already decided what exists, what it says and what tone it
+///     takes; everything below just draws the case it is given.
 
-// MARK: - the window control (§3.5)
+// MARK: - the window control
 
 /// The segmented control's three options. In memory only — a window choice is
 /// not a preference, and writing it to `config.json` would make a glance at a
@@ -59,29 +61,32 @@ public enum MetricsWindowChoice: String, CaseIterable, Identifiable, Sendable {
 
 /// `metrics.log` + the dictionary → `InsightsInput`.
 ///
-/// Every field is one `MetricsSummary` field passed through unchanged: rates
-/// stay fractions (0…1), latencies stay milliseconds, and an optional
-/// percentile stays optional. The three places this adds anything are all
-/// honesty rules, and each one is a test:
+/// Every summary field is one `MetricsSummary` field passed through unchanged:
+/// rates stay fractions (0…1), latencies stay milliseconds, and an optional
+/// percentile stays optional. What this adds, each one a test:
 ///
 ///  * `unclassifiedEmpty` is copied across as its own number. It is never
 ///    folded into `emptyReasons` — inventing a reason for a row written before
 ///    reasons existed would poison the one figure this page exists to report.
 ///  * A row whose `outcome` key never made it to disk lands in `MetricsSummary`
-///    under the empty string. A blank legend entry is not honest, and dropping
-///    the row would make the stacked bar stop summing to the total, so it is
-///    labelled `unrecorded`.
-///  * The sparkline only bins rows that carry a usable `ts`. A row that cannot
-///    be placed in time still counts towards the total; it just is not drawn on
-///    a day it may not belong to.
+///    under the empty string. A blank label is not honest, and dropping the
+///    row would make the holds bar stop summing to the total, so it is named
+///    `unrecorded` (shown as "Not recorded").
+///  * The daily counts only bin rows that carry a usable `ts`.
+///  * The capture figures (`capture_backend`, `first_chunk_ms`) are counted
+///    over the same windowed utterance rows; they exist only on rows written
+///    since the 2026-11-06 capture update, and their absence is what lets the
+///    page say the old no-audio holds predate it.
 public enum InsightsMapper {
     /// What a row with no `outcome` is called. Not a bucket — a name for an
-    /// absence, so the legend can say what it is.
+    /// absence.
     public static let unrecordedOutcome = "unrecorded"
-    /// The sparkline's ceiling. "All time" can be three years wide, and 1,000
-    /// daily bars in a 370 pt tile is a texture, not a trend: the value stays
-    /// all-time, the shape shows the most recent 90 days.
+    /// "All time" can be three years wide; the per-day bars show the most
+    /// recent 90 days.
     public static let maxSparklineDays = 90
+
+    public static let captureBackendKey = "capture_backend"
+    public static let firstChunkKey = "first_chunk_ms"
 
     public static func input(rows: [JSONObject],
                              window: MetricsWindow,
@@ -89,6 +94,7 @@ public enum InsightsMapper {
                              now: Double,
                              calendar: Calendar) -> InsightsInput {
         let summary = MetricsSummary.summarize(rows, window: window, now: now)
+        let capture = capture(rows, window: window, now: now)
         return InsightsInput(
             windowLabel: summary.window.label,
             total: summary.total,
@@ -109,8 +115,13 @@ public enum InsightsMapper {
             dailyCounts: dailyCounts(rows, window: window, now: now, calendar: calendar),
             vocabulary: vocabulary(dictionary),
             learnedTermCount: dictionary.filter(\.isLearned).count,
+            dictionaryTermCount: dictionary.filter { !$0.isPending }.count,
             zeroEditObserved: summary.editObserved,
-            zeroEditRate: summary.zeroEditRate)
+            zeroEditRate: summary.zeroEditRate,
+            captureBackends: capture.backends,
+            starvedSinceCaptureUpdate: capture.starved,
+            firstChunkP50: percentile(capture.firstChunks, 50),
+            firstChunkP90: percentile(capture.firstChunks, 90))
     }
 
     /// The outcome histogram, with the nameless bucket named.
@@ -122,13 +133,36 @@ public enum InsightsMapper {
         return named
     }
 
+    /// Capture-path figures over the windowed utterance rows.
+    static func capture(_ rows: [JSONObject], window: MetricsWindow,
+                        now: Double) -> (backends: [String: Int], starved: Int, firstChunks: [Double]) {
+        var backends: [String: Int] = [:]
+        var starved = 0
+        var firstChunks: [Double] = []
+        for row in utteranceRows(rows, window: window, now: now) {
+            if let backend = string(row, captureBackendKey) {
+                backends[backend, default: 0] += 1
+                if string(row, "outcome") == "empty", string(row, "empty_reason") == "starved" {
+                    starved += 1
+                }
+            }
+            if let ms = number(row, firstChunkKey) { firstChunks.append(ms) }
+        }
+        return (backends, starved, firstChunks)
+    }
+
+    /// Nearest rank, the way `MetricsSummary` takes its percentiles: a
+    /// measurement that was actually taken, never an interpolation.
+    static func percentile(_ samples: [Double], _ p: Double) -> Double? {
+        guard !samples.isEmpty else { return nil }
+        let sorted = samples.sorted()
+        let rank = Int((p / 100 * Double(sorted.count)).rounded(.up))
+        return sorted[min(max(rank, 1), sorted.count) - 1]
+    }
+
     /// One bucket per calendar day the window can contain, silent days
-    /// included: a gap in the sparkline is a day the user did not dictate, and
-    /// closing it up would draw a busier month than there was.
-    ///
-    /// The span comes from the window's own cutoff rather than a rounded day
-    /// count, so a 7-day window that reaches back into the middle of an eighth
-    /// day draws that day too instead of dropping its rows.
+    /// included: a gap is a day the user did not dictate, and closing it up
+    /// would draw a busier month than there was.
     public static func dailyCounts(_ rows: [JSONObject],
                                    window: MetricsWindow,
                                    now: Double,
@@ -168,15 +202,12 @@ public enum InsightsMapper {
         return out
     }
 
-    /// Terms that have actually fired. A term the user added and never spoke is
-    /// not a chart row, and `InsightsModel` hides the tile when none has.
+    /// Terms that have actually fired.
     public static func vocabulary(_ dictionary: [DictionaryRow]) -> [TermUse] {
         dictionary.filter { $0.hitCount > 0 }.map { TermUse(term: $0.term, hits: $0.hitCount) }
     }
 
-    /// `ts` is a float today and was an int in some Python-era rows;
-    /// `MetricsSummary` reads numbers the same way and its reader is internal
-    /// to its own module.
+    /// `ts` is a float today and was an int in some Python-era rows.
     static func number(_ row: JSONObject, _ key: String) -> Double? {
         switch row[key] {
         case .double(let value)?: return value
@@ -201,7 +232,7 @@ public enum InsightsMapper {
 
     /// Recovery figures from the same `metrics.log` slice `input` already
     /// summarized. Rescued count and empty reasons follow `window`; quiet
-    /// speech is always the last 7 days, as the caption names.
+    /// speech is always the last 7 days, as its label names.
     public static func recovery(rows: [JSONObject],
                                 window: MetricsWindow,
                                 now: Double) -> InsightsRecovery {
@@ -236,100 +267,17 @@ public enum InsightsMapper {
         }
     }
 
-    /// A rescued hold is `engine == apple_batch` or `rescued: true`. Counted
-    /// once when both are set, so a row that carries the flag and the engine
-    /// name is still one utterance.
+    /// A rescued hold is `engine == apple_batch` or `rescued: true`, counted
+    /// once when both are set.
     static func isRescued(_ row: JSONObject) -> Bool {
         string(row, "engine") == InsightsRecovery.appleBatchEngine
             || isTrue(row, InsightsRecovery.rescuedKey)
     }
 }
 
-// MARK: - Recovery
-
-/// Rescue / empty-reason / quiet-speech figures for the Insights Recovery
-/// section. Derived from `MetricsSummary` (empty reasons) plus a pass over the
-/// same windowed utterance rows (rescued, peak_level) — the view never parses
-/// `metrics.log`.
-public struct InsightsRecovery: Equatable, Sendable {
-    public static let sectionTitle = "Recovery"
-    public static let rescuedLabel = "Rescued utterances"
-    public static let rescuedDescription =
-        "Holds the batch engine recovered after live speech returned nothing."
-    public static let quietSpeechLabel = "Quiet speech"
-    public static let quietSpeechDescription =
-        "Share of holds in the last 7 days with a peak under 0.12."
-    public static let quietSpeechCaption =
-        "Speak a touch louder or raise input gain for best accuracy"
-    public static let unclassifiedFootnoteSuffix = " — logged before reasons existed"
-
-    /// The batch engine's on-disk name. A rescued hold writes this as `engine`.
-    public static let appleBatchEngine = "apple_batch"
-    public static let rescuedKey = "rescued"
-    public static let peakLevelKey = "peak_level"
-    /// Mid-utterance input switch — `EmptyReason.deviceChanged`.
-    public static let deviceChangedReason = "device_changed"
-    public static let quietPeakCeiling = 0.12
-    public static let quietShareAlarm = 0.20
-    public static let quietSpeechDays: Double = 7
-
-    public var rescued: Int
-    /// Classified `empty_reason` histogram, including `device_changed`. Never
-    /// merged with `unclassifiedEmpty`.
-    public var emptyReasons: [String: Int]
-    public var unclassifiedEmpty: Int
-    /// Last-7-day holds with `peak_level` present and under `quietPeakCeiling`.
-    public var quietSpeech: Int
-    /// Last-7-day holds that recorded `peak_level` at all. Missing is an
-    /// absence, not a quiet hold.
-    public var quietSpeechSample: Int
-
-    public init(rescued: Int = 0,
-                emptyReasons: [String: Int] = [:],
-                unclassifiedEmpty: Int = 0,
-                quietSpeech: Int = 0,
-                quietSpeechSample: Int = 0) {
-        self.rescued = rescued
-        self.emptyReasons = emptyReasons
-        self.unclassifiedEmpty = unclassifiedEmpty
-        self.quietSpeech = quietSpeech
-        self.quietSpeechSample = quietSpeechSample
-    }
-
-    public var quietSpeechShare: Double {
-        InsightsRecovery.share(quietSpeech, of: quietSpeechSample)
-    }
-
-    /// The caption fires only when the share *exceeds* 20%, not at the line.
-    public var showsQuietCaption: Bool {
-        quietSpeechSample > 0 && quietSpeechShare > InsightsRecovery.quietShareAlarm
-    }
-
-    /// Nothing to draw: hide the section rather than a plate of zeros.
-    public var isEmpty: Bool {
-        rescued == 0 && emptyReasons.isEmpty && unclassifiedEmpty == 0
-            && quietSpeechSample == 0
-    }
-
-    public var unclassifiedFootnote: String? {
-        unclassifiedEmpty > 0
-            ? "unclassified \(unclassifiedEmpty)\(Self.unclassifiedFootnoteSuffix)"
-            : nil
-    }
-
-    public static func share(_ part: Int, of total: Int) -> Double {
-        total > 0 ? Double(part) / Double(total) : 0
-    }
-
-    public static func percent(_ fraction: Double) -> String {
-        guard fraction.isFinite else { return "0.0%" }
-        return String(format: "%.1f%%", fraction * 100)
-    }
-}
-
 // MARK: - the page model
 
-/// The Insights read — §3.5's threading paragraph and §6.4.
+/// The Insights read.
 ///
 /// Cheap by construction: the poll stats the file and only parses when its
 /// modification date has moved, both on a detached utility task, and the caller
@@ -340,8 +288,6 @@ public struct InsightsRecovery: Equatable, Sendable {
 @MainActor
 @Observable
 public final class InsightsPageModel {
-    /// The same cadence the window's tick runs at. A stat every two seconds is
-    /// nothing; the parse behind it happens only when the file has changed.
     public static let pollInterval: TimeInterval = 2.0
 
     /// Seams, so the whole model is drivable from a fixture with no disk.
@@ -378,7 +324,6 @@ public final class InsightsPageModel {
     /// window full of zeros it has not verified.
     public private(set) var input: InsightsInput?
 
-    /// Rescue / empty-reason / quiet-speech figures for the Recovery section.
     /// Same read as `input`; nil until that read lands.
     public private(set) var recovery: InsightsRecovery?
 
@@ -405,11 +350,7 @@ public final class InsightsPageModel {
     /// One poll. Returns as soon as the file's stamp says nothing has changed.
     ///
     /// The dictionary rides in from `WispritWindowModel`, which already holds
-    /// it in memory — the vocabulary tile is fed by `DictionaryEditor.rows()`,
-    /// not by metrics (§3.5), and re-reading `dictionary.json` here would be a
-    /// second disk hit for data the window has open. The caller passes its
-    /// current rows on every poll; a term whose count moved is a recompute, not
-    /// a re-read.
+    /// it in memory; a term whose count moved is a recompute, not a re-read.
     public func refreshIfNeeded(dictionary terms: [DictionaryRow] = [],
                                 force: Bool = false) async {
         if terms != dictionary {
@@ -451,58 +392,15 @@ public final class InsightsPageModel {
     }
 }
 
-// MARK: - grid layout
-
-/// Which tiles span both columns, and how the rest pair up.
-///
-/// §3.5: a two-column grid of 370 pt tiles with a 16 pt gap, tiles 3 and 4
-/// spanning both columns. Pure, because "which tiles exist" is
-/// `InsightsModel`'s answer and it changes with the data — a fresh install has
-/// three tiles, a mature one has six.
-public enum InsightsLayout {
-    /// The two full-width tiles, named by the label `InsightsModel` gives them
-    /// (a `.sparse` placeholder for one of them spans too — the grid must not
-    /// reflow just because a tile degraded).
-    public static let wideLabels: Set<String> = [InsightsModel.outcomesLabel,
-                                                 InsightsModel.emptiesLabel]
-
-    public static func isWide(_ tile: InsightTile) -> Bool {
-        wideLabels.contains(label(of: tile))
-    }
-
-    public static func label(of tile: InsightTile) -> String {
-        switch tile {
-        case .value(let label, _, _, _): return label
-        case .latency(let label, _, _, _): return label
-        case .stacked(let label, _): return label
-        case .ranked(let label, _, _, _, _): return label
-        case .sparse(let label, _): return label
-        }
-    }
-
-    /// Rows of at most two tiles, in page order.
-    public static func rows(_ tiles: [InsightTile]) -> [[InsightTile]] {
-        var out: [[InsightTile]] = []
-        var pending: [InsightTile] = []
-        for tile in tiles {
-            if isWide(tile) {
-                if !pending.isEmpty { out.append(pending); pending = [] }
-                out.append([tile])
-                continue
-            }
-            pending.append(tile)
-            if pending.count == 2 { out.append(pending); pending = [] }
-        }
-        if !pending.isEmpty { out.append(pending) }
-        return out
-    }
-}
-
 // MARK: - the page
 
 struct InsightsPage: View {
     @ObservedObject var model: WispritWindowModel
     @State private var insights = InsightsPageModel()
+    @State private var showsDetails = InsightsPage.detailsOpenByDefault
+
+    /// Collapsed: the details are for the curious and the troubleshooting.
+    static let detailsOpenByDefault = false
 
     var body: some View {
         HubPage(title: WispritWindowModel.Tab.insights.title, actions: {
@@ -511,6 +409,9 @@ struct InsightsPage: View {
             content
         })
         .task {
+            // The streak grid and the speaking rate come from history, which
+            // the window reads when it opens; ask once if it has not yet.
+            if model.homeStats == nil { model.refreshHomeStats() }
             // Bound to the page's lifetime: SwiftUI cancels it the moment the
             // user leaves Insights, so nothing polls a page nobody is looking
             // at. `isPolling` covers the other two gates — the window is open,
@@ -539,192 +440,122 @@ struct InsightsPage: View {
     @ViewBuilder
     private var content: some View {
         if let input = insights.input {
-            let grid = InsightsLayout.rows(InsightsModel.tiles(from: input))
+            let activity = model.insightsActivity()
+            let headlines = InsightsModel.headlines(from: input, activity: activity)
             ScrollView(.vertical) {
                 VStack(alignment: .leading, spacing: InsightsMetrics.gap) {
-                    ForEach(Array(grid.enumerated()), id: \.offset) { _, row in
-                        gridRow(row)
+                    ForEach(Array(InsightsMetrics.rows(headlines).enumerated()), id: \.offset) { _, row in
+                        // Cards in a row share a height: two plates of different
+                        // lengths side by side read as a layout bug.
+                        HStack(alignment: .top, spacing: InsightsMetrics.gap) {
+                            ForEach(row) { headline in
+                                HeadlineCard(headline: headline, activity: activity)
+                            }
+                            if row.count == 1, row[0].kind != .activity {
+                                Color.clear.frame(maxWidth: .infinity, maxHeight: 1)
+                            }
+                        }
+                        .fixedSize(horizontal: false, vertical: true)
                     }
-                    if let recovery = insights.recovery, !recovery.isEmpty {
-                        RecoverySection(recovery: recovery)
-                    }
-                    if let footer = InsightsModel.footer(from: input) {
-                        footerStrip(footer)
-                    }
+                    TechnicalDetails(sections: InsightsModel.details(from: input,
+                                                                     recovery: insights.recovery),
+                                     isExpanded: $showsDetails)
+                        .padding(.top, Theme.Space.s8)
                 }
-                .padding(.bottom, Theme.Space.s8)
+                .padding(.bottom, Theme.Space.s24)
             }
             .scrollBounceBehavior(.basedOnSize)
         } else {
-            Text("Reading metrics…")
+            Text("Reading your dictation history…")
                 .font(Theme.font(Theme.Role.body))
                 .foregroundStyle(Theme.inkTertiary)
         }
     }
-
-    private func gridRow(_ row: [InsightTile]) -> some View {
-        HStack(alignment: .top, spacing: InsightsMetrics.gap) {
-            ForEach(Array(row.enumerated()), id: \.offset) { _, tile in
-                InsightsTileView(tile: tile)
-            }
-            // A lone narrow tile keeps its column rather than stretching
-            // across the grid.
-            if row.count == 1 && !InsightsLayout.isWide(row[0]) {
-                Color.clear.frame(maxWidth: .infinity, maxHeight: 1)
-            }
-        }
-    }
-
-    private func footerStrip(_ text: String) -> some View {
-        VStack(alignment: .leading, spacing: Theme.Space.s8) {
-            Rectangle()
-                .fill(Theme.hairline)
-                .frame(height: 1)
-            Text(text)
-                .font(Theme.font(Theme.Role.mono))
-                .foregroundStyle(Theme.inkTertiary)
-        }
-        .padding(.top, Theme.Space.s4)
-    }
 }
 
-/// Rescue count, empty-reason breakdown (including `device_changed`), and the
-/// quiet-speech share. Same `SectionGroup` / `SectionRow` vocabulary as
-/// Settings; machine `empty_reason` keys are mono (§1.4).
-private struct RecoverySection: View {
-    let recovery: InsightsRecovery
+// MARK: - geometry
 
-    var body: some View {
-        SectionGroup(InsightsRecovery.sectionTitle,
-                     footnote: recovery.unclassifiedFootnote) {
-            if recovery.rescued > 0 {
-                SectionRow(InsightsRecovery.rescuedLabel,
-                           description: InsightsRecovery.rescuedDescription) {
-                    readout("\(recovery.rescued)")
-                }
-            }
-            ForEach(InsightsModel.ranked(recovery.emptyReasons)) { row in
-                HStack(alignment: .center, spacing: Theme.Space.s12) {
-                    Text(row.label)
-                        .font(Theme.font(Theme.Role.mono))
-                        .foregroundStyle(Theme.ink)
-                        .lineLimit(1)
-                        .truncationMode(.middle)
-                    Spacer(minLength: Theme.Space.s16)
-                    readout("\(row.count)")
-                }
-                .frame(minHeight: Theme.Size.rowHeight)
-                .overlay(alignment: .bottom) {
-                    Rectangle()
-                        .fill(Theme.hairline)
-                        .frame(height: 1)
-                }
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(row.label) \(row.count)")
-            }
-            if recovery.quietSpeechSample > 0 {
-                SectionRow(InsightsRecovery.quietSpeechLabel,
-                           description: InsightsRecovery.quietSpeechDescription) {
-                    readout(InsightsRecovery.percent(recovery.quietSpeechShare))
-                }
-            }
-            if recovery.showsQuietCaption {
-                Rectangle()
-                    .fill(Theme.hairline)
-                    .frame(height: 1)
-                HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s4) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(Theme.critical)
-                    Text(InsightsRecovery.quietSpeechCaption)
-                        .font(Theme.font(Theme.Role.caption))
-                        .foregroundStyle(Theme.critical)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .accessibilityElement(children: .combine)
-            }
-        }
-    }
-
-    private func readout(_ value: String) -> some View {
-        Text(value)
-            .font(Theme.font(Theme.Role.mono))
-            .foregroundStyle(Theme.inkSecondary)
-            .monospacedDigit()
-    }
-}
-
-// MARK: - tile geometry
-
-/// §3.5's sizes. The chart heights are also what the sparse placeholder is:
-/// "a dashed plate, height = the chart's normal height" — so a tile that
-/// degrades leaves the grid exactly where it was.
 enum InsightsMetrics {
-    static let tileWidth: Double = 370
     static let gap: Double = Theme.Space.s16
-    static let padding: Double = Theme.Space.s16
-    static let spark: Double = 40
-    static let latency: Double = 56
-    static let stacked: Double = 44
-    static let ranked: Double = 88
-    /// The bar in a stacked or ranked chart.
+    static let padding: Double = Theme.Space.s20
     static let barHeight: Double = 12
-    /// Leading column of a ranked chart — wide enough for `produced_nothing`.
-    static let rankedLabel: Double = 132
-    static let rankedValue: Double = 44
+    static let placeholderHeight: Double = 44
+    static let ratesHeight: Double = 64
+    static let gridCell: Double = 15
+    static let gridGap: Double = 4
 
-    static func chartHeight(for label: String) -> Double {
-        switch label {
-        case InsightsModel.utterancesLabel: return spark
-        case InsightsModel.latencyLabel: return latency
-        case InsightsModel.outcomesLabel: return stacked
-        case InsightsModel.zeroEditLabel: return spark
-        default: return ranked
+    /// Headlines in rows of two; the activity grid gets a row to itself.
+    static func rows(_ headlines: [InsightHeadline]) -> [[InsightHeadline]] {
+        var out: [[InsightHeadline]] = []
+        var pending: [InsightHeadline] = []
+        for headline in headlines {
+            if headline.kind == .activity {
+                if !pending.isEmpty { out.append(pending); pending = [] }
+                out.append([headline])
+                continue
+            }
+            pending.append(headline)
+            if pending.count == 2 { out.append(pending); pending = [] }
         }
-    }
-
-    /// §1.4: `outcome`, `empty_reason` and `ai` are machine vocabulary and are
-    /// set in mono. Dictionary terms are words a human chose, and are not.
-    static func isMachineVocabulary(_ label: String) -> Bool {
-        label != InsightsModel.vocabularyLabel
+        if !pending.isEmpty { out.append(pending) }
+        return out
     }
 }
 
-/// The chart palette (§3.5): a five-step ink ramp by rank, plus `critical` for
-/// the `empty` segment and for nothing else. Series are told apart by ramp
-/// position and an always-visible label, never by hue.
+/// The chart palette: steps of `ink`, never orange, and `critical` for a
+/// genuine fault only. Series are told apart by lightness and an always-
+/// visible label, never by hue alone.
 enum InsightsPalette {
-    static let emptyOutcome = "empty"
+    static func hold(_ group: HoldGroup) -> Color {
+        switch group {
+        case .delivered: return Theme.ink.opacity(0.86)
+        case .correction: return Theme.ink.opacity(0.55)
+        case .mic: return Theme.ink.opacity(0.40)
+        case .noWords: return Theme.ink.opacity(0.30)
+        case .unknown: return Theme.ink.opacity(0.22)
+        case .quiet: return Theme.ink.opacity(0.16)
+        case .blocked: return Theme.ink.opacity(0.12)
+        case .fault: return Theme.critical
+        }
+    }
 
-    /// The ramp step for a rank, clamped: a seventh outcome shares the last
-    /// step and is told apart by its label, which is always drawn.
-    static func ramp(rank: Int) -> Color {
+    static func ramp(_ rank: Int) -> Color {
         let ramp = Theme.chartRamp
         return ramp[min(max(rank, 0), ramp.count - 1)]
     }
-
-    static func fill(rank: Int, label: String) -> Color {
-        label == emptyOutcome ? Theme.chartEmpty : ramp(rank: rank)
-    }
 }
 
-// MARK: - tiles
+// MARK: - a headline card
 
-/// One tile: a flat plate with a hairline and no shadow (§1.7 — no nested
-/// cards), a label, and whatever chart the case names.
-private struct InsightsTileView: View {
-    let tile: InsightTile
+private struct HeadlineCard: View {
+    let headline: InsightHeadline
+    let activity: InsightsActivity?
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.s12) {
             header
+            sentence
             chart
+            if let detail = headline.detail {
+                Text(detail)
+                    .font(Theme.font(Theme.Role.body))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if !headline.advice.isEmpty {
+                VStack(alignment: .leading, spacing: Theme.Space.s4) {
+                    ForEach(Array(headline.advice.enumerated()), id: \.offset) { index, line in
+                        AdviceLine(text: line,
+                                   isFault: headline.tone == .fault && index == 0)
+                    }
+                }
+            }
         }
         .padding(InsightsMetrics.padding)
-        // 370 at the 756 pt content width (§3.5); flexible above it, because
-        // the window is resizable and two half-columns is still the grid.
-        .frame(idealWidth: InsightsMetrics.tileWidth, maxWidth: .infinity,
-               alignment: .topLeading)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .background(
+            RoundedRectangle(cornerRadius: Theme.Radius.tile, style: .continuous)
+                .fill(Theme.surfaceRaised))
         .overlay(
             RoundedRectangle(cornerRadius: Theme.Radius.tile, style: .continuous)
                 .strokeBorder(Theme.hairline, lineWidth: 1))
@@ -732,165 +563,148 @@ private struct InsightsTileView: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s8) {
-            Text(InsightsLayout.label(of: tile))
+            Text(headline.kicker)
                 .font(Theme.font(Theme.Role.captionEmph))
                 .tracking(Theme.Role.captionEmph.tracking)
                 .textCase(.uppercase)
                 .foregroundStyle(Theme.inkTertiary)
             Spacer(minLength: Theme.Space.s8)
-            if case .ranked(_, let caption?, _, _, _) = tile {
-                Text(caption)
-                    .font(Theme.font(Theme.Role.mono))
-                    .foregroundStyle(Theme.inkSecondary)
-            }
+            Text(headline.scope)
+                .font(Theme.font(Theme.Role.caption))
+                .foregroundStyle(Theme.inkTertiary)
         }
+    }
+
+    /// Words in the sans at reading size; the figures in the display serif —
+    /// the one place it is allowed, numerals (§1.3).
+    private var sentence: some View {
+        headline.sentence.reduce(Text("")) { text, run in
+            text + (run.isFigure
+                ? Text(run.text).font(Theme.serif(27)).foregroundColor(Theme.ink)
+                : Text(run.text).font(.system(size: 17, weight: .medium)).foregroundColor(Theme.ink))
+        }
+        .lineSpacing(2)
+        .fixedSize(horizontal: false, vertical: true)
+        .accessibilityLabel(headline.text)
     }
 
     @ViewBuilder
     private var chart: some View {
-        switch tile {
-        case .value(_, let value, let sub, let spark):
-            ValueChart(value: value, sub: sub, spark: spark)
-        case .latency(_, let p50, let p90, let reference):
+        switch headline.chart {
+        case .latency(let p50, let p90, let reference):
             LatencyChart(p50: p50, p90: p90, reference: reference)
-        case .stacked(_, let segments):
-            StackedChart(segments: segments)
-        case .ranked(let label, _, let rows, let footnote, let alarm):
-            RankedChart(rows: rows, footnote: footnote, alarm: alarm,
-                        machine: InsightsMetrics.isMachineVocabulary(label))
-        case .sparse(let label, let need):
-            SparsePlate(need: need, height: InsightsMetrics.chartHeight(for: label))
+        case .holds(let segments):
+            HoldsChart(segments: segments)
+        case .terms(let rows):
+            TermsChart(rows: rows)
+        case .rates(let samples, let median):
+            RatesChart(samples: samples, median: median)
+                .frame(height: InsightsMetrics.ratesHeight)
+        case .activity:
+            if let activity { ActivityChart(activity: activity) }
+        case .placeholder(let need):
+            Placeholder(need: need)
+        case .none:
+            EmptyView()
         }
     }
 }
 
-/// The headline number, its sparkline, and the window label under it.
-private struct ValueChart: View {
-    let value: String
-    let sub: String?
-    let spark: [Double]
+private struct AdviceLine: View {
+    let text: String
+    let isFault: Bool
 
     var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.s8) {
-            Text(value)
-                .font(Theme.font(Theme.Role.numeralL))
-                .tracking(Theme.Role.numeralL.tracking)
+        HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s8) {
+            Image(systemName: isFault ? "exclamationmark.triangle.fill" : "arrow.turn.down.right")
+                .font(.system(size: 11, weight: .semibold))
+                .foregroundStyle(isFault ? Theme.critical : Theme.inkTertiary)
+                .frame(width: 14)
+            Text(text)
+                .font(Theme.font(Theme.Role.body))
                 .foregroundStyle(Theme.ink)
-            // The zero-edit tile has a number and an `n`, not a trend yet — no
-            // sparkline means no chart, not an empty plate.
-            if !spark.isEmpty {
-                SparkBars(values: spark)
-                    .frame(height: InsightsMetrics.spark)
-            }
-            if let sub {
-                Text(sub)
-                    .font(Theme.font(Theme.Role.caption))
-                    .foregroundStyle(Theme.inkSecondary)
-            }
+                .fixedSize(horizontal: false, vertical: true)
         }
+        .accessibilityElement(children: .combine)
     }
 }
 
-/// Daily counts, normalised against the busiest day. A silent day still draws a
-/// 1 pt stub: an invisible zero reads as a missing day rather than a quiet one
-/// (the same rule `StreakIntensity` step 0 encodes).
-private struct SparkBars: View {
-    let values: [Double]
+// MARK: - charts
 
-    var body: some View {
-        Canvas(rendersAsynchronously: false) { context, size in
-            guard !values.isEmpty, size.width > 0 else { return }
-            let slot = size.width / Double(values.count)
-            let width = max(1, slot - min(2, slot / 3))
-            let live = InsightsPalette.ramp(rank: 1)
-            for (index, value) in values.enumerated() {
-                let clamped = min(max(value, 0), 1)
-                let height = max(1, clamped * size.height)
-                let rect = CGRect(x: Double(index) * slot, y: size.height - height,
-                                  width: width, height: height)
-                context.fill(Path(roundedRect: rect, cornerRadius: min(1, width / 2)),
-                             with: .color(clamped > 0 ? live : Theme.inkQuaternary))
-            }
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-/// p50 and p90 against the 400 ms reference — the point at which release-to-text
-/// stops feeling immediate.
+/// Median and 90th percentile on one axis, against the dashed line where
+/// release-to-text stops feeling instant.
 private struct LatencyChart: View {
     let p50: Double
     let p90: Double
     let reference: Double
 
-    private var scale: Double { max(p90, reference) * 1.15 }
+    private var scale: Double { max(p90, reference) * 1.12 }
 
     var body: some View {
         VStack(alignment: .leading, spacing: Theme.Space.s8) {
-            Text(InsightsFormat.ms(p50))
-                .font(Theme.font(Theme.Role.numeralL))
-                .tracking(Theme.Role.numeralL.tracking)
-                .foregroundStyle(Theme.ink)
-            row("p50", value: p50, rank: 0)
-            row("p90", value: p90, rank: 1)
-            Text("\(InsightsFormat.ms(reference)) reference")
-                .font(Theme.font(Theme.Role.mono))
-                .foregroundStyle(Theme.inkTertiary)
+            GeometryReader { proxy in
+                let width = proxy.size.width
+                let x = { (value: Double) in width * min(1, max(0, value) / scale) }
+                ZStack(alignment: .topLeading) {
+                    Canvas(rendersAsynchronously: false) { context, size in
+                        guard size.width > 0, scale > 0 else { return }
+                        let top = 16.0
+                        let height = InsightsMetrics.barHeight
+                        let radius = height / 2
+                        context.fill(Path(roundedRect: CGRect(x: 0, y: top, width: size.width, height: height),
+                                          cornerRadius: radius),
+                                     with: .color(Theme.fillSubtle))
+                        context.fill(Path(roundedRect: CGRect(x: 0, y: top, width: max(height, x(p90)),
+                                                              height: height), cornerRadius: radius),
+                                     with: .color(Theme.ink.opacity(0.28)))
+                        context.fill(Path(roundedRect: CGRect(x: 0, y: top, width: max(height, x(p50)),
+                                                              height: height), cornerRadius: radius),
+                                     with: .color(Theme.ink.opacity(0.86)))
+                        var mark = Path()
+                        mark.move(to: CGPoint(x: x(reference), y: top - 3))
+                        mark.addLine(to: CGPoint(x: x(reference), y: top + height + 3))
+                        context.stroke(mark, with: .color(Theme.inkSecondary),
+                                       style: StrokeStyle(lineWidth: 1.5, dash: [2, 2]))
+                    }
+                    Text(InsightsModel.seconds(reference))
+                        .font(Theme.font(Theme.Role.caption))
+                        .foregroundStyle(Theme.inkTertiary)
+                        .monospacedDigit()
+                        .fixedSize()
+                        .position(x: min(max(x(reference), 20), width - 20), y: 5)
+                }
+            }
+            .frame(height: 16 + InsightsMetrics.barHeight + 3)
+            .accessibilityHidden(true)
+
+            HStack(spacing: Theme.Space.s16) {
+                key(Theme.ink.opacity(0.86), "Median \(InsightsModel.seconds(p50))")
+                key(Theme.ink.opacity(0.28), "9 in 10 within \(InsightsModel.seconds(p90))")
+            }
         }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(InsightsModel.latencyLabel): median \(InsightsFormat.ms(p50)), "
-                            + "90th percentile \(InsightsFormat.ms(p90)), "
-                            + "reference \(InsightsFormat.ms(reference))")
+        .accessibilityLabel("Median \(InsightsModel.seconds(p50)), 9 in 10 within "
+                            + "\(InsightsModel.seconds(p90)), instant is under \(InsightsModel.seconds(reference))")
     }
 
-    private func row(_ label: String, value: Double, rank: Int) -> some View {
-        HStack(spacing: Theme.Space.s8) {
-            Text(label)
-                .font(Theme.font(Theme.Role.mono))
-                .foregroundStyle(Theme.inkTertiary)
-                .frame(width: 26, alignment: .leading)
-            LatencyBar(value: value, scale: scale, reference: reference, rank: rank)
-                .frame(height: InsightsMetrics.barHeight)
-            Text(InsightsFormat.ms(value))
-                .font(Theme.font(Theme.Role.mono))
+    private func key(_ color: Color, _ text: String) -> some View {
+        HStack(spacing: Theme.Space.s4) {
+            RoundedRectangle(cornerRadius: 2, style: .continuous)
+                .fill(color)
+                .frame(width: 10, height: 10)
+            Text(text)
+                .font(Theme.font(Theme.Role.caption))
                 .foregroundStyle(Theme.inkSecondary)
-                .frame(width: 56, alignment: .trailing)
+                .monospacedDigit()
+                .fixedSize()
         }
     }
 }
 
-private struct LatencyBar: View {
-    let value: Double
-    let scale: Double
-    let reference: Double
-    let rank: Int
-
-    var body: some View {
-        Canvas(rendersAsynchronously: false) { context, size in
-            guard size.width > 0, scale > 0 else { return }
-            let radius = size.height / 2
-            context.fill(Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: radius),
-                         with: .color(Theme.fillSubtle))
-            let filled = max(2, size.width * min(1, max(0, value) / scale))
-            context.fill(Path(roundedRect: CGRect(x: 0, y: 0, width: filled, height: size.height),
-                              cornerRadius: radius),
-                         with: .color(InsightsPalette.ramp(rank: rank)))
-            var mark = Path()
-            let x = size.width * min(1, max(0, reference) / scale)
-            mark.move(to: CGPoint(x: x, y: -2))
-            mark.addLine(to: CGPoint(x: x, y: size.height + 2))
-            context.stroke(mark, with: .color(Theme.inkTertiary),
-                           style: StrokeStyle(lineWidth: 1, dash: [2, 2]))
-        }
-        .accessibilityHidden(true)
-    }
-}
-
-/// One bar, every outcome in it, and a legend that names each segment. The
-/// `empty` segment is the reserved `critical` step; everything else is a ramp
-/// position.
-private struct StackedChart: View {
-    let segments: [LabeledCount]
+/// Every hold in one bar, a legend that names each part. Grey for normal
+/// behaviour; `critical` only for the part that was Wisprit's fault.
+private struct HoldsChart: View {
+    let segments: [HoldSegment]
 
     private var total: Int { segments.reduce(0) { $0 + $1.count } }
 
@@ -898,53 +712,54 @@ private struct StackedChart: View {
         VStack(alignment: .leading, spacing: Theme.Space.s12) {
             Canvas(rendersAsynchronously: false) { context, size in
                 guard total > 0, size.width > 0 else { return }
+                let gap = 2.0
+                let usable = size.width - gap * Double(max(0, segments.count - 1))
                 var x: Double = 0
-                for (rank, segment) in segments.enumerated() {
-                    let width = size.width * Double(segment.count) / Double(total)
-                    let rect = CGRect(x: x, y: 0, width: max(width, 0.5), height: size.height)
-                    context.fill(Path(rect),
-                                 with: .color(InsightsPalette.fill(rank: rank, label: segment.label)))
-                    x += width
+                for segment in segments {
+                    let width = max(2, usable * Double(segment.count) / Double(total))
+                    context.fill(Path(roundedRect: CGRect(x: x, y: 0, width: width, height: size.height),
+                                      cornerRadius: 2),
+                                 with: .color(InsightsPalette.hold(segment.group)))
+                    x += width + gap
                 }
             }
             .frame(height: InsightsMetrics.barHeight)
-            .clipShape(RoundedRectangle(cornerRadius: Theme.Radius.chip, style: .continuous))
+            .clipShape(RoundedRectangle(cornerRadius: 4, style: .continuous))
             .accessibilityHidden(true)
 
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: Theme.Space.s12,
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: Theme.Space.s12,
                                          alignment: .leading)],
                       alignment: .leading, spacing: Theme.Space.s4) {
-                ForEach(Array(segments.enumerated()), id: \.element.id) { rank, segment in
-                    HStack(spacing: Theme.Space.s4) {
+                ForEach(segments) { segment in
+                    HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s8) {
                         RoundedRectangle(cornerRadius: 2, style: .continuous)
-                            .fill(InsightsPalette.fill(rank: rank, label: segment.label))
-                            .frame(width: 8, height: 8)
-                        Text(segment.label)
-                            .font(Theme.font(Theme.Role.mono))
+                            .fill(InsightsPalette.hold(segment.group))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 2, style: .continuous)
+                                    .strokeBorder(Theme.hairlineStrong, lineWidth: 0.5))
+                            .frame(width: 10, height: 10)
+                            .alignmentGuide(.firstTextBaseline) { $0[.bottom] - 1 }
+                        Text(segment.group.label)
+                            .font(Theme.font(Theme.Role.caption))
                             .foregroundStyle(Theme.inkSecondary)
-                            .lineLimit(1)
-                            .truncationMode(.middle)
+                            .fixedSize(horizontal: false, vertical: true)
                         Text("\(segment.count)")
-                            .font(Theme.font(Theme.Role.mono))
-                            .foregroundStyle(Theme.ink)
+                            .font(Theme.font(Theme.Role.caption))
+                            .foregroundStyle(segment.group.isFault ? Theme.critical : Theme.ink)
+                            .monospacedDigit()
                         Spacer(minLength: 0)
                     }
                     .accessibilityElement(children: .combine)
-                    .accessibilityLabel("\(segment.label) \(segment.count)")
+                    .accessibilityLabel("\(segment.group.label) \(segment.count)")
                 }
             }
         }
     }
 }
 
-/// A leaderboard: label, bar, count. The footnote is quiet; the alarm is the
-/// one line on this page that gets `critical`, and it sits under a hairline so
-/// it is never mistaken for another row of the ranking.
-private struct RankedChart: View {
+/// The busiest dictionary terms, as a short leaderboard.
+private struct TermsChart: View {
     let rows: [LabeledCount]
-    let footnote: String?
-    let alarm: String?
-    let machine: Bool
 
     private var peak: Int { rows.map(\.count).max() ?? 0 }
 
@@ -953,35 +768,226 @@ private struct RankedChart: View {
             ForEach(Array(rows.enumerated()), id: \.element.id) { rank, row in
                 HStack(spacing: Theme.Space.s8) {
                     Text(row.label)
-                        .font(Theme.font(machine ? Theme.Role.mono : Theme.Role.body))
+                        .font(Theme.font(Theme.Role.body))
                         .foregroundStyle(Theme.ink)
                         .lineLimit(1)
-                        .truncationMode(.middle)
-                        .frame(width: InsightsMetrics.rankedLabel, alignment: .leading)
-                    RankedBar(fraction: peak > 0 ? Double(row.count) / Double(peak) : 0,
-                              label: row.label, rank: rank)
-                        .frame(height: InsightsMetrics.barHeight)
+                        .truncationMode(.tail)
+                        .frame(width: 104, alignment: .leading)
+                    GeometryReader { proxy in
+                        RoundedRectangle(cornerRadius: 3, style: .continuous)
+                            .fill(InsightsPalette.ramp(rank))
+                            .frame(width: max(3, proxy.size.width
+                                              * (peak > 0 ? Double(row.count) / Double(peak) : 0)))
+                    }
+                    .frame(height: 8)
                     Text("\(row.count)")
-                        .font(Theme.font(Theme.Role.mono))
+                        .font(Theme.font(Theme.Role.caption))
                         .foregroundStyle(Theme.inkSecondary)
-                        .frame(width: InsightsMetrics.rankedValue, alignment: .trailing)
+                        .monospacedDigit()
+                        .frame(width: 32, alignment: .trailing)
                 }
                 .accessibilityElement(children: .combine)
-                .accessibilityLabel("\(row.label) \(row.count)")
+                .accessibilityLabel("\(row.label), \(row.count) fixes")
             }
-            if let footnote {
-                Text(footnote)
+        }
+    }
+}
+
+/// Every dictation in the sample as a dot on a words-per-minute axis, the
+/// median as a line through them. Self-relative: there is no population line.
+private struct RatesChart: View {
+    let samples: [Double]
+    let median: Double
+
+    /// A round axis end, so the ticks are numbers a person would pick.
+    private var top: Double {
+        let peak = max(samples.max() ?? 0, median)
+        return max(100, (peak / 50).rounded(.up) * 50)
+    }
+
+    private var ticks: [Double] {
+        let step = top > 300 ? 100.0 : 50.0
+        return stride(from: 0, through: top, by: step).map { $0 }
+    }
+
+    var body: some View {
+        Canvas(rendersAsynchronously: false) { context, size in
+            guard size.width > 0, top > 0 else { return }
+            let axisY = size.height - 16
+            let dotY = axisY - 16
+            func x(_ value: Double) -> Double { 10 + (size.width - 24) * min(1, max(0, value) / top) }
+
+            var axis = Path()
+            axis.move(to: CGPoint(x: x(0), y: axisY))
+            axis.addLine(to: CGPoint(x: x(top), y: axisY))
+            context.stroke(axis, with: .color(Theme.hairlineStrong), lineWidth: 1)
+            for tick in ticks {
+                var mark = Path()
+                mark.move(to: CGPoint(x: x(tick), y: axisY))
+                mark.addLine(to: CGPoint(x: x(tick), y: axisY + 3))
+                context.stroke(mark, with: .color(Theme.hairlineStrong), lineWidth: 1)
+                context.draw(Text("\(Int(tick))")
+                                .font(Theme.font(Theme.Role.caption))
+                                .foregroundColor(Theme.inkTertiary),
+                             at: CGPoint(x: x(tick), y: axisY + 10), anchor: .center)
+            }
+            for (index, sample) in samples.enumerated() {
+                // A little vertical spread so neighbours stay countable.
+                let jitter = Double((index * 7) % 5 - 2) * 3
+                let rect = CGRect(x: x(sample) - 3.5, y: dotY + jitter - 3.5, width: 7, height: 7)
+                context.fill(Path(ellipseIn: rect), with: .color(Theme.ink.opacity(0.38)))
+            }
+            var line = Path()
+            line.move(to: CGPoint(x: x(median), y: 14))
+            line.addLine(to: CGPoint(x: x(median), y: axisY))
+            context.stroke(line, with: .color(Theme.ink), lineWidth: 2)
+            context.draw(Text("median \(Int(median.rounded()))")
+                            .font(Theme.font(Theme.Role.caption))
+                            .foregroundColor(Theme.inkSecondary),
+                         at: CGPoint(x: x(median), y: 5), anchor: .center)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(samples.count) dictations, median \(Int(median.rounded())) words per minute")
+    }
+}
+
+/// The streak grid with its labels and its legend.
+private struct ActivityChart: View {
+    let activity: InsightsActivity
+
+    var body: some View {
+        HStack(alignment: .top, spacing: Theme.Space.s32) {
+            StreakGrid(weeks: activity.weeks,
+                       today: activity.today,
+                       labels: StreakGrid.Labels(months: activity.monthLabels,
+                                                 weekdays: StreakCalendar.weekdaySymbols(
+                                                    calendar: activity.calendar),
+                                                 tooltips: activity.tooltips),
+                       cell: InsightsMetrics.gridCell,
+                       gap: InsightsMetrics.gridGap)
+            StreakLegend(scale: StreakScale.fit(activity.weeks.flatMap { $0 }))
+                .padding(.top, 18)
+            Spacer(minLength: 0)
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Activity grid: dictated on \(activity.activeDays) of the last "
+                            + "\(activity.elapsedDays) days")
+    }
+}
+
+/// Not enough data yet: a dashed plate at a chart's height and the line that
+/// says what it needs. Never a zero, never a chart of one bar.
+private struct Placeholder: View {
+    let need: String
+
+    var body: some View {
+        RoundedRectangle(cornerRadius: Theme.Radius.row, style: .continuous)
+            .fill(Theme.groundRecessed.opacity(0.6))
+            .frame(height: InsightsMetrics.placeholderHeight)
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.Radius.row, style: .continuous)
+                    .strokeBorder(Theme.hairlineStrong, style: StrokeStyle(lineWidth: 1, dash: [3, 3])))
+            .overlay(
+                Text(need)
+                    .font(Theme.font(Theme.Role.caption))
+                    .foregroundStyle(Theme.inkSecondary))
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(need)
+    }
+}
+
+// MARK: - technical details
+
+/// Every number the old page carried, in plain labels, behind one disclosure.
+private struct TechnicalDetails: View {
+    let sections: [InsightDetailSection]
+    @Binding var isExpanded: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.s16) {
+            Button {
+                withAnimation(.snappy(duration: 0.2)) { isExpanded.toggle() }
+            } label: {
+                HStack(spacing: Theme.Space.s8) {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .rotationEffect(.degrees(isExpanded ? 90 : 0))
+                        .foregroundStyle(Theme.inkTertiary)
+                    Text("Technical details")
+                        .font(Theme.font(Theme.Role.sectionTitle))
+                        .foregroundStyle(Theme.ink)
+                    Text("Timings, every outcome, cleanup and microphone")
+                        .font(Theme.font(Theme.Role.caption))
+                        .foregroundStyle(Theme.inkTertiary)
+                    Spacer(minLength: 0)
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(isExpanded ? "Hide technical details" : "Show technical details")
+
+            if isExpanded {
+                LazyVGrid(columns: [GridItem(.flexible(), spacing: Theme.Space.s32, alignment: .top),
+                                    GridItem(.flexible(), spacing: Theme.Space.s32, alignment: .top)],
+                          alignment: .leading, spacing: Theme.Space.s24) {
+                    ForEach(sections) { section in
+                        DetailSectionView(section: section)
+                    }
+                }
+                .padding(.leading, Theme.Space.s20)
+            }
+        }
+    }
+}
+
+private struct DetailSectionView: View {
+    let section: InsightDetailSection
+
+    static let column: Double = 92
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: Theme.Space.s8) {
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s8) {
+                Text(section.title)
+                    .font(Theme.font(Theme.Role.rowTitle))
+                    .foregroundStyle(Theme.ink)
+                Spacer(minLength: Theme.Space.s8)
+                ForEach(section.columns, id: \.self) { title in
+                    Text(title)
+                        .font(Theme.font(Theme.Role.caption))
+                        .foregroundStyle(Theme.inkTertiary)
+                        .frame(width: Self.column, alignment: .trailing)
+                }
+            }
+            if !section.spark.isEmpty {
+                VStack(spacing: Theme.Space.s4) {
+                    SparkBars(values: section.spark)
+                        .frame(height: 28)
+                    HStack {
+                        Text("Holds per day")
+                        Spacer()
+                        Text("Today")
+                    }
+                    .font(Theme.font(Theme.Role.caption))
+                    .foregroundStyle(Theme.inkTertiary)
+                }
+                .padding(.bottom, Theme.Space.s4)
+            }
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(section.rows) { row in
+                    DetailRowView(row: row, columned: !section.columns.isEmpty)
+                }
+            }
+            ForEach(section.notes, id: \.self) { note in
+                Text(note)
                     .font(Theme.font(Theme.Role.caption))
                     .foregroundStyle(Theme.inkTertiary)
                     .fixedSize(horizontal: false, vertical: true)
             }
-            if let alarm {
-                Rectangle()
-                    .fill(Theme.hairline)
-                    .frame(height: 1)
+            if let alarm = section.alarm {
                 HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s4) {
-                    Image(systemName: "exclamationmark.triangle")
-                        .font(.system(size: 11, weight: .medium))
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(Theme.critical)
                     Text(alarm)
                         .font(Theme.font(Theme.Role.caption))
@@ -991,58 +997,74 @@ private struct RankedChart: View {
                 .accessibilityElement(children: .combine)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 }
 
-private struct RankedBar: View {
-    let fraction: Double
-    let label: String
-    let rank: Int
+private struct DetailRowView: View {
+    let row: InsightDetailRow
+    let columned: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(alignment: .firstTextBaseline, spacing: Theme.Space.s8) {
+                Text(row.label)
+                    .font(Theme.font(Theme.Role.body))
+                    .foregroundStyle(Theme.inkSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: Theme.Space.s8)
+                if columned, let secondary = row.secondary {
+                    value(row.value).frame(width: DetailSectionView.column, alignment: .trailing)
+                    value(secondary).frame(width: DetailSectionView.column, alignment: .trailing)
+                } else {
+                    value(row.value)
+                }
+            }
+            if let fraction = row.fraction {
+                GeometryReader { proxy in
+                    Capsule()
+                        .fill(row.isFault ? Theme.critical.opacity(0.7) : Theme.ink.opacity(0.32))
+                        .frame(width: max(2, proxy.size.width * min(1, max(0, fraction))))
+                }
+                .frame(height: 3)
+            }
+        }
+        .padding(.vertical, 5)
+        .overlay(alignment: .bottom) {
+            Rectangle().fill(Theme.hairline).frame(height: 1)
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func value(_ text: String) -> some View {
+        Text(text)
+            .font(Theme.font(Theme.Role.body))
+            .foregroundStyle(row.isFault ? Theme.critical : Theme.ink)
+            .monospacedDigit()
+            .multilineTextAlignment(.trailing)
+    }
+}
+
+/// Holds per day, normalised against the busiest day. A silent day still draws
+/// a 1 pt stub: an invisible zero reads as a missing day rather than a quiet one.
+private struct SparkBars: View {
+    let values: [Double]
 
     var body: some View {
         Canvas(rendersAsynchronously: false) { context, size in
-            guard size.width > 0 else { return }
-            let radius = min(Theme.Radius.chip, size.height / 2)
-            let width = max(2, size.width * min(1, max(0, fraction)))
-            context.fill(Path(roundedRect: CGRect(x: 0, y: 0, width: width, height: size.height),
-                              cornerRadius: radius),
-                         with: .color(InsightsPalette.fill(rank: rank, label: label)))
+            guard !values.isEmpty, size.width > 0 else { return }
+            let slot = size.width / Double(values.count)
+            let width = max(1, slot - min(2, slot / 3))
+            for (index, value) in values.enumerated() {
+                let clamped = min(max(value, 0), 1)
+                let height = max(1, clamped * size.height)
+                let rect = CGRect(x: Double(index) * slot, y: size.height - height,
+                                  width: width, height: height)
+                context.fill(Path(roundedRect: rect, cornerRadius: min(1, width / 2)),
+                             with: .color(clamped > 0 ? Theme.ink.opacity(0.5) : Theme.inkQuaternary))
+            }
         }
         .accessibilityHidden(true)
-    }
-}
-
-/// The sparse contract (§3.5): a dashed plate at the chart's normal height and
-/// one line naming what the tile needs. Never a zero, never a chart of one bar,
-/// never a fake trend line.
-private struct SparsePlate: View {
-    let need: String
-    let height: Double
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: Theme.Space.s8) {
-            RoundedRectangle(cornerRadius: Theme.Radius.row, style: .continuous)
-                .fill(Theme.groundRecessed)
-                .frame(height: height)
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.Radius.row, style: .continuous)
-                        .strokeBorder(Theme.hairline,
-                                      style: StrokeStyle(lineWidth: 1, dash: [3, 3])))
-            Text(need)
-                .font(Theme.font(Theme.Role.caption))
-                .foregroundStyle(Theme.inkTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(need)
-    }
-}
-
-/// Latency readouts, in the one shape §1.4 allows for a machine number.
-enum InsightsFormat {
-    static func ms(_ value: Double) -> String {
-        guard value.isFinite else { return "—" }
-        return "\(Int(value.rounded())) ms"
     }
 }
 #endif

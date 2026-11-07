@@ -1,6 +1,9 @@
 import XCTest
+import WispritEngine
+import WispritMacInput
 import WispritMacUI
 import WispritPersistence
+import WispritRefine
 @testable import WispritMac
 
 /// Insights' mapper, layout and read — `docs/design/ui-redesign.md` §3.5.
@@ -88,8 +91,15 @@ final class InsightsMapperTests: XCTestCase {
                              dictionary: dictionary, now: now, calendar: calendar)
     }
 
-    private func tile(_ label: String, _ input: InsightsInput) -> InsightTile? {
-        InsightsModel.tiles(from: input).first { InsightsLayout.label(of: $0) == label }
+    private let locale = Locale(identifier: "en_US_POSIX")
+
+    private func headline(_ kind: InsightHeadline.Kind, _ input: InsightsInput) -> InsightHeadline? {
+        InsightsModel.headlines(from: input, activity: nil, locale: locale).first { $0.kind == kind }
+    }
+
+    private func section(_ title: String, _ input: InsightsInput,
+                         recovery: InsightsRecovery? = nil) -> InsightDetailSection? {
+        InsightsModel.details(from: input, recovery: recovery, locale: locale).first { $0.title == title }
     }
 
     // MARK: - the fields
@@ -139,8 +149,10 @@ final class InsightsMapperTests: XCTestCase {
 
         let clean = input(stream())
         XCTAssertEqual(clean.zeroEditObserved, 0)
-        XCTAssertNil(tile(InsightsModel.zeroEditLabel, clean),
-                     "nothing observed, no tile — never a fake 0%")
+        XCTAssertNil(section("Edits", clean),
+                     "nothing observed, no figure — never a fake 0%")
+        XCTAssertEqual(section("Edits", mapped)?.rows.first?.value,
+                       "Needs 5 checked dictations. You have 2.")
     }
 
     /// The rule `MetricsSummary` is explicit about and the page inherits: an
@@ -156,19 +168,26 @@ final class InsightsMapperTests: XCTestCase {
                        input.empty)
     }
 
-    /// The empties tile, end to end: a caption, a ranking that excludes the
-    /// unclassified row, that row as a footnote, and the alarm underneath.
-    func testTheEmptiesTileKeepsTheFootnoteAndTheAlarmApartFromTheRanking() {
-        guard case .ranked(_, let caption, let rows, let footnote, let alarm)? =
-                tile(InsightsModel.emptiesLabel, input(stream()))
-        else { return XCTFail("ten empties is well over the five-row floor") }
+    /// The empties, end to end: a ranking in plain words that excludes the
+    /// unclassified row, that row as a note, and the alarm underneath — and a
+    /// headline that names the one genuine fault before anything else.
+    func testTheEmptiesKeepTheNoteAndTheAlarmApartFromTheRanking() {
+        guard let empties = section("Why holds caught nothing", input(stream())) else {
+            return XCTFail("ten empties draw the section")
+        }
+        XCTAssertEqual(empties.rows.map(\.label),
+                       ["Key released too soon", "Nothing heard", "Heard sound, no words"])
+        XCTAssertEqual(empties.rows.map(\.value), ["4", "3", "2"])
+        XCTAssertEqual(empties.notes, ["1 older hold was logged before Wisprit recorded a reason."])
+        XCTAssertEqual(empties.alarm,
+                       "1 hold (5.0%) had clear speech and a clean finish but still produced no text.")
 
-        XCTAssertEqual(caption, "10 · 50.0% of holds")
-        XCTAssertEqual(rows, [LabeledCount("short_hold", 4),
-                              LabeledCount("silent", 3),
-                              LabeledCount("produced_nothing", 2)])
-        XCTAssertEqual(footnote, "unclassified 1 — logged before reasons existed")
-        XCTAssertEqual(alarm, "1 unexplained (5.0%) — audible speech, clean finish, no text")
+        let holds = headline(.holds, input(stream()))
+        XCTAssertEqual(holds?.text, "10 of your last 20 holds became text.")
+        XCTAssertEqual(holds?.tone, .fault)
+        XCTAssertEqual(holds?.detail,
+                       "10 caught nothing: 1 was missed by Wisprit, 7 were quick taps or silence, "
+                       + "1 heard sound but no words and 1 other.")
     }
 
     // MARK: - Recovery
@@ -221,7 +240,7 @@ final class InsightsMapperTests: XCTestCase {
                        [InsightsRecovery.deviceChangedReason: 2, "silent": 1])
         XCTAssertEqual(recovery.unclassifiedEmpty, 1)
         XCTAssertEqual(recovery.unclassifiedFootnote,
-                       "unclassified 1 — logged before reasons existed")
+                       "1 older hold was logged before Wisprit recorded a reason.")
         XCTAssertFalse(recovery.emptyReasons.keys.contains("unclassified"))
     }
 
@@ -398,7 +417,7 @@ final class InsightsMapperTests: XCTestCase {
         XCTAssertEqual(input(rows, choice: .all).dailyCounts, [])
     }
 
-    // MARK: - the vocabulary tile
+    // MARK: - the dictionary
 
     func testVocabularyComesFromTheDictionaryAndOnlyListsTermsThatFired() {
         let dictionary = [
@@ -406,6 +425,7 @@ final class InsightsMapperTests: XCTestCase {
             DictionaryRow(term: "InsForge", source: "manual", hitCount: 6),
             DictionaryRow(term: "Unspoken", source: "manual", hitCount: 0),
             DictionaryRow(term: "Ghost", source: "spoken_spelling", hitCount: 0),
+            DictionaryRow(term: "Maybe", hitCount: 0, isPending: true, observations: ["may be"]),
         ]
         let input = input(stream(), dictionary: dictionary)
 
@@ -414,96 +434,162 @@ final class InsightsMapperTests: XCTestCase {
         // Learned-by-ear counts what Wisprit taught itself, whether or not the
         // term has fired yet — it is a fact about the dictionary.
         XCTAssertEqual(input.learnedTermCount, 2)
+        XCTAssertEqual(input.dictionaryTermCount, 4, "a quarantined sighting is not vocabulary yet")
 
-        guard case .ranked(_, _, let rows, let footnote, _)? =
-                tile(InsightsModel.vocabularyLabel, input)
-        else { return XCTFail("a fired term draws the vocabulary tile") }
-        XCTAssertEqual(rows, [LabeledCount("Sharique", 14), LabeledCount("InsForge", 6)])
-        XCTAssertEqual(footnote, "2 terms learned by ear")
+        let dictionaryHeadline = headline(.dictionary, input)
+        XCTAssertEqual(dictionaryHeadline?.text, "Your dictionary has fixed 20 words so far.")
+        XCTAssertEqual(dictionaryHeadline?.chart,
+                       .terms([LabeledCount("Sharique", 14), LabeledCount("InsForge", 6)]))
     }
 
-    func testADictionaryNoTermHasFiredDrawsNoVocabularyTile() {
-        let input = input(stream(), dictionary: [DictionaryRow(term: "Unspoken", hitCount: 0)])
+    func testADictionaryNoTermHasFiredSaysSoWithoutAChart() {
+        let input = input(stream(), dictionary: [DictionaryRow(term: "Unspoken", hitCount: 0),
+                                                 DictionaryRow(term: "Other", hitCount: 0)])
         XCTAssertTrue(input.vocabulary.isEmpty)
-        XCTAssertNil(tile(InsightsModel.vocabularyLabel, input))
+        XCTAssertEqual(headline(.dictionary, input)?.text,
+                       "None of your 2 dictionary terms have been needed yet.")
+        XCTAssertEqual(headline(.dictionary, input)?.chart, HeadlineChart.none)
+    }
+
+    // MARK: - the capture path
+
+    private func captured(ts: Double, backend: String?, reason: String? = nil,
+                          firstChunkMs: Double? = nil) -> JSONObject {
+        written(MetricsRecord(ts: ts, heldMs: 1_200, engine: "apple_live",
+                              finalizeMs: 40, timedOut: false, postMs: 0, insertMs: 0,
+                              outcome: reason == nil ? "paste" : "empty", chars: reason == nil ? 10 : 0,
+                              releaseToTextMs: reason == nil ? 200 : nil,
+                              emptyReason: reason,
+                              captureBackend: backend, firstChunkMs: firstChunkMs))
+    }
+
+    /// `capture_backend` exists only on rows since the capture update, which
+    /// is how the page can tell an old no-audio hold from a new one.
+    func testCaptureFiguresComeFromTheRowsThatRecordedThem() {
+        let rows = [
+            captured(ts: daysAgo(3), backend: nil, reason: "starved"),
+            captured(ts: daysAgo(3), backend: nil, reason: "starved"),
+            captured(ts: daysAgo(1), backend: "hal", firstChunkMs: 149),
+            captured(ts: daysAgo(1), backend: "hal", firstChunkMs: 104),
+            captured(ts: daysAgo(1), backend: "engine", firstChunkMs: 175),
+            captured(ts: daysAgo(1), backend: "hal", reason: "silent", firstChunkMs: 171),
+        ]
+        let mapped = input(rows)
+
+        XCTAssertEqual(mapped.captureBackends, ["hal": 3, "engine": 1])
+        XCTAssertEqual(mapped.capturedRows, 4)
+        XCTAssertEqual(mapped.starvedSinceCaptureUpdate, 0)
+        XCTAssertEqual(mapped.firstChunkP50, 149)
+        XCTAssertEqual(mapped.firstChunkP90, 175)
+        XCTAssertEqual(headline(.holds, mapped)?.advice.first,
+                       "The no-audio holds all came before Wisprit's new mic capture — none since.")
+        XCTAssertEqual(section("Mic capture", mapped)?.rows.map(\.label),
+                       ["Direct mic capture", "System audio engine"])
+
+        let since = input(rows + [captured(ts: daysAgo(1), backend: "hal", reason: "starved")])
+        XCTAssertEqual(since.starvedSinceCaptureUpdate, 1)
     }
 
     // MARK: - what a fresh install draws
 
-    /// The whole page over an empty file: three placeholders that say what they
-    /// need, and no tile at all for data this Mac has never produced.
+    /// The whole page over an empty file: two placeholders that say what they
+    /// need, a dictionary line, and no technical details at all.
     func testAnEmptyStreamDegradesToPlaceholdersRatherThanZeros() {
         let fresh = input([])
-        let tiles = InsightsModel.tiles(from: fresh)
+        let headlines = InsightsModel.headlines(from: fresh, activity: nil, locale: locale)
 
-        XCTAssertEqual(tiles.map { InsightsLayout.label(of: $0) },
-                       [InsightsModel.utterancesLabel,
-                        InsightsModel.latencyLabel,
-                        InsightsModel.outcomesLabel])
-        for tile in tiles {
-            guard case .sparse(_, let need) = tile else {
-                return XCTFail("\(InsightsLayout.label(of: tile)) must degrade, not show a zero")
+        XCTAssertEqual(headlines.map(\.kind), [.speed, .holds, .dictionary])
+        for kind in [InsightHeadline.Kind.speed, .holds] {
+            guard case .placeholder(let need)? = headlines.first(where: { $0.kind == kind })?.chart else {
+                return XCTFail("\(kind) must degrade, not show a zero")
             }
             XCTAssertEqual(need, "Needs 5 dictations. You have 0.")
         }
-        XCTAssertNil(InsightsModel.footer(from: fresh))
+        XCTAssertEqual(InsightsModel.details(from: fresh, recovery: nil, locale: locale), [])
     }
 
-    /// The gated-section rule, end to end: no row carries `ai`, so no cleanup
-    /// tile exists.
-    func testAStreamWhereRefineNeverRanHasNoCleanupTile() {
+    /// The gated-section rule, end to end: no row carries `ai`, so there is no
+    /// cleanup section.
+    func testAStreamWhereRefineNeverRanHasNoCleanupSection() {
         let rows = (0..<6).map { spoken(ts: daysAgo(Double($0)), releaseMs: 200) }
         let input = input(rows)
 
         XCTAssertTrue(input.aiOutcomes.isEmpty)
-        XCTAssertNil(tile(InsightsModel.cleanupLabel, input))
+        XCTAssertNil(section("AI cleanup", input))
     }
 
-    func testTheFooterStripQuotesTheFinalizeTimingsAndTheWindow() {
-        XCTAssertEqual(InsightsModel.footer(from: input(stream())),
-                       "finalize p50 40 ms · p90 100 ms · last 30 days")
+    func testTheTimingSectionQuotesTheFinalizeTimings() {
+        guard let timing = section("Timing", input(stream())) else { return XCTFail("timing") }
+        let finishing = timing.rows.first { $0.label == "Speech engine finishing" }
+        XCTAssertEqual(finishing?.value, "40 ms")
+        XCTAssertEqual(finishing?.secondary, "100 ms")
+        XCTAssertEqual(timing.rows.last?.value, "0 of 20 (0.0%)")
     }
 
-    // MARK: - the grid
+    // MARK: - the layout
 
-    func testTheTwoWideTilesOwnTheirRowAndTheRestPairUp() {
-        let tiles: [InsightTile] = [
-            .sparse(label: InsightsModel.utterancesLabel, need: "x"),
-            .sparse(label: InsightsModel.latencyLabel, need: "x"),
-            .sparse(label: InsightsModel.outcomesLabel, need: "x"),
-            .sparse(label: InsightsModel.emptiesLabel, need: "x"),
-            .sparse(label: InsightsModel.cleanupLabel, need: "x"),
-            .sparse(label: InsightsModel.vocabularyLabel, need: "x"),
-        ]
-        let rows = InsightsLayout.rows(tiles).map { $0.map(InsightsLayout.label(of:)) }
-
-        XCTAssertEqual(rows, [[InsightsModel.utterancesLabel, InsightsModel.latencyLabel],
-                              [InsightsModel.outcomesLabel],
-                              [InsightsModel.emptiesLabel],
-                              [InsightsModel.cleanupLabel, InsightsModel.vocabularyLabel]])
-    }
-
-    /// A tile that degraded to a placeholder still spans the grid: the layout
-    /// must not reflow just because the data thinned out.
-    func testASparsePlaceholderKeepsTheColumnSpanOfTheTileItReplaced() {
-        let rows = InsightsLayout.rows(InsightsModel.tiles(from: input([])))
-        XCTAssertEqual(rows.map(\.count), [2, 1])
-        XCTAssertFalse(InsightsLayout.isWide(rows[0][0]))
-        XCTAssertTrue(InsightsLayout.isWide(rows[1][0]))
-    }
-
-    /// The placeholder is the chart's height, so a tile that degrades leaves
-    /// the grid where it was.
-    func testEveryTileNamesAChartHeightForItsPlaceholder() {
-        for label in [InsightsModel.utterancesLabel, InsightsModel.latencyLabel,
-                      InsightsModel.outcomesLabel, InsightsModel.emptiesLabel,
-                      InsightsModel.cleanupLabel, InsightsModel.vocabularyLabel] {
-            XCTAssertGreaterThan(InsightsMetrics.chartHeight(for: label), 0, label)
+    func testHeadlinesPairUpAndTheActivityGridOwnsItsRow() {
+        func h(_ kind: InsightHeadline.Kind) -> InsightHeadline {
+            InsightHeadline(kind: kind, kicker: "", scope: "", sentence: [], chart: .none)
         }
-        // §1.4: machine vocabulary is mono; dictionary terms are words a human
-        // chose and are not.
-        XCTAssertTrue(InsightsMetrics.isMachineVocabulary(InsightsModel.emptiesLabel))
-        XCTAssertFalse(InsightsMetrics.isMachineVocabulary(InsightsModel.vocabularyLabel))
+        XCTAssertEqual(InsightsMetrics.rows([h(.speed), h(.holds), h(.dictionary), h(.pace), h(.activity)])
+                        .map { $0.map(\.kind) },
+                       [[.speed, .holds], [.dictionary, .pace], [.activity]])
+        XCTAssertEqual(InsightsMetrics.rows([h(.speed), h(.holds), h(.dictionary), h(.activity)])
+                        .map { $0.map(\.kind) },
+                       [[.speed, .holds], [.dictionary], [.activity]])
+    }
+}
+
+// MARK: - every machine word has plain words
+
+/// The jargon bug, closed for good: every value a writer in this repo can put
+/// in `outcome`, `empty_reason`, `ai` or `capture_backend` has a label in
+/// `InsightsLabels`, walked from the writers' own enums so a new case fails
+/// here instead of reaching the screen as `snake_case`.
+final class InsightsLabelCoverageTests: XCTestCase {
+
+    private func assertTranslated(_ keys: [String], _ table: [String: String],
+                                  _ label: (String) -> String,
+                                  file: StaticString = #filePath, line: UInt = #line) {
+        for key in keys {
+            XCTAssertNotNil(table[key], "\(key) has no plain-language label", file: file, line: line)
+            let shown = label(key)
+            XCTAssertFalse(shown.contains("_"), "\(key) → \(shown)", file: file, line: line)
+            XCTAssertNotEqual(shown, key, "\(key) is shown untranslated", file: file, line: line)
+        }
+    }
+
+    func testEveryOutcomeTheWritersProduce() {
+        let rungs = InsertionTier.allCases.map(\.rawValue)
+        let methods = InsertResult.Method.allCases.map(\.rawValue)
+        // Written as literals by `SessionController` and `MetricsSummary`.
+        let session = ["empty", "correction", "vocab_retro",
+                       MetricsSummary.editObservedOutcome, MetricsSummary.onboardingOutcome,
+                       InsightsMapper.unrecordedOutcome]
+        assertTranslated(rungs + methods + session, InsightsLabels.outcomeLabels, InsightsLabels.outcome)
+    }
+
+    func testEveryEmptyReason() {
+        assertTranslated(EmptyReason.allCases.map(\.rawValue),
+                         InsightsLabels.emptyReasonLabels, InsightsLabels.emptyReason)
+    }
+
+    func testEveryCleanupOutcome() {
+        assertTranslated(RefineOutcome.allCases.map(\.rawValue),
+                         InsightsLabels.cleanupLabels, InsightsLabels.cleanup)
+    }
+
+    func testEveryCaptureBackend() {
+        assertTranslated(MicCapture.Backend.allCases.map(\.rawValue),
+                         InsightsLabels.captureBackendLabels, InsightsLabels.captureBackend)
+    }
+
+    /// Delivered outcomes are exactly the insertion rungs that put text in a
+    /// field — so "became text" can never quietly drop a tier.
+    func testTheDeliveredSetIsTheRungsThatInsert() {
+        let inserting = Set(InsertionTier.allCases.filter { $0 != .blockedSecure }.map(\.rawValue))
+        XCTAssertEqual(InsightsModel.deliveredOutcomes, inserting)
     }
 }
 
