@@ -239,6 +239,18 @@ public protocol HistoryPort: Sendable {
     /// after the detail row was written, so its outcome arrives as an update.
     @discardableResult
     func updateDetail(transcriptId: Int64, vocab: String) -> Bool
+    /// The delivery facts — the app the text went to and the stage timings —
+    /// keyed to the transcript row `add` returned. Off the paste path, like
+    /// `addDetail`.
+    @discardableResult
+    func addMeta(transcriptId: Int64, _ meta: TranscriptMeta) -> Bool
+}
+
+extension HistoryPort {
+    /// Inert by default, so a port that predates the Dictations page (a test
+    /// fake, a tool) keeps compiling and simply records nothing.
+    @discardableResult
+    public func addMeta(transcriptId: Int64, _ meta: TranscriptMeta) -> Bool { false }
 }
 
 public protocol MetricsPort: Sendable {
