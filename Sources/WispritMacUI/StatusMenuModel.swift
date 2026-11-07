@@ -47,6 +47,8 @@ public enum MenuAction: Equatable, Sendable {
     case openDictionary
     case openConfig
     case purgeHistory
+    /// The ⌘, Settings window — the same one the app menu opens.
+    case openSettings
     case quit
 }
 
@@ -424,6 +426,11 @@ public enum StatusMenuModel {
         items.append(MenuItemModel(title: "Open Setup…", action: .openSetup))
         items.append(MenuItemModel(title: "Purge History", action: .purgeHistory))
         items.append(.separator)
+        // The Mac convention for a menu-bar app: Settings… with its ⌘, just
+        // above Quit, so the window is one click away even while Wisprit is
+        // still an agent with no app menu on screen.
+        items.append(MenuItemModel(title: "Settings…", action: .openSettings,
+                                   keyEquivalent: ","))
         items.append(MenuItemModel(title: "Quit Wisprit", action: .quit))
         return items
     }

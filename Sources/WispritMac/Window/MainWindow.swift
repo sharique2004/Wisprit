@@ -88,28 +88,23 @@ public final class MainWindowController: NSObject, NSWindowDelegate {
         if let tab { model.route(to: tab) }
     }
 
-    /// ⌘, — Settings in its own window, as the HIG asks. One instance; a
-    /// second request brings it forward.
+    /// ⌘, — Settings in its own window, as the HIG asks: toolbar panes,
+    /// titled by the pane, reopening the last one (`SettingsWindow.swift`).
+    /// One instance; a second request brings it forward.
     public func showSettings() {
         let flipped = becomeRegularApp()
         if let settingsWindow {
             raise(settingsWindow, afterPolicyChange: flipped)
             return
         }
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 620),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false)
-        window.title = "Settings"
-        window.toolbarStyle = .preference
-        window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 560, height: 420)
-        let host = NSHostingController(rootView: SettingsWindowRoot(model: model))
-        host.sceneBridgingOptions = [.title, .toolbars]
-        window.contentViewController = host
-        window.setContentSize(NSSize(width: 640, height: 620))
+        // Setup is the health sheet on the Hub, so "Open Setup…" in a pane
+        // brings that window up with the sheet on it.
+        let window = SettingsWindowFactory.make(
+            model: model,
+            openSetup: { [weak self] in self?.show(tab: .setup) })
         window.center()
+        // Position only: the height follows the pane (the window is not
+        // user-resizable), so a restored frame is re-fitted on appear.
         window.setFrameAutosaveName("WispritSettingsWindow")
         self.settingsWindow = window
         raise(window, afterPolicyChange: flipped)

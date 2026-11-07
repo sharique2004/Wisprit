@@ -331,7 +331,9 @@ public final class WispritWindowModel: ObservableObject {
 
     // MARK: - Collaborators
 
-    private let settings: Settings
+    // Internal, not private: the Settings window's extension (`WindowModel+Settings`)
+    // reads and writes the keys this file never mirrored.
+    let settings: Settings
     private let dictionary: DictionaryEditor
     private let snippets: SnippetStore?
     private let identity: IdentityStore?

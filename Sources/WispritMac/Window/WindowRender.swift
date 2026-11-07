@@ -15,10 +15,14 @@ import WispritPersistence
 /// looked at without quitting the copy someone is dictating with.
 ///
 /// Pages: `home`, `dictionary`, `insights` (the Hub with its sidebar and
-/// toolbar), `setup` (the health sheet), `settings` (the ⌘, window's content).
+/// toolbar), `setup` (the health sheet), `settings` (the ⌘, window, built by
+/// the same factory the app uses; `--pane general|microphone|writing|privacy|
+/// advanced` picks the pane, and the window fits that pane's height the way
+/// the real one does, so `--size` sets only its starting size; `--full` lifts
+/// the height cap to draw a long pane whole).
 @MainActor
 enum WindowRender {
-    static let usage = "usage: Wisprit render-window <home|dictionary|insights|setup|settings> <out.png> [--size WxH] [--light] [--settle SECONDS]"
+    static let usage = "usage: Wisprit render-window <home|dictionary|insights|setup|settings> <out.png> [--size WxH] [--light] [--settle SECONDS] [--pane NAME] [--full]"
 
     static func run(arguments: [String]) -> Never {
         guard arguments.count >= 2 else {
@@ -30,6 +34,8 @@ enum WindowRender {
         var size = NSSize(width: 1040, height: 700)
         var light = false
         var settle: TimeInterval = 2.5
+        var pane: SettingsPane?
+        var full = false
         var index = 2
         while index < arguments.count {
             switch arguments[index] {
@@ -40,6 +46,14 @@ enum WindowRender {
                 index += 1
             case "--settle" where index + 1 < arguments.count:
                 settle = Double(arguments[index + 1]) ?? settle
+                index += 1
+            case "--full": full = true
+            case "--pane" where index + 1 < arguments.count:
+                guard let named = SettingsPane(rawValue: arguments[index + 1]) else {
+                    FileHandle.standardError.write(Data("unknown pane \(arguments[index + 1])\n".utf8))
+                    exit(2)
+                }
+                pane = named
                 index += 1
             default: break
             }
@@ -76,23 +90,35 @@ enum WindowRender {
         case "setup":
             root = AnyView(SetupPage(model: model))
         case "settings":
-            root = AnyView(SettingsWindowRoot(model: model))
+            root = AnyView(EmptyView())
         default:
             FileHandle.standardError.write(Data("unknown page \(page)\n\(usage)\n".utf8))
             exit(2)
         }
 
-        let window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
+        let window: NSWindow
+        if page == "settings" {
+            // The shipping window, remembering nothing: a render must not move
+            // the user's last-used pane.
+            window = SettingsWindowFactory.make(model: model, openSetup: {},
+                                                initialPane: pane ?? .general,
+                                                defaults: nil)
+            // `--full` draws the whole pane instead of the scrolled window.
+            if full { (window.contentViewController as? SettingsTabController)?.maximumHeight = .infinity }
+            window.setContentSize(size)
+        } else {
+            window = NSWindow(contentRect: NSRect(origin: .zero, size: size),
                               styleMask: [.titled, .closable, .miniaturizable, .resizable,
                                           .fullSizeContentView],
                               backing: .buffered, defer: false)
+            window.toolbarStyle = .unified
+            window.title = "Wisprit"
+            let host = NSHostingController(rootView: root)
+            host.sceneBridgingOptions = [.title, .toolbars]
+            window.contentViewController = host
+            window.setContentSize(size)
+        }
         window.appearance = NSAppearance(named: light ? .aqua : .darkAqua)
-        window.toolbarStyle = page == "settings" ? .preference : .unified
-        window.title = page == "settings" ? "Settings" : "Wisprit"
-        let host = NSHostingController(rootView: root)
-        host.sceneBridgingOptions = [.title, .toolbars]
-        window.contentViewController = host
-        window.setContentSize(size)
         // Off every screen: laid out and drawn, never seen.
         window.setFrameOrigin(NSPoint(x: -20_000, y: -20_000))
         window.orderFrontRegardless()
