@@ -72,8 +72,39 @@ final class StatusMenuModelTests: XCTestCase {
             "Open Setup…",
             "Purge History",
             "---",
+            "Settings…",
             "Quit Wisprit",
         ])
+    }
+
+    /// Settings… sits directly above Quit with the ⌘, every Mac app gives it,
+    /// and opens the same window the app menu does.
+    func testSettingsRowSitsAboveQuitWithCommandComma() {
+        let items = StatusMenuModel.build(StatusMenuState())
+        let index = items.firstIndex { $0.action == .openSettings }
+        XCTAssertNotNil(index)
+        guard let index else { return }
+        let row = items[index]
+        XCTAssertEqual(row.title, "Settings…")
+        XCTAssertEqual(row.keyEquivalent, ",")
+        XCTAssertTrue(row.isEnabled)
+        XCTAssertFalse(row.isChecked)
+        XCTAssertEqual(items[index + 1].action, .quit, "Settings… is the row above Quit")
+        XCTAssertTrue(items[index - 1].isSeparator, "and opens the last group")
+        XCTAssertEqual(items.filter { $0.action == .openSettings }.count, 1)
+    }
+
+    /// It is there whatever state the app is in — a blocked install needs its
+    /// settings as much as a healthy one.
+    func testSettingsRowIsAlwaysPresent() {
+        for state in [StatusMenuState(dictationEnabled: false),
+                      StatusMenuState(aiAvailability: false),
+                      StatusMenuState(liveTyping: .unsupported),
+                      StatusMenuState(contextAwareness: .disabledByEnvironment),
+                      StatusMenuState(needsSetup: true)] {
+            XCTAssertEqual(StatusMenuModel.build(state)
+                .filter { $0.action == .openSettings }.count, 1)
+        }
     }
 
     /// A menu-bar-only app whose icon can hide behind the notch needs a way back
@@ -279,7 +310,7 @@ final class StatusMenuModelTests: XCTestCase {
             polishModes: StatusMenuModelTests.modes))
         let actions = items.compactMap(\.action)
         for expected: MenuAction in [.pasteLast, .openDictionary, .openConfig,
-                                     .openSetup, .purgeHistory, .quit] {
+                                     .openSetup, .purgeHistory, .openSettings, .quit] {
             XCTAssertEqual(actions.filter { $0 == expected }.count, 1, "\(expected)")
         }
     }

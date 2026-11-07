@@ -46,6 +46,8 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         public var openDictionary: () -> Void
         public var openConfig: () -> Void
         public var purgeHistory: () -> Void
+        /// The ⌘, Settings window.
+        public var openSettings: () -> Void
         public var quit: () -> Void
 
         public init(state: @escaping () -> StatusMenuState,
@@ -64,6 +66,7 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
                     openDictionary: @escaping () -> Void,
                     openConfig: @escaping () -> Void,
                     purgeHistory: @escaping () -> Void,
+                    openSettings: @escaping () -> Void = {},
                     quit: @escaping () -> Void) {
             self.state = state
             self.openWindow = openWindow
@@ -81,6 +84,7 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
             self.openDictionary = openDictionary
             self.openConfig = openConfig
             self.purgeHistory = purgeHistory
+            self.openSettings = openSettings
             self.quit = quit
         }
     }
@@ -262,6 +266,8 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         case .purgeHistory:
             actions.purgeHistory()
             rebuild()
+        case .openSettings:
+            actions.openSettings()
         case .quit:
             actions.quit()
         }

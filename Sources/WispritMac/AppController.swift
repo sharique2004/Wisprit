@@ -985,6 +985,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
             openDictionary: { NSWorkspace.shared.open(WispritPaths.dictionaryPath) },
             openConfig: { NSWorkspace.shared.open(WispritPaths.configPath) },
             purgeHistory: { [weak self] in self?.history.purge() },
+            openSettings: { [weak self] in self?.openSettings() },
             quit: { [weak self] in self?.terminate() })
     }
 
