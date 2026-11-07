@@ -38,6 +38,8 @@ enum WispritMacMain {
             exit(runInsertSmoke(arguments: Array(arguments.dropFirst())))
         case "pill-demo":
             MainActor.assumeIsolated { PillDemo.run(arguments: Array(arguments.dropFirst())) }
+        case "notch-demo":
+            MainActor.assumeIsolated { NotchDemo.run(arguments: Array(arguments.dropFirst())) }
         case "--version", "version":
             print("Wisprit \(WispritVersion.string)")
             exit(0)
@@ -86,6 +88,9 @@ enum WispritMacMain {
                                   walk the floating pill through every state on
                                   synthetic level data; --shots writes one
                                   screenshot per state
+          Wisprit notch-demo [--shots DIR | --render DIR]
+                                  walk the living notch through every state;
+                                  --render draws them offscreen to PNG
         """
 
     // MARK: - the app

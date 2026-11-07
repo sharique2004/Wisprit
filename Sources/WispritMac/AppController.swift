@@ -41,9 +41,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
     let monitor: HotkeyMonitor
     let session: SessionController
     let pill: Pill
-    /// Listening outline. The pill panel is still constructed so the demo and
+    /// The living notch. The pill panel is still constructed so the demo and
     /// its model tests keep a home, but the running app never orders it front.
-    let notchOutline: NotchOutline
+    let notch: NotchIndicator
     let liveTyping: LiveTypingSession
     let tierCache: BundleCapabilityCache
     /// Phase-4 context awareness — inert until the consent flow flips
@@ -287,8 +287,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
             onCancel: { events.put(HotkeyEvent(.esc)) },
             onConfirm: { events.put(HotkeyEvent(.release)) }))
         self.pill = pill
-        let notchOutline = NotchOutline()
-        self.notchOutline = notchOutline
+        let notch = NotchIndicator(isSuppressed: { settings.pillHidden })
+        self.notch = notch
 
         // Rungs 1–2 of the insertion ladder. Nothing here touches an input
         // source until `live_typing` is on AND onboarding has run — the setting
@@ -357,7 +357,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
         // One pill port for every off-main producer — the session thread and
         // the edit-capture answers both speak through it.
         let pillPort = MainThreadPill(pill,
-                                      notch: notchOutline,
+                                      notch: notch,
                                       isSuppressed: { settings.pillHidden })
 
         // Phase-5 edit capture: committed snapshots (the IM rung's own read
@@ -494,7 +494,7 @@ public final class AppController: NSObject, NSApplicationDelegate {
         windowModel.onPillHiddenChange = { [weak self] hidden in
             WispritUI.callOnMain {
                 self?.pill.hide()
-                if hidden { self?.notchOutline.hide() }
+                if hidden { self?.notch.hideImmediately() }
             }
         }
         self.windowController = MainWindowController(model: windowModel)
@@ -504,6 +504,10 @@ public final class AppController: NSObject, NSApplicationDelegate {
             WispritUI.callOnMain {
                 self?.sessionIsIdle = state == .idle
                 statusMenu.update(stateNamed: state.rawValue)
+                // The notch's safety net: a session that went idle has no mic
+                // and nothing running, whatever the last pill call said. Posted
+                // from the session thread in order with the pill's own calls.
+                if state == .idle { notch.receive(.sessionIdle) }
                 // The window's 2-second timer stops for the duration of an
                 // utterance. Everything it polls shares the main thread with the
                 // hotkey tap, the pill and the live-typing stream, and the Try-it
@@ -786,11 +790,19 @@ public final class AppController: NSObject, NSApplicationDelegate {
         session.start()
         log.info("Wisprit ready — hold \(self.settings.hotkey, privacy: .public) to dictate.")
         // Screenshot aid. Unset in normal use, so a launch does not leave the
-        // outline up. It draws the recording contour without opening the mic
-        // and without ordering the pill on screen.
-        if ProcessInfo.processInfo.environment["WISPRIT_PREVIEW_NOTCH"] == "1" {
-            notchOutline.show()
-            notchOutline.updateLevel(0.12)
+        // notch up. It pins one state on screen (synthetic voice for
+        // `listening`) without opening the mic: `1` or `listening`,
+        // `prewarming`, `finalizing`, `refining`, or a result name
+        // (`success`, `missed`, `tooQuiet`, `error`, `blockedSecure`).
+        if let preview = ProcessInfo.processInfo.environment["WISPRIT_PREVIEW_NOTCH"] {
+            switch preview {
+            case "1", "listening": notch.preview(.listening)
+            case "prewarming": notch.preview(.prewarming)
+            case "finalizing": notch.preview(.processing(.finalizing))
+            case "refining": notch.preview(.processing(.refining))
+            default:
+                if let result = NotchResult(rawValue: preview) { notch.preview(.result(result)) }
+            }
         }
     }
 
@@ -1143,69 +1155,88 @@ public final class AppController: NSObject, NSApplicationDelegate {
     }
 }
 
-/// Routes dictation UI through `WispritUI.callOnMain`.
+/// Routes dictation UI through `WispritUI.callOnMain` onto the living notch.
 ///
-/// The session thread never touches AppKit. Listening (`showPrewarming` /
-/// `showRecording` / `updateLevel`) draws the notch outline. Every other call
-/// — idle, finalizing, flashes, notices — orders the pill out and takes the
-/// outline down, so neither can stick on screen after the key comes up.
-/// `pill_hidden` still suppresses the outline; it no longer reveals a pill.
+/// The session thread never touches AppKit. Every port call becomes one
+/// `NotchSignal`, stamped with a sequence number **here, on the calling
+/// thread**, so the notch can drop a level tick that was taken before
+/// `showFinalizing` but landed after it — a stale call can never re-light a
+/// notch that has moved on. The mapping:
+///
+/// | port call | notch |
+/// |---|---|
+/// | `showPrewarming` / `showRecording` | grows out of the housing; grey, then orange when the mic is live |
+/// | `updateLevel` (20 Hz) | the right wing's meter |
+/// | `showFinalizing` / `showRefining` | orange off, processing ripple (sparkle while refining) |
+/// | `flashSuccess` / `flashMissed` / `flashTooQuiet` / `flashError` / `flashBlockedSecure` | a short result beat, then folds |
+/// | `showIdle` / `hide` | folds now |
+/// | `livePartial` / `transientNotice` | dropped — no text in the notch |
+///
+/// `pill_hidden`, read live, suppresses all of it: a call made while it is on
+/// takes the notch down without animation, and the notch's own heartbeat
+/// polls it too, so flipping the toggle mid-utterance clears the screen at
+/// once. The legacy floating pill is kept constructed (the demo and its model
+/// tests use it) and is ordered out on every non-meter call, never shown.
 final class MainThreadPill: PillPort, @unchecked Sendable {
     private let pill: Pill
-    private let notch: NotchOutline
-    /// `pill_hidden`, read live. The 20 Hz level tick is the one call
-    /// frequent enough that hopping it to main only to be dropped there is
-    /// worth avoiding — and reading the setting here rather than at
-    /// construction is what makes the Settings toggle take effect without a
-    /// relaunch.
+    private let notch: NotchIndicator
+    private let sequence = NotchSequence()
+    /// `pill_hidden`, read live. Checked on the calling thread so the 20 Hz
+    /// level tick costs no main-thread hop while hidden — and reading it here
+    /// rather than at construction is what makes the Settings toggle take
+    /// effect without a relaunch.
     private let isSuppressed: @Sendable () -> Bool
+    /// Whether the last level tick saw `pill_hidden` on, so the tick path
+    /// posts one `.suppress` per flip rather than twenty a second.
+    private let suppressionLock = NSLock()
+    private var tickSawSuppressed = false
 
-    init(_ pill: Pill, notch: NotchOutline, isSuppressed: @escaping @Sendable () -> Bool = { false }) {
+    init(_ pill: Pill, notch: NotchIndicator,
+         isSuppressed: @escaping @Sendable () -> Bool = { false }) {
         self.pill = pill
         self.notch = notch
         self.isSuppressed = isSuppressed
     }
 
-    private func onMain(_ work: @escaping @Sendable @MainActor (Pill, NotchOutline) -> Void) {
-        WispritUI.callOnMain { [self] in work(self.pill, self.notch) }
-    }
-
-    func showRecording() { showListening() }
-    func showPrewarming() { showListening() }
-
-    private func showListening() {
-        onMain { pill, notch in
-            pill.hide()
-            guard !self.isSuppressed() else {
-                notch.hide()
-                return
-            }
-            notch.show()
-        }
-    }
+    func showPrewarming() { send(.prewarm) }
+    func showRecording() { send(.record) }
 
     func updateLevel(_ level: Double) {
-        guard !isSuppressed() else { return }
-        onMain { _, notch in notch.updateLevel(level) }
+        let suppressed = isSuppressed()
+        suppressionLock.lock()
+        let flipped = suppressed != tickSawSuppressed
+        tickSawSuppressed = suppressed
+        suppressionLock.unlock()
+        if suppressed {
+            if flipped { post(.suppress, sequence: sequence.next(), hidePill: false) }
+            return
+        }
+        post(.level(level), sequence: sequence.next(), hidePill: false)
     }
 
     func livePartial(_ text: String) { _ = text }
     func transientNotice(_ text: String) { _ = text }
 
-    func showFinalizing() { dismiss() }
-    func flashSuccess() { dismiss() }
-    func flashError(_ message: String) { _ = message; dismiss() }
-    func flashMissed(_ message: String) { _ = message; dismiss() }
-    func flashTooQuiet(_ message: String) { _ = message; dismiss() }
-    func hide() { dismiss() }
-    func showIdle() { dismiss() }
-    func showRefining() { dismiss() }
-    func flashBlockedSecure() { dismiss() }
+    func showFinalizing() { send(.processing(.finalizing)) }
+    func showRefining() { send(.processing(.refining)) }
+    func flashSuccess() { send(.result(.success)) }
+    func flashError(_ message: String) { _ = message; send(.result(.error)) }
+    func flashMissed(_ message: String) { _ = message; send(.result(.missed)) }
+    func flashTooQuiet(_ message: String) { _ = message; send(.result(.tooQuiet)) }
+    func flashBlockedSecure() { send(.result(.blockedSecure)) }
+    func showIdle() { send(.dismiss) }
+    func hide() { send(.dismiss) }
 
-    private func dismiss() {
-        onMain { pill, notch in
-            pill.hide()
-            notch.hide()
+    private func send(_ signal: NotchSignal) {
+        // Stamp first, on this thread: the stamp is the call's place in line.
+        let stamp = sequence.next()
+        post(isSuppressed() ? .suppress : signal, sequence: stamp, hidePill: true)
+    }
+
+    private func post(_ signal: NotchSignal, sequence stamp: UInt64, hidePill: Bool) {
+        WispritUI.callOnMain { [pill, notch] in
+            if hidePill { pill.hide() }
+            notch.receive(signal, sequence: stamp)
         }
     }
 }

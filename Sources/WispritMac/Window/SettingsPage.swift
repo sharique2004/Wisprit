@@ -456,12 +456,13 @@ struct SettingsPage: View {
 
     private var pill: some View {
         SectionGroup("Listening") {
-            SectionRow("Outline while the key is held",
-                       description: "A hairline traces the notch while the key is held, then leaves.") {
+            SectionRow("Show dictation at the notch",
+                       description: "The notch widens while you hold the key, shows when your "
+                           + "words are being cleaned up, and folds away once they land.") {
                 Toggle("", isOn: Binding(get: { !model.pillHidden },
                                          set: { model.setPillHidden(!$0) }))
                     .labelsHidden()
-                    .accessibilityLabel("Outline while the key is held")
+                    .accessibilityLabel("Show dictation at the notch")
             }
         }
     }
