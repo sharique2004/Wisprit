@@ -161,8 +161,7 @@ public final class FuzzyVocabularyCorrector: CorrectionApplying, @unchecked Send
             let token = tokens[i]
             guard !token.hasDigit, !token.embedded,
                   token.lower.count >= Self.minimumTokenLength,
-                  !isOrdinaryWord(token.lower),
-                  !Self.isInflectionOfOrdinaryWord(token.lower, isOrdinaryWord),
+                  !Self.isOrdinaryToken(token.lower, isOrdinaryWord),
                   !isKnownTerm(token.lower),
                   !compiled.termWords.contains(token.lower)
             else { continue }
@@ -257,6 +256,15 @@ public final class FuzzyVocabularyCorrector: CorrectionApplying, @unchecked Send
                 || StringMetrics.jaroWinkler(word, heard) >= hearJaroWinklerFloor
                 || StringMetrics.normalizedLevenshtein(word, heard) <= hearLevenshteinCeiling
         }
+    }
+
+    /// The ordinary-word veto, whole: the lexicon's answer for the token, or
+    /// for any regular-suffix stem of it. Public so the Dictionary page's
+    /// review asks exactly the question this layer asks — one predicate, two
+    /// surfaces that cannot disagree about what an everyday word is.
+    public static func isOrdinaryToken(_ token: String,
+                                       _ isOrdinaryWord: (String) -> Bool) -> Bool {
+        isOrdinaryWord(token) || isInflectionOfOrdinaryWord(token, isOrdinaryWord)
     }
 
     /// Is this token an inflected form of an ordinary word?

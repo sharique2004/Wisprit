@@ -70,7 +70,36 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
         /// promotion.
         public var observations: [String]
         public var stats: TermStats
+        /// `kept_hears`: `hear` phrases the user has looked at and decided to
+        /// keep even though they are everyday words. A review decision, not
+        /// vocabulary — nothing derived reads it. See `keepHears(_:for:)`.
+        public var keptHears: [String] = []
     }
+
+    /// One term's entries exactly as the file holds them — every key, unknown
+    /// ones included — with their positions. The unit an undo puts back.
+    ///
+    /// Per term rather than per entry because the file really can list a term
+    /// twice and `removeTerm` removes every copy; an undo that restored only
+    /// the first would lose the second. Serialized JSON text rather than the
+    /// internal model so the type can cross module and actor boundaries.
+    public struct TermSnapshot: Equatable, Sendable {
+        struct Positioned: Equatable, Sendable {
+            let index: Int
+            let json: String
+        }
+
+        /// The trimmed, case-folded term the snapshot was taken for.
+        public let key: String
+        let entries: [Positioned]
+
+        /// The term was not in the file. Restoring an empty snapshot removes it.
+        public var isEmpty: Bool { entries.isEmpty }
+    }
+
+    /// `kept_hears` — see `LearnedEntry.keptHears`. Additive: older builds
+    /// and the Python side carry it through untouched, like any unknown key.
+    public static let keptHearsKey = "kept_hears"
 
     private struct Entry {
         var term: String
@@ -81,6 +110,7 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
         var source: String?
         var isPending: Bool
         var observations: [String]
+        var keptHears: [String] = []
     }
 
     private let log = WLog.logger("dictionary")
@@ -428,8 +458,168 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
                     term: entry.term, hear: entry.hear, isPending: entry.isPending,
                     observations: entry.observations,
                     stats: TermStats(hitCount: entry.hitCount, lastUsed: entry.lastUsed,
-                                     learnedAt: entry.learnedAt, source: entry.source))
+                                     learnedAt: entry.learnedAt, source: entry.source),
+                    keptHears: entry.keptHears)
             }
+    }
+
+    // MARK: - Writing (review decisions)
+
+    /// Stop listening for some phrases: remove them (case-insensitively) from
+    /// the `hear` list of every entry for `term`, and touch nothing else —
+    /// `learned_at`, `hit_count`, `source` and unknown keys all survive, which
+    /// a delete-and-re-add could not promise.
+    ///
+    /// - Returns: false (and writes nothing) when no listed phrase was there.
+    @discardableResult
+    public func removeHears(_ phrases: [String], from term: String) -> Bool {
+        let key = Self.key(term)
+        let drop = Set(phrases.map(Self.key).filter { !$0.isEmpty })
+        guard !key.isEmpty, !drop.isEmpty else { return false }
+        return mutateIfChanged { root in
+            Self.updateEntries(in: &root, key: key) { entry in
+                let hear = entry["hear"]?.arrayValue ?? []
+                let kept = hear.filter { item in
+                    guard let phrase = item.stringValue else { return true }
+                    return !drop.contains(Self.key(phrase))
+                }
+                guard kept.count != hear.count else { return false }
+                entry["hear"] = .array(kept)
+                return true
+            }
+        }
+    }
+
+    /// Record that the user reviewed these `hear` phrases and wants them kept
+    /// (`kept_hears`, an append-only, case-insensitive union). The phrases stay
+    /// in `hear` and keep correcting exactly as before; the only effect is that
+    /// the review stops asking about them.
+    @discardableResult
+    public func keepHears(_ phrases: [String], for term: String) -> Bool {
+        let key = Self.key(term)
+        guard !key.isEmpty, !phrases.isEmpty else { return false }
+        return mutateIfChanged { root in
+            Self.updateEntries(in: &root, key: key) { entry in
+                let before = entry[Self.keptHearsKey]?.arrayValue ?? []
+                let after = Self.mergedHear(existing: entry[Self.keptHearsKey], adding: phrases)
+                guard after.count != before.count else { return false }
+                entry[Self.keptHearsKey] = .array(after)
+                return true
+            }
+        }
+    }
+
+    /// Fold every entry the file holds for `term` into the first one: `hear`,
+    /// `observations` and `kept_hears` are unioned in file order, `hit_count`
+    /// summed, the latest `last_used` and earliest `learned_at` kept, and every
+    /// other key is the first entry's (gaps filled from the later ones). The
+    /// result is live vocabulary unless every copy was quarantined.
+    ///
+    /// - Returns: false (and writes nothing) when the term is listed once.
+    @discardableResult
+    public func mergeDuplicates(of term: String) -> Bool {
+        let key = Self.key(term)
+        guard !key.isEmpty else { return false }
+        return mutateIfChanged { (root: inout JSONValue) -> Bool in
+            guard var object = root.objectValue,
+                  let list = object["terms"]?.arrayValue else { return false }
+            var positions: [Int] = []
+            var copies: [JSONObject] = []
+            for (index, item) in list.enumerated() where Self.entryKey(item) == key {
+                guard let entry = item.objectValue else { continue }
+                positions.append(index)
+                copies.append(entry)
+            }
+            guard copies.count >= 2 else { return false }
+            var out: [JSONValue] = list
+            out[positions[0]] = .object(Self.merged(copies))
+            for index in positions.dropFirst().reversed() { out.remove(at: index) }
+            object["terms"] = .array(out)
+            root = .object(object)
+            return true
+        }
+    }
+
+    /// `mergeDuplicates`' fold, as a function of the copies alone.
+    private static func merged(_ copies: [JSONObject]) -> JSONObject {
+        var merged: JSONObject = copies[0]
+        var allPending = flag(merged["pending"])
+        var hits: Int? = merged["hit_count"]?.intValue
+        var lastUsed: Date? = parseDate(merged["last_used"]?.stringValue)
+        var learnedAt: Date? = parseDate(merged["learned_at"]?.stringValue)
+        for other in copies.dropFirst() {
+            allPending = allPending && flag(other["pending"])
+            merged["hear"] = .array(mergedHear(existing: merged["hear"],
+                                               adding: phrases(other["hear"])))
+            let observations: [String] = phrases(other["observations"])
+            if !observations.isEmpty {
+                merged["observations"] = .array(mergedHear(existing: merged["observations"],
+                                                           adding: observations))
+            }
+            let kept: [String] = phrases(other[keptHearsKey])
+            if !kept.isEmpty {
+                merged[keptHearsKey] = .array(mergedHear(existing: merged[keptHearsKey],
+                                                         adding: kept))
+            }
+            if let count = other["hit_count"]?.intValue { hits = (hits ?? 0) + count }
+            if let used = parseDate(other["last_used"]?.stringValue) {
+                if let current = lastUsed, current >= used {} else { lastUsed = used }
+            }
+            if let learned = parseDate(other["learned_at"]?.stringValue) {
+                if let current = learnedAt, current <= learned {} else { learnedAt = learned }
+            }
+            merged.fillAbsent(from: other)
+        }
+        if let hits { merged["hit_count"] = .int(hits) }
+        if let lastUsed { merged["last_used"] = .string(iso8601.string(from: lastUsed)) }
+        if let learnedAt { merged["learned_at"] = .string(iso8601.string(from: learnedAt)) }
+        if !allPending {
+            // One live copy makes the term live: its sightings are evidence.
+            let observations: [String] = phrases(merged["observations"])
+            if !observations.isEmpty {
+                merged["hear"] = .array(mergedHear(existing: merged["hear"], adding: observations))
+            }
+            merged["pending"] = nil
+            merged["observations"] = nil
+        }
+        return merged
+    }
+
+    // MARK: - Snapshots (undo)
+
+    /// Every entry for `term`, byte-exact, with its position in the file.
+    /// Read from disk, not from the parsed cache, so keys this type never
+    /// parses come back too.
+    public func snapshot(term: String) -> TermSnapshot {
+        let key = Self.key(term)
+        lock.lock(); defer { lock.unlock() }
+        let list = Self.readRaw(url, log: log).objectValue?["terms"]?.arrayValue ?? []
+        let entries = list.enumerated().compactMap { index, item -> TermSnapshot.Positioned? in
+            guard !key.isEmpty, Self.entryKey(item) == key else { return nil }
+            return TermSnapshot.Positioned(index: index, json: item.serialized())
+        }
+        return TermSnapshot(key: key, entries: entries)
+    }
+
+    /// Put a term back exactly as `snapshot` saw it: every current entry for
+    /// it is removed, then each snapshotted entry is reinserted at its old
+    /// position (clamped to the list). An empty snapshot therefore deletes the
+    /// term — which is how the undo of an *add* works.
+    public func restore(_ snapshot: TermSnapshot) {
+        guard !snapshot.key.isEmpty else { return }
+        mutateIfChanged { root in
+            guard var object = root.objectValue else { return false }
+            var list = (object["terms"]?.arrayValue ?? []).filter {
+                Self.entryKey($0) != snapshot.key
+            }
+            for item in snapshot.entries.sorted(by: { $0.index < $1.index }) {
+                guard let value = try? JSONValue.parse(item.json) else { continue }
+                list.insert(value, at: min(item.index, list.count))
+            }
+            object["terms"] = .array(list)
+            root = .object(object)
+            return true
+        }
     }
 
     // MARK: - Load
@@ -458,7 +648,8 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
                 learnedAt: Self.parseDate(object["learned_at"]?.stringValue),
                 source: object["source"]?.stringValue,
                 isPending: isPending,
-                observations: Self.phrases(object["observations"])))
+                observations: Self.phrases(object["observations"]),
+                keptHears: Self.phrases(object[Self.keptHearsKey])))
 
             // A quarantined entry contributes NOTHING: no substitution, no
             // self-casing, no biasing string, no `isKnownTerm` hit. It is a
@@ -584,6 +775,16 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
     /// hand edit made since the last load is never clobbered, then writes
     /// atomically (temp + fsync + rename) and reloads.
     private func mutate(_ body: (inout JSONValue) -> Void) {
+        mutateIfChanged { root -> Bool in
+            body(&root)
+            return true
+        }
+    }
+
+    /// The same, for an edit that may turn out to change nothing: a body that
+    /// returns false leaves the file (and its mtime) alone.
+    @discardableResult
+    private func mutateIfChanged(_ body: (inout JSONValue) -> Bool) -> Bool {
         lock.lock(); defer { lock.unlock() }
         var root = Self.readRaw(url, log: log)
         if root.objectValue?["terms"]?.arrayValue == nil {
@@ -591,9 +792,10 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
             object["terms"] = .array([])
             root = .object(object)
         }
-        body(&root)
+        guard body(&root) else { return false }
         write(root)
         load()
+        return true
     }
 
     private func write(_ root: JSONValue) {
@@ -620,6 +822,36 @@ public final class DictionaryStore: CorrectionApplying, VocabularySource, @unche
     }
 
     // MARK: - JSON entry helpers
+
+    /// The one spelling of "the same term" every lookup here uses: trimmed and
+    /// case-folded.
+    private static func key(_ term: String) -> String {
+        term.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+    }
+
+    private static func entryKey(_ item: JSONValue) -> String? {
+        item.objectValue?["term"]?.stringValue.map(key)
+    }
+
+    /// Apply `edit` to every entry for `key`, in place. True when any entry
+    /// reported a change — the caller's signal to write.
+    private static func updateEntries(in root: inout JSONValue, key: String,
+                                      _ edit: (inout JSONObject) -> Bool) -> Bool {
+        guard var object = root.objectValue,
+              var list = object["terms"]?.arrayValue else { return false }
+        var changed = false
+        for index in list.indices where entryKey(list[index]) == key {
+            guard var entry = list[index].objectValue else { continue }
+            if edit(&entry) {
+                list[index] = .object(entry)
+                changed = true
+            }
+        }
+        guard changed else { return false }
+        object["terms"] = .array(list)
+        root = .object(object)
+        return true
+    }
 
     private static func entryObject(in root: JSONValue, matching term: String) -> JSONObject? {
         let needle = term.lowercased()

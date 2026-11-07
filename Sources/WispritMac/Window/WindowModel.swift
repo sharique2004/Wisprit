@@ -231,6 +231,13 @@ public final class WispritWindowModel: ObservableObject {
     /// second population beyond the quarantined dictionary entries.
     @Published public private(set) var learnProposals: [LearnProposalRow] = []
     @Published public var dictionarySearch = ""
+    /// What in `dictionary.json` needs a decision, and the last undoable write
+    /// (the page's inline Undo). Both owned by WindowModel+Dictionary.swift.
+    @Published public internal(set) var dictionaryReview = DictionaryReview.empty
+    @Published public internal(set) var dictionaryLastChange: DictionaryChange?
+    /// The window's undo manager, handed over by the Dictionary page so Edit ▸
+    /// Undo (⌘Z) reaches its writes. Nil in tests that do not set one.
+    public weak var dictionaryUndoManager: UndoManager?
     /// The sidebar page on screen. Only ever a sidebar destination — route
     /// `.setup` / `.settings` through `route(to:)`, which sends them where they
     /// live now.
@@ -334,7 +341,8 @@ public final class WispritWindowModel: ObservableObject {
     // Internal, not private: the Settings window's extension (`WindowModel+Settings`)
     // reads and writes the keys this file never mirrored.
     let settings: Settings
-    private let dictionary: DictionaryEditor
+    /// Internal, not private: WindowModel+Dictionary.swift writes through it.
+    let dictionary: DictionaryEditor
     private let snippets: SnippetStore?
     private let identity: IdentityStore?
     private let ports: Ports
@@ -764,6 +772,7 @@ public final class WispritWindowModel: ObservableObject {
     public func reloadDictionary() {
         dictionaryRows = dictionary.rows()
         learnProposals = ports.learnProposals()
+        refreshDictionaryReview()
     }
 
     /// The Dictionary nav row's badge, from the same 6 pt-dot family as
@@ -774,11 +783,14 @@ public final class WispritWindowModel: ObservableObject {
     }
 
     /// The sidebar's Dictionary count: everything waiting on the user's
-    /// decision. Zero shows no badge.
-    public var dictionaryReviewCount: Int { learnProposals.count }
+    /// decision — the file's own review items, learn proposals, and learned
+    /// spellings the audit flags. Zero shows no badge.
+    public var dictionaryReviewCount: Int {
+        dictionaryReview.count + learnProposals.count + facts.learnedTerms.suspects.count
+    }
 
     public var dictionaryBadge: SetupBadge? {
-        Self.dictionaryBadge(proposals: learnProposals.count)
+        Self.dictionaryBadge(proposals: dictionaryReviewCount)
     }
 
     /// Accept an edit-derived proposal: the port writes it into the dictionary
@@ -800,26 +812,8 @@ public final class WispritWindowModel: ObservableObject {
         dictionaryRows.filter { $0.matches(dictionarySearch) }
     }
 
-    @discardableResult
-    public func saveTerm(original: DictionaryRow?, term: String, hear: [String]) -> Bool {
-        let changed = dictionary.save(original: original, term: term, hear: hear)
-        reloadDictionary()
-        return changed
-    }
-
-    public func deleteTerm(_ term: String) {
-        dictionary.delete(term)
-        reloadDictionary()
-    }
-
-    /// Accept a quarantined term (§3.4's Pending badge). Dismissing one is just
-    /// `deleteTerm` — the store's own removal, not a second kind of delete.
-    @discardableResult
-    public func promoteTerm(_ row: DictionaryRow) -> Bool {
-        let promoted = dictionary.promote(row)
-        reloadDictionary()
-        return promoted
-    }
+    // saveTerm / deleteTerm / promoteTerm and the review decisions are in
+    // WindowModel+Dictionary.swift: every one of them is undoable.
 
     public var dictionaryPath: URL { dictionary.path }
 
