@@ -342,6 +342,103 @@ final class SetupChecklistTests: XCTestCase {
         }
     }
 
+    // MARK: - the health sheet
+
+    private func sheet(_ facts: DoctorFacts, hotkey: String = "🌐",
+                       dictationEnabled: Bool = true) -> SetupSheet {
+        let items = SetupChecklist.items(from: facts)
+        return SetupChecklist.sheet(items: items,
+                                    summary: SetupChecklist.summary(items: items, hotkeyLabel: hotkey,
+                                                                    dictationEnabled: dictationEnabled),
+                                    hotkeyLabel: hotkey,
+                                    dictationEnabled: dictationEnabled)
+    }
+
+    /// Everything essential is green: one calm line and a compact list.
+    func testAHealthyMacOpensOnOneCalmLine() {
+        let calm = sheet(green())
+        XCTAssertTrue(calm.isCalm)
+        XCTAssertEqual(calm.hero, .ready)
+        XCTAssertEqual(calm.headline, "All set — hold 🌐 to dictate")
+        XCTAssertEqual(calm.subhead, "Hold the key, talk, let go. The text lands where your cursor is.")
+        XCTAssertEqual(calm.attention, [])
+        XCTAssertEqual(calm.optional, [])
+        XCTAssertEqual(calm.healthy.map(\.id), SetupChecklist.items(from: green()).map(\.id))
+        XCTAssertEqual(sheet(green(), hotkey: SetupChecklist.hotkeyLabel("right_option")).headline,
+                       "All set — hold the right ⌥ key to dictate")
+    }
+
+    /// An optional extra that is not set up does not spoil the calm line; it
+    /// sits below the list, expanded, under its own heading.
+    func testOptionalExtrasStayOutOfTheCalmLine() {
+        var facts = green()
+        facts.imStatus = InputMethodStatus()
+        facts.imReachable = false
+        let calm = sheet(facts)
+        XCTAssertTrue(calm.isCalm)
+        XCTAssertEqual(calm.optional.map(\.id), [SetupChecklist.liveTypingID])
+        XCTAssertFalse(calm.healthy.contains { $0.id == SetupChecklist.liveTypingID })
+        XCTAssertEqual(calm.subhead, "Hold the key, talk, let go. 1 optional extra below, if you want it.")
+    }
+
+    /// Switched off is a choice, not a problem: compact, and still calm.
+    func testASwitchedOffRowIsCompactAndCalm() {
+        var facts = green()
+        facts.liveTypingEnabled = false
+        let calm = sheet(facts)
+        XCTAssertTrue(calm.isCalm)
+        XCTAssertEqual(calm.healthy.last?.id, SetupChecklist.liveTypingID)
+        XCTAssertEqual(SetupChecklist.status(of: calm.healthy.last!), "Off")
+    }
+
+    /// Failing rows open first, blocking ones before the merely unresolved,
+    /// and the doctor-backed headline speaks unchanged.
+    func testFailingRowsLeadBlockingFirst() {
+        var facts = green()
+        facts.postEventAccess = false     // essential, not blocking (forgiven by the exit-code rule)
+        facts.speechOK = false            // blocking
+        facts.transcriberAvailable = false
+        let broken = sheet(facts)
+
+        XCTAssertFalse(broken.isCalm)
+        XCTAssertEqual(broken.headline, "Needs setup")
+        XCTAssertEqual(broken.attention.first?.id, SetupChecklist.speechID)
+        XCTAssertTrue(broken.attention.contains { $0.id == SetupChecklist.postEventID })
+        XCTAssertTrue(broken.attention.allSatisfy { $0.fix != .none }, "every failing row has its Fix")
+        XCTAssertFalse(broken.healthy.contains { $0.id == SetupChecklist.speechID })
+        // The relaunch that makes the grant take effect is still on the row.
+        let postEvent = broken.attention.first { $0.id == SetupChecklist.postEventID }
+        XCTAssertEqual(postEvent?.secondaryFix, .relaunch)
+    }
+
+    func testDictationOffIsNotCalmButNothingNeedsFixing() {
+        let off = sheet(green(), dictationEnabled: false)
+        XCTAssertFalse(off.isCalm)
+        XCTAssertEqual(off.headline, "Dictation is off")
+        XCTAssertEqual(off.attention, [])
+    }
+
+    /// Plain status words, never a developer line.
+    func testStatusWordsArePlain() {
+        let facts = green()
+        XCTAssertEqual(SetupChecklist.items(from: facts).map(SetupChecklist.status(of:)),
+                       ["Allowed", "Allowed", "Allowed", "Allowed", "Installed", "Available", "On"])
+
+        var denied = green()
+        denied.microphone = "denied"
+        denied.accessibility = false
+        XCTAssertEqual(SetupChecklist.status(of: item(SetupChecklist.microphoneID, denied)), "Not allowed")
+        XCTAssertEqual(SetupChecklist.status(of: item(SetupChecklist.accessibilityID, denied)), "Not allowed")
+
+        var stale = green()
+        stale.postEventAccess = false
+        XCTAssertEqual(SetupChecklist.status(of: item(SetupChecklist.postEventID, stale)), "Needs a restart")
+
+        for status in SetupChecklist.items(from: denied).map(SetupChecklist.status(of:)) {
+            XCTAssertFalse(status.contains("_") || status.contains(":"), status)
+        }
+    }
+
     /// The relaunch helper waits for the condition, not the clock: a fixed
     /// `sleep 1` let a slow quit turn the relaunch into a reopen, after which
     /// Wisprit finished quitting and the user was left with nothing running.

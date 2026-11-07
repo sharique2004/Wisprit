@@ -166,6 +166,29 @@ public struct SetupSummary: Sendable, Equatable {
     }
 }
 
+/// The health sheet's layout — see `SetupChecklist.sheet(...)`.
+public struct SetupSheet: Sendable, Equatable {
+    /// The doctor-backed hero state, carried through unchanged.
+    public var hero: SetupHero
+    public var isCalm: Bool
+    public var headline: String
+    public var subhead: String
+    public var attention: [SetupItem]
+    public var healthy: [SetupItem]
+    public var optional: [SetupItem]
+
+    public init(hero: SetupHero, isCalm: Bool, headline: String, subhead: String,
+                attention: [SetupItem], healthy: [SetupItem], optional: [SetupItem]) {
+        self.hero = hero
+        self.isCalm = isCalm
+        self.headline = headline
+        self.subhead = subhead
+        self.attention = attention
+        self.healthy = healthy
+        self.optional = optional
+    }
+}
+
 // MARK: - Builder
 
 public enum SetupChecklist {
@@ -463,6 +486,99 @@ public enum SetupChecklist {
                 ? "Hold the key, talk, let go. The text lands where your cursor is."
                 : "Hold the key, talk, let go. "
                   + "\(optional.count) optional extra\(optional.count == 1 ? "" : "s") below.")
+    }
+
+    // MARK: - Sheet presentation
+
+    /// Plain-language stand-in for the doctor's external-keyboard reminder,
+    /// which names `config.json` and a raw setting value.
+    public static let externalKeyboardTip =
+        "Some external keyboards never send the 🌐 key to macOS. If holding it "
+        + "does nothing, choose right ⌥ as the dictation key in Settings."
+
+    /// A row the sheet opens expanded: not green, and not switched off on
+    /// purpose. A switched-off row is a choice, not a problem.
+    public static func needsAttention(_ item: SetupItem) -> Bool {
+        !item.isOff && item.mark != .ok
+    }
+
+    /// How the health sheet lays the checklist out. Presentation only: every
+    /// mark, required-ness and fix still comes from `items(from:)` and
+    /// `summary(...)`, which `wisprit doctor` shares.
+    ///
+    /// * `attention` — essential rows that are not green, blocking first.
+    ///   They open expanded, Fix button first.
+    /// * `healthy` — green or deliberately-off rows: one compact line each.
+    /// * `optional` — optional extras that are not set up. Expanded too, but
+    ///   after the compact list and under a quieter heading.
+    ///
+    /// `isCalm` is the state the sheet should usually open in: probed, nothing
+    /// essential outstanding. Its headline is the calm one ("All set — hold 🌐
+    /// to dictate"); otherwise the doctor-backed summary speaks unchanged.
+    public static func sheet(items: [SetupItem],
+                             summary: SetupSummary,
+                             hotkeyLabel: String,
+                             dictationEnabled: Bool = true) -> SetupSheet {
+        let outstanding = items.filter { $0.isEssential && needsAttention($0) }
+        let attention = outstanding.filter(\.isBlocking) + outstanding.filter { !$0.isBlocking }
+        let optional = items.filter { !$0.isEssential && needsAttention($0) }
+        let healthy = items.filter { !needsAttention($0) }
+        let calm = summary.hero == .ready && attention.isEmpty && dictationEnabled
+        guard calm else {
+            return SetupSheet(hero: summary.hero, isCalm: false,
+                              headline: summary.headline, subhead: summary.subhead,
+                              attention: attention, healthy: healthy, optional: optional)
+        }
+        let extras = optional.count
+        return SetupSheet(
+            hero: summary.hero,
+            isCalm: true,
+            headline: "All set — hold \(hotkeyLabel) to dictate",
+            subhead: extras == 0
+                ? "Hold the key, talk, let go. The text lands where your cursor is."
+                : "Hold the key, talk, let go. \(extras) optional extra\(extras == 1 ? "" : "s") "
+                  + "below, if you want \(extras == 1 ? "it" : "them").",
+            attention: attention, healthy: healthy, optional: optional)
+    }
+
+    /// The one or two words a compact row shows on its right: what state this
+    /// is in, in the user's language.
+    public static func status(of item: SetupItem) -> String {
+        if item.isOff { return "Off" }
+        switch item.id {
+        case microphoneID:
+            switch item.mark {
+            case .ok: return "Allowed"
+            case .warn: return "Not asked yet"
+            case .bad: return "Not allowed"
+            }
+        case inputMonitoringID, accessibilityID:
+            switch item.mark {
+            case .ok: return "Allowed"
+            case .warn: return "Not confirmed"
+            case .bad: return "Not allowed"
+            }
+        case postEventID:
+            return item.mark == .ok ? "Allowed" : "Needs a restart"
+        case speechID:
+            switch item.mark {
+            case .ok: return "Installed"
+            case .warn: return "Not confirmed"
+            case .bad: return "Not installed"
+            }
+        case appleIntelligenceID:
+            return item.mark == .ok ? "Available" : "Unavailable"
+        case liveTypingID:
+            return item.mark == .ok ? "On" : "Not set up"
+        case learnedTermsID:
+            return item.mark == .ok ? "Clean" : "To review"
+        default:
+            switch item.mark {
+            case .ok: return "Ready"
+            case .warn: return "Check"
+            case .bad: return "Missing"
+            }
+        }
     }
 
     /// "fn" / "right_option" as a key a person can find on the keyboard.
