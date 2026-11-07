@@ -164,6 +164,24 @@ final class EvalCommandTests: XCTestCase {
                        .invalid("--locale needs a value"))
     }
 
+    /// `--lexicon system` is the production-faithful fuzzy-veto view
+    /// (docs/eval/AUDIT-2026-11-06.md); the default stays the compiled list so
+    /// every earlier scoreboard row keeps its meaning.
+    func testLexiconFlag() {
+        guard case .run(let defaults) = EvalCommand.parse(["stages"]) else {
+            return XCTFail("should parse")
+        }
+        XCTAssertEqual(defaults.lexicon, .compiled)
+        guard case .run(let system) = EvalCommand.parse(["stages", "--lexicon", "system"]) else {
+            return XCTFail("should parse")
+        }
+        XCTAssertEqual(system.lexicon, .system)
+        XCTAssertEqual(EvalCommand.parse(["stages", "--lexicon", "big"]),
+                       .invalid("--lexicon must be compiled|system"))
+        XCTAssertTrue(EvalRunner.ordinaryWords(.system).count
+                      >= EvalRunner.ordinaryWords(.compiled).count)
+    }
+
     func testCategoriesAreTrimmedAndCompacted() {
         guard case .run(let options) =
                 EvalCommand.parse(["score", "--categories", " homophones , ,addresses "]) else {

@@ -195,6 +195,11 @@ final class FakeAudio: AudioPort, @unchecked Sendable {
 
     var noiseFloor: Double? { lock.lock(); defer { lock.unlock() }; return noiseFloorValue }
     var firstVoicedMs: Double? { lock.lock(); defer { lock.unlock() }; return firstVoicedMsValue }
+    /// Scripted capture-path attribution (2026-11-06); nil omits the fields.
+    var captureBackendValue: String?
+    var firstChunkMsValue: Double?
+    var captureBackend: String? { lock.lock(); defer { lock.unlock() }; return captureBackendValue }
+    var firstChunkMs: Double? { lock.lock(); defer { lock.unlock() }; return firstChunkMsValue }
     var latestSpeechProbability: Double? {
         lock.lock(); defer { lock.unlock() }; return speechProbabilityValue
     }

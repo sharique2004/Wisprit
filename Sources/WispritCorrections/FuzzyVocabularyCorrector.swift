@@ -162,6 +162,7 @@ public final class FuzzyVocabularyCorrector: CorrectionApplying, @unchecked Send
             guard !token.hasDigit, !token.embedded,
                   token.lower.count >= Self.minimumTokenLength,
                   !isOrdinaryWord(token.lower),
+                  !Self.isInflectionOfOrdinaryWord(token.lower, isOrdinaryWord),
                   !isKnownTerm(token.lower),
                   !compiled.termWords.contains(token.lower)
             else { continue }
@@ -185,15 +186,31 @@ public final class FuzzyVocabularyCorrector: CorrectionApplying, @unchecked Send
     /// strength of a RECORDED mishear of the same word count. No phonetic tier
     /// here — its floor is not calibrated for phrases, and windows made of
     /// ordinary words ("in forges") are exactly what hear evidence licenses.
+    ///
+    /// **Word by word, not just as a string (2026-11-06).** A whole-window
+    /// Jaro-Winkler score is dominated by a shared opening word, and hear
+    /// phrases open with the commonest words there are: on 400 LibriSpeech
+    /// clips the shipped layer rewrote "you can" / "you and" / "you want" →
+    /// "Ubuntu" (hear "you bantu"), "the land" / "the man" / "the dawn" →
+    /// "De Anza" ("the anza"), "and this" → "Anthropic" ("and thropic"),
+    /// "he thought" → "hackathon" ("hacker thought"), "well to" → "WellX"
+    /// ("well x") — 25 of the 38 rewrites the owner's dictionary made to real
+    /// speech (docs/eval/AUDIT-2026-11-06.md). Every word of the window must
+    /// now be a near-miss of the hear phrase's word in the same position, by
+    /// the same two floors; the inflection the layer exists for ("in forges"
+    /// for "in forge") still clears it.
     private func matchAgainstHears(_ span: String, wordCount: Int, _ compiled: Compiled) -> String? {
         var matched: String?
+        let spanWords = span.split(separator: " ").map(String.init)
         for entry in compiled.entries {
             guard span != entry.termLower else { return nil }   // already canonical
             guard let hears = entry.hears[wordCount] else { continue }
             let hit = hears.contains { hear in
                 guard abs(hear.count - span.count) <= max(2, hear.count * 2 / 5) else { return false }
-                return StringMetrics.jaroWinkler(span, hear) >= Self.hearJaroWinklerFloor
+                guard StringMetrics.jaroWinkler(span, hear) >= Self.hearJaroWinklerFloor
                     || StringMetrics.normalizedLevenshtein(span, hear) <= Self.hearLevenshteinCeiling
+                else { return false }
+                return Self.wordsAlign(spanWords, hear.split(separator: " ").map(String.init))
             }
             guard hit else { continue }
             guard matched == nil || matched == entry.term else { return nil }  // ambiguous
@@ -229,6 +246,63 @@ public final class FuzzyVocabularyCorrector: CorrectionApplying, @unchecked Send
             matched = entry.term
         }
         return matched
+    }
+
+    /// Position by position, every word of the window is the hear phrase's
+    /// word or a near-miss of it by the tier-1 floors.
+    static func wordsAlign(_ span: [String], _ hear: [String]) -> Bool {
+        guard span.count == hear.count else { return false }
+        return zip(span, hear).allSatisfy { word, heard in
+            word == heard
+                || StringMetrics.jaroWinkler(word, heard) >= hearJaroWinklerFloor
+                || StringMetrics.normalizedLevenshtein(word, heard) <= hearLevenshteinCeiling
+        }
+    }
+
+    /// Is this token an inflected form of an ordinary word?
+    ///
+    /// The ordinary-word veto asks a lexicon, and the shipped lexicon
+    /// (`/usr/share/dict/words` + the compiled list) is a list of base forms:
+    /// "remain" is in it, "remained" is not, so "remained" reached the tier-1
+    /// hear match against "remain" and became "RamAIn". Same shape on
+    /// LibriSpeech for "letters" → "Letta", "interests" → "Intrsekt",
+    /// "verses" → "Vercel", "stamped"/"stumped" → "STEM OPT" — and for the
+    /// "sharks" the veto's own unit test only refuses because the test lexicon
+    /// happens to list the plural. Regular English suffixes only; the stem
+    /// must itself be at least three letters and an ordinary word.
+    static func isInflectionOfOrdinaryWord(_ token: String,
+                                           _ isOrdinaryWord: (String) -> Bool) -> Bool {
+        inflectionStems(token).contains { $0.count >= 3 && isOrdinaryWord($0) }
+    }
+
+    /// Candidate base forms under the regular English suffix rules: plural and
+    /// possessive `-s`/`-es`/`-'s`, `-ies`/`-ied` → `-y`, past `-ed`/`-d`,
+    /// `-ing` (with the dropped `e` restored and a doubled consonant undone),
+    /// comparative/agentive `-er`/`-ers`/`-est`, and `-ly`.
+    static func inflectionStems(_ token: String) -> [String] {
+        var stems: [String] = []
+        func strip(_ suffix: String) -> String? {
+            guard token.hasSuffix(suffix), token.count > suffix.count else { return nil }
+            return String(token.dropLast(suffix.count))
+        }
+        func undouble(_ stem: String) -> String? {
+            let chars = Array(stem)
+            guard chars.count >= 2, chars[chars.count - 1] == chars[chars.count - 2] else { return nil }
+            return String(chars.dropLast())
+        }
+        for suffix in ["'s", "’s", "s", "es", "d", "ly"] {
+            if let stem = strip(suffix) { stems.append(stem) }
+        }
+        for suffix in ["ies", "ied"] {
+            if let stem = strip(suffix) { stems.append(stem + "y") }
+        }
+        for suffix in ["ed", "ing", "er", "ers", "est"] {
+            guard let stem = strip(suffix) else { continue }
+            stems.append(stem)
+            stems.append(stem + "e")
+            if let single = undouble(stem) { stems.append(single) }
+        }
+        return stems
     }
 
     // MARK: - tokenization

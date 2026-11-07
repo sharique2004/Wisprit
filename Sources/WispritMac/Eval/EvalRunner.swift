@@ -434,6 +434,7 @@ struct EvalRunner {
         // mean the same thing on another machine, and the smaller lexicon errs
         // toward MORE fuzzy activity, so the eval sees at least everything
         // production would risk.
+        let ordinary = Self.ordinaryWords(options.lexicon)
         let corrections = FuzzyVocabularyCorrector(
             base: store,
             entries: {
@@ -442,7 +443,7 @@ struct EvalRunner {
                 }
             },
             isKnownTerm: { store.isKnownTerm($0) },
-            isOrdinaryWord: { HighFrequencyWords.words.contains($0.lowercased()) })
+            isOrdinaryWord: { ordinary.contains($0.lowercased()) })
 
         var out: [StageRecord] = []
         for record in asr {
@@ -485,6 +486,25 @@ struct EvalRunner {
                                        locale: options.locale, config: config.label))
         try StageRecord.jsonl(out).write(to: url, atomically: true, encoding: .utf8)
         return out
+    }
+
+    /// The fuzzy layer's ordinary-word list for `--lexicon`. `system` is read
+    /// synchronously and in full — `SystemLexicon` loads lazily in the app,
+    /// and a replay that raced that load would score a smaller lexicon for
+    /// its first clips than for its last.
+    static func ordinaryWords(_ lexicon: EvalCommand.Lexicon) -> Set<String> {
+        switch lexicon {
+        case .compiled:
+            return HighFrequencyWords.words
+        case .system:
+            var words = HighFrequencyWords.words
+            if let contents = try? String(contentsOfFile: SystemLexicon.defaultPath, encoding: .utf8) {
+                contents.enumerateLines { line, _ in
+                    if !line.isEmpty { words.insert(line.lowercased()) }
+                }
+            }
+            return words
+        }
     }
 
     private func loadStages(config: EvalCommand.Config, outDir: URL) throws -> [StageRecord] {
@@ -601,6 +621,10 @@ struct EvalRunner {
         if let mic = options.mic {
             parts.append("Microphones: \(mic) — a device-filtered run is only "
                          + "comparable with its A/B counterpart cells.")
+        }
+        if options.lexicon != .compiled {
+            parts.append("Lexicon: \(options.lexicon.rawValue) — the fuzzy layer's ordinary-word "
+                         + "veto matches the shipped app; compare only with rows run the same way.")
         }
         if options.locale != EvalCommand.defaultLocale {
             parts.append("Locale: \(options.locale) — a non-default locale is an "

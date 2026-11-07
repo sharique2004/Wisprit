@@ -222,8 +222,14 @@ public final class InputVolumeAdvisor: @unchecked Sendable {
 public enum InputDeviceProbe {
 
     public static func defaultInput() -> InputDeviceInfo? {
-        guard let id = defaultDevice(kAudioHardwarePropertyDefaultInputDevice) else { return nil }
+        guard let id = defaultInputID() else { return nil }
         return info(of: id)
+    }
+
+    /// The system default input's id alone — what the HAL capture backend
+    /// opens when nothing is pinned. One property read.
+    public static func defaultInputID() -> AudioDeviceID? {
+        defaultDevice(kAudioHardwarePropertyDefaultInputDevice)
     }
 
     /// The same three property reads for an arbitrary device — what
@@ -262,6 +268,11 @@ public enum InputDeviceProbe {
         allDevices().first {
             transport(of: $0) == kAudioDeviceTransportTypeBuiltIn && hasInputStreams($0)
         }
+    }
+
+    /// Every device with at least one input stream — miclab's `--device`.
+    public static func inputDevices() -> [AudioDeviceID] {
+        allDevices().filter { hasInputStreams($0) }
     }
 
     // MARK: - property reads

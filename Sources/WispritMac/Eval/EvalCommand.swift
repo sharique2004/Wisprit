@@ -92,6 +92,13 @@ enum EvalCommand {
         /// (the analyzer sees the same samples), so it is only worth paying
         /// when the question is about latency rather than accuracy.
         var realtime: Bool = false
+        /// The ordinary-word veto the dictionary's fuzzy layer consults in the
+        /// stages replay. `compiled` (default) is the machine-independent
+        /// `HighFrequencyWords` list — smaller than production's, so it errs
+        /// toward MORE fuzzy activity. `system` adds `/usr/share/dict/words`,
+        /// exactly what `SystemLexicon` gives the shipped app: the
+        /// production-faithful view of what the fuzzy layer would rewrite.
+        var lexicon: Lexicon = .compiled
 
         // MARK: the interactive verbs
 
@@ -111,6 +118,12 @@ enum EvalCommand {
         /// (`EvalRecordPlan.split`), which is the one that should normally
         /// decide — an override is for a speaker joining an existing side.
         var split: String?
+    }
+
+    /// `--lexicon`: which ordinary-word list vetoes fuzzy candidates.
+    enum Lexicon: String, CaseIterable {
+        case compiled
+        case system
     }
 
     enum Parsed: Equatable {
@@ -165,6 +178,10 @@ enum EvalCommand {
                                  microphones — the device A/B's filter
                                  (asr/stages/score; single label on `record`)
           --realtime             pace audio at wall-clock speed
+          --lexicon compiled|system
+                                 ordinary-word veto for the fuzzy dictionary
+                                 layer in `stages` (default: compiled; system
+                                 adds /usr/share/dict/words, as the app does)
 
         record / verify:
           --script <file>        one category per file, under
@@ -273,6 +290,12 @@ enum EvalCommand {
                 options.speaker = raw
             case "--mic":
                 options.mic = raw
+            case "--lexicon":
+                guard let lexicon = Lexicon(rawValue: raw) else {
+                    return .invalid("--lexicon must be "
+                                    + Lexicon.allCases.map(\.rawValue).joined(separator: "|"))
+                }
+                options.lexicon = lexicon
             case "--split":
                 guard EvalRecordPlan.splits.contains(raw) else {
                     return .invalid("--split must be "

@@ -527,6 +527,29 @@ final class MetricsWriterTests: XCTestCase {
         XCTAssertFalse(absent.contains("conf_"))
     }
 
+    /// Capture-path attribution (2026-11-06): absent unless set, and when set
+    /// it is the last pair on the row — after `conf_min`, the append-only rule.
+    func testCaptureBackendAndFirstChunkAreAppendedLast() {
+        let absent = MetricsRecord(
+            ts: 0, heldMs: 1, engine: "apple_live", finalizeMs: 1, timedOut: false,
+            postMs: 0, insertMs: 0, outcome: "paste", chars: 4).jsonLine()
+        XCTAssertFalse(absent.contains("capture_backend"))
+        XCTAssertFalse(absent.contains("first_chunk_ms"))
+
+        let present = MetricsRecord(
+            ts: 0, heldMs: 1, engine: "apple_live", finalizeMs: 1, timedOut: false,
+            postMs: 0, insertMs: 0, outcome: "paste", chars: 4,
+            confidenceMinimum: 0.25,
+            captureBackend: "hal", firstChunkMs: 106.04).jsonLine()
+        XCTAssertTrue(present.contains(#""capture_backend": "hal""#), present)
+        XCTAssertTrue(present.contains(#""first_chunk_ms": 106.0"#), present)
+        let conf = present.range(of: "conf_min")!.lowerBound
+        let backend = present.range(of: "capture_backend")!.lowerBound
+        let chunk = present.range(of: "first_chunk_ms")!.lowerBound
+        XCTAssertLessThan(conf, backend)
+        XCTAssertLessThan(backend, chunk)
+    }
+
     // MARK: Python round(x, 1) parity
 
     func testRoundingMatchesPythonRoundToOneDecimal() {

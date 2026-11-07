@@ -1,0 +1,66 @@
+{
+  "categories" : [
+    {
+      "category" : "test-clean",
+      "emptyRate" : 0,
+      "utterances" : 200,
+      "wer" : 0.022531645569620253
+    }
+  ],
+  "categoryStage" : "raw",
+  "config" : "refine=off,dict=off",
+  "corpusId" : "ls-test-clean",
+  "engine" : "apple_live",
+  "provenance" : {
+    "corpusSource" : "librispeech",
+    "dictionaryTerms" : 9,
+    "gitSha" : "c8c2ee2",
+    "osBuild" : "26A428",
+    "promptSha256" : "b2a089b526058cb6b3251381e389c6359144dca20ba78c596d201171810a29bf",
+    "scorerVersion" : 1
+  },
+  "split" : "all",
+  "stages" : [
+    {
+      "cer" : 0.051789077212806026,
+      "emptyRate" : 0,
+      "errors" : 89,
+      "refWords" : 3950,
+      "stage" : "raw",
+      "utterances" : 200,
+      "wer" : 0.022531645569620253,
+      "zeroEdit" : 0
+    },
+    {
+      "cer" : 0.051789077212806026,
+      "emptyRate" : 0,
+      "errors" : 89,
+      "refWords" : 3950,
+      "stage" : "corrected",
+      "utterances" : 200,
+      "wer" : 0.022531645569620253,
+      "zeroEdit" : 0
+    },
+    {
+      "cer" : 0.051789077212806026,
+      "emptyRate" : 0,
+      "errors" : 89,
+      "refWords" : 3950,
+      "stage" : "refined",
+      "utterances" : 200,
+      "wer" : 0.022531645569620253,
+      "zeroEdit" : 0
+    },
+    {
+      "cer" : 0.051789077212806026,
+      "emptyRate" : 0,
+      "errors" : 89,
+      "refWords" : 3950,
+      "stage" : "final",
+      "utterances" : 200,
+      "wer" : 0.022531645569620253,
+      "zeroEdit" : 0
+    }
+  ],
+  "timestamp" : "2026-11-06T11:25:57Z"
+}

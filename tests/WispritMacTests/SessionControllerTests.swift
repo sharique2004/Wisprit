@@ -498,6 +498,31 @@ final class SessionControllerTests: XCTestCase {
         }
     }
 
+    // MARK: - capture-path attribution (2026-11-06)
+
+    /// Every utterance row says which Core Audio path opened the mic and how
+    /// long the first buffer took — the backend A/B is readable from the field
+    /// log alone (docs/eval/AUDIT-2026-11-06.md).
+    func testTheRowCarriesTheCaptureBackendAndFirstChunk() {
+        let h = Harness()
+        h.audio.captureBackendValue = "hal"
+        h.audio.firstChunkMsValue = 106.2
+        h.asr.result = UtteranceResult(text: "hello there", engine: "apple_live", finalizeMs: 40,
+                                       peakLevel: 0.3)
+        h.utterance(heldSeconds: 1.2)
+        XCTAssertEqual(h.metrics.last?.captureBackend, "hal")
+        XCTAssertEqual(h.metrics.last?.firstChunkMs, 106.2)
+    }
+
+    func testAPortThatCannotKnowOmitsTheCaptureFields() {
+        let h = Harness()
+        h.asr.result = UtteranceResult(text: "hello there", engine: "apple_live", finalizeMs: 40,
+                                       peakLevel: 0.3)
+        h.utterance(heldSeconds: 1.2)
+        XCTAssertNil(h.metrics.last?.captureBackend)
+        XCTAssertNil(h.metrics.last?.firstChunkMs)
+    }
+
     // MARK: - marginal audio (2026-08-15)
 
     /// The production failure class, end to end: peak 0.04 over a 0.0146 floor

@@ -139,6 +139,21 @@ public enum DualCaptureSettings {
     }
 }
 
+/// `capture_backend` — which Core Audio path opens the microphone
+/// (docs/eval/AUDIT-2026-11-06.md). `hal` (default): an input-only AUHAL on
+/// the actual input device. `engine`: the pre-2026-11 `AVAudioEngine` path,
+/// which on macOS 27 captures through a private default-device aggregate.
+/// String-keyed like `refine_backend`; anything unrecognized reads as the
+/// default. Read per press, so a flip needs no relaunch. The Mac-mic
+/// parachute is always `hal` — its engine form is what stalled 3 s a press.
+public enum CaptureBackendSettings {
+    public static let key = "capture_backend"
+
+    public static func backend(_ settings: Settings) -> MicCapture.Backend {
+        settings.string(key).flatMap(MicCapture.Backend.init(rawValue:)) ?? .hal
+    }
+}
+
 /// `history_detail` — whether the per-utterance pipeline triple
 /// (`utterance_detail`) is written alongside each transcript. Same string-key
 /// precedent as above; default TRUE because a triple is the same sensitivity
@@ -1409,7 +1424,7 @@ public final class SessionController: @unchecked Sendable {
                                              refusal: VocabularyRetroRefusal? = nil,
                                              applyDetail: String? = nil) {
         metrics.write(MetricsRecord(
-            heldMs: 0, engine: VocabularyChannel.engineName, finalizeMs: 0,
+            heldMs: 0, engine: reconciliation.engine, finalizeMs: 0,
             timedOut: false, postMs: 0, insertMs: 0, outcome: "vocab_retro", chars: 0,
             vocabMs: reconciliation.elapsedMs, vocabHits: hits,
             vocabDelta: proposed ? 1 : 0, applied: applied,
@@ -1627,7 +1642,11 @@ public final class SessionController: @unchecked Sendable {
             graceExtendedMs: lastGraceExtensionMs,
             confidenceRunCount: result.confidence?.runCount,
             confidenceBelowFraction: result.confidence?.fractionBelowLoggingBucket,
-            confidenceMinimum: result.confidence?.minimumConfidence))
+            confidenceMinimum: result.confidence?.minimumConfidence,
+            // Capture-path attribution (2026-11-06): which backend opened the
+            // mic, and the SCO/HAL bring-up clock the port always measured.
+            captureBackend: audio.captureBackend,
+            firstChunkMs: audio.firstChunkMs))
     }
 
     // MARK: - level ticker
