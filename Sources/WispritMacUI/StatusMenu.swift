@@ -136,18 +136,13 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         var icon = actions.iconState()
         icon.state = sessionState
         let spec = StatusMenuModel.iconSpec(for: icon)
-        guard let image = Self.image(for: spec) else {
-            // The emoji title is the fallback the model still owns: a status
-            // item with neither image nor title is an invisible menu bar.
-            button.image = nil
-            button.title = StatusMenuModel.glyph(for: icon.state)
-            return
-        }
         button.title = ""
-        button.image = image
-        // Only the recording icon carries its own colour; every other state is a
-        // template macOS tints for the menu bar's appearance.
-        button.contentTintColor = spec.isTemplate ? nil : Self.dynamic(Theme.Token.hot)
+        button.image = Self.image(for: spec)
+        button.imagePosition = .imageOnly
+        // The image carries its own colours when it is not a template; a tint
+        // here would paint the bars orange along with the dot.
+        button.contentTintColor = nil
+        button.setAccessibilityLabel(spec.glyph.accessibilityLabel)
     }
 
     /// A token as a dynamic `NSColor`, so a menu bar that flips appearance flips
@@ -159,15 +154,19 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
         }
     }
 
-    private static func image(for spec: MenuIconSpec) -> NSImage? {
-        guard let image = NSImage(systemSymbolName: spec.symbolName,
-                                  accessibilityDescription: "Wisprit") else { return nil }
-        let pointSize = StatusMenuModel.displayedPointSize(for: spec.symbolName)
-        let configured = image.withSymbolConfiguration(
-            .init(pointSize: pointSize, weight: .regular)) ?? image
-        configured.isTemplate = spec.isTemplate
-        guard spec.symbolName.hasPrefix("mic") else { return configured }
-        return configured.withHeightScale(StatusMenuModel.micIconHeightScale)
+    /// What macOS paints template glyphs with on each menu bar: white on a
+    /// dark bar, near-black on a light one. Only the listening image needs
+    /// it, for the bars beside its lit dot; resolved at draw time, so the
+    /// bars follow the wallpaper the way their template neighbours do.
+    private static let menuBarInk = NSColor(name: nil) { appearance in
+        appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+            ? .white : NSColor(white: 0, alpha: 0.85)
+    }
+
+    /// The Wisprit mark for this state, drawn in code (`WispritMark`): one
+    /// glyph with a part changed per state, never a different symbol.
+    private static func image(for spec: MenuIconSpec) -> NSImage {
+        WispritMark.image(for: spec, ink: menuBarInk, tally: dynamic(Theme.Token.hot))
     }
 
     /// `_rebuild_menu`: throw the menu away and rebuild it from fresh state.
@@ -297,20 +296,6 @@ public final class StatusMenu: NSObject, NSMenuDelegate {
 }
 
 private extension NSImage {
-    /// Same width, shorter height, glyph scaled to fill and so centered.
-    /// A point size cannot change height on its own. 0.8 is mild enough that
-    /// the microphone still reads.
-    func withHeightScale(_ scale: CGFloat) -> NSImage {
-        guard size.width > 1, size.height > 1, scale > 0, scale < 1 else { return self }
-        let target = NSSize(width: size.width, height: size.height * scale)
-        let shortened = NSImage(size: target, flipped: false) { [self] rect in
-            draw(in: rect)
-            return true
-        }
-        shortened.isTemplate = isTemplate
-        return shortened
-    }
-
     /// A coloured copy. The draw block re-runs on every draw, so a dynamic
     /// `NSColor` still resolves against the appearance in effect at that moment.
     func tinted(with color: NSColor) -> NSImage {
