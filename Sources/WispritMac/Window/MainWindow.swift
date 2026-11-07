@@ -26,11 +26,13 @@ public final class MainWindowController: NSObject, NSWindowDelegate {
 
     private let model: WispritWindowModel
     private var window: NSWindow?
+    private var settingsWindow: NSWindow?
     private let log = WLog.logger("window")
 
     public init(model: WispritWindowModel) {
         self.model = model
         super.init()
+        model.onOpenSettings = { [weak self] in self?.showSettings() }
     }
 
     public var isVisible: Bool { window?.isVisible ?? false }
@@ -38,7 +40,12 @@ public final class MainWindowController: NSObject, NSWindowDelegate {
     /// Show the window, creating it on first use. Idempotent: a second click on
     /// the Dock icon just brings the existing window forward.
     public func show(tab: WispritWindowModel.Tab? = nil) {
-        if let tab { model.selectedTab = tab }
+        // Settings is its own window now; everything else opens this one and
+        // lets the model send the page where it lives (`.setup` is a sheet).
+        if tab == .settings {
+            showSettings()
+            return
+        }
         let flipped = becomeRegularApp()
 
         // Both branches raise the same way, and both wait out the policy flip.
@@ -49,6 +56,7 @@ public final class MainWindowController: NSObject, NSWindowDelegate {
         if let window {
             raise(window, afterPolicyChange: flipped)
             model.windowDidOpen()
+            if let tab { model.route(to: tab) }
             return
         }
 
@@ -57,31 +65,59 @@ public final class MainWindowController: NSObject, NSWindowDelegate {
             styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false)
-        // The window's identity is the app, not the page: Mission Control, the
-        // Window menu and ⌘-Tab all show this string, and a window called
-        // "Settings" is not the one the user is looking for. The title is set
-        // and then hidden — the Hub draws its own header (§3.1).
+        // The page title is the window title (HIG: under 15 characters, never
+        // the app name) — bridged from each page's `.navigationTitle`. The
+        // toolbar is the system's, bridged from SwiftUI's `.toolbar`, so it
+        // gets Liquid Glass, the macOS 27 uniform toolbar and the
+        // accessibility variants without a line of chrome code here.
         window.title = "Wisprit"
-        window.titleVisibility = .hidden
-        window.titlebarAppearsTransparent = true
-        // The 52 pt band above the sidebar and the card is not chrome, so
-        // dragging it moves the window like chrome would.
-        window.isMovableByWindowBackground = true
+        window.toolbarStyle = .unified
         window.isReleasedWhenClosed = false
-        window.minSize = NSSize(width: 900, height: 600)
+        window.minSize = NSSize(width: 820, height: 560)
         window.delegate = self
-        window.contentView = NSHostingView(rootView: HubShell(model: model))
+        let host = NSHostingController(rootView: HubShell(model: model))
+        host.sceneBridgingOptions = [.title, .toolbars]
+        window.contentViewController = host
+        window.setContentSize(NSSize(width: 1040, height: 700))
         window.center()
         window.setFrameAutosaveName("WispritMainWindow")
         self.window = window
 
         raise(window, afterPolicyChange: flipped)
         model.windowDidOpen()
+        if let tab { model.route(to: tab) }
+    }
+
+    /// ⌘, — Settings in its own window, as the HIG asks. One instance; a
+    /// second request brings it forward.
+    public func showSettings() {
+        let flipped = becomeRegularApp()
+        if let settingsWindow {
+            raise(settingsWindow, afterPolicyChange: flipped)
+            return
+        }
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 620),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
+            backing: .buffered,
+            defer: false)
+        window.title = "Settings"
+        window.toolbarStyle = .preference
+        window.isReleasedWhenClosed = false
+        window.minSize = NSSize(width: 560, height: 420)
+        let host = NSHostingController(rootView: SettingsWindowRoot(model: model))
+        host.sceneBridgingOptions = [.title, .toolbars]
+        window.contentViewController = host
+        window.setContentSize(NSSize(width: 640, height: 620))
+        window.center()
+        window.setFrameAutosaveName("WispritSettingsWindow")
+        self.settingsWindow = window
+        raise(window, afterPolicyChange: flipped)
     }
 
     /// Open straight into the first-run wizard.
     public func showOnboarding() {
-        show(tab: .setup)
+        show(tab: nil)
         model.beginOnboarding()
     }
 
@@ -189,6 +225,9 @@ public final class MainWindowController: NSObject, NSWindowDelegate {
     // MARK: - NSWindowDelegate
 
     public func windowWillClose(_ notification: Notification) {
+        // The Settings window shares this delegate only for symmetry; closing
+        // it says nothing about the Hub.
+        guard (notification.object as? NSWindow) === window else { return }
         model.windowDidClose()
         // Give the front back to whatever the user was in, but STAY a regular
         // app.

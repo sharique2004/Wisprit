@@ -766,3 +766,36 @@ final class WindowLaunchArgumentTests: XCTestCase {
         XCTAssertEqual(WispritMacMain.WindowLaunch.parse(["nonsense"]), .page(.setup))
     }
 }
+
+@MainActor
+extension WindowModelTests {
+    // MARK: - routing (Setup is a sheet, Settings a window)
+
+    func testSidebarPagesSelectAndTheOthersRouteElsewhere() {
+        let model = makeModel()
+        var settingsOpened = 0
+        model.onOpenSettings = { settingsOpened += 1 }
+
+        XCTAssertEqual(model.selectedTab, .home, "the window opens on Dictations")
+        model.route(to: .insights)
+        XCTAssertEqual(model.selectedTab, .insights)
+
+        model.route(to: .setup)
+        XCTAssertEqual(model.selectedTab, .insights, "Setup never replaces the page")
+        XCTAssertTrue(model.isShowingHealth)
+
+        model.route(to: .settings)
+        XCTAssertEqual(settingsOpened, 1)
+        XCTAssertEqual(model.selectedTab, .insights)
+    }
+
+    func testTheHealthSheetNeverStacksOnTheWizard() {
+        let model = makeModel()
+        model.route(to: .setup)
+        XCTAssertTrue(model.isShowingHealth)
+        model.beginOnboarding()
+        XCTAssertFalse(model.isShowingHealth, "the wizard replaces the sheet")
+        model.route(to: .setup)
+        XCTAssertFalse(model.isShowingHealth, "and nothing raises it under the wizard")
+    }
+}

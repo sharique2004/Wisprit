@@ -651,8 +651,15 @@ public final class AppController: NSObject, NSApplicationDelegate {
 
     /// Show the main window. This is what a Dock click, a Finder open and the
     /// menu's first row all end up calling.
-    public func openWindow(tab: WispritWindowModel.Tab = .setup) {
+    /// nil keeps whatever page was showing (Dictations on a first open); a
+    /// Dock click is a request to see the app, not to be sent to Setup.
+    public func openWindow(tab: WispritWindowModel.Tab? = nil) {
         windowController.show(tab: tab)
+    }
+
+    /// ⌘, and the status menu's Settings row.
+    public func openSettings() {
+        windowController.showSettings()
     }
 
     /// Open the window straight into the first-run wizard.
@@ -713,6 +720,13 @@ public final class AppController: NSObject, NSApplicationDelegate {
         let app = NSApplication.shared
         app.setActivationPolicy(.accessory)
         app.delegate = self
+        // Harmless while we are an agent (no menu bar is drawn); essential the
+        // moment the window opens — ⌘, ⌘Q and the Edit key equivalents route
+        // through it.
+        MainMenu.install(MainMenu.Actions(
+            openSettings: { [weak self] in self?.openSettings() },
+            showPage: { [weak self] tab in self?.openWindow(tab: tab) },
+            quit: { [weak self] in self?.terminate() }))
 
         // As early as possible: everything below is a beat during which a
         // simultaneous second launch would find the lock taken and nobody
@@ -728,9 +742,8 @@ public final class AppController: NSObject, NSApplicationDelegate {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 switch request {
-                // `.window(nil)` lands on Setup, because that is where
-                // `openWindow()`'s default lands — deliberately the SAME call a
-                // Dock click makes, so the two entry points cannot drift.
+                // `.window(nil)` is deliberately the SAME call a Dock click
+                // makes, so the two entry points cannot drift.
                 case .window(nil): self.openWindow()
                 case .window(let tab?): self.openWindow(tab: tab)
                 case .setupGuide: self.openSetupGuide()
@@ -1120,7 +1133,9 @@ public final class AppController: NSObject, NSApplicationDelegate {
             // window …`, or the Input Monitoring surface during `launch`).
             // Yanking it to the Status page would undo the user's own request.
             guard !self.windowController.isVisible, model.shouldAutoOpenWindow else { return }
-            self.openWindow(tab: .setup)
+            // The wizard IS the setup surface on a first run; opening the
+            // health sheet under it would only stack two sheets.
+            self.openWindow()
             model.beginOnboarding()
         }
     }

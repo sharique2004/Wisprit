@@ -17,26 +17,37 @@ import WispritMacUI
 /// signal the doctor has no check for.
 struct SetupPage: View {
     @ObservedObject var model: WispritWindowModel
+    /// Closes the sheet. Setup is the health SHEET now (raised by the
+    /// toolbar's status capsule), not a sidebar page.
+    var onDone: () -> Void = {}
 
     @State private var copied = false
 
     var body: some View {
-        HubPage(title: WispritWindowModel.Tab.setup.title) {
-            HStack(spacing: Theme.Space.s8) {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack(alignment: .center, spacing: Theme.Space.s8) {
+                Text(WispritWindowModel.Tab.setup.title)
+                    .font(Theme.font(Theme.Role.pageTitle))
+                    .tracking(Theme.Role.pageTitle.tracking)
+                    .foregroundStyle(Theme.ink)
+                Spacer(minLength: Theme.Space.s16)
                 Button(copied ? "Copied" : "Copy diagnostics") { copyDiagnostics() }
-                    .buttonStyle(.bordered)
                     .controlSize(.small)
                 Button {
                     Task { await model.refreshFull() }
                 } label: {
                     Image(systemName: "arrow.clockwise")
                 }
-                .buttonStyle(.bordered)
                 .controlSize(.small)
                 .help("Check again now")
                 .accessibilityLabel("Check again")
+                Button("Done", action: onDone)
+                    .keyboardShortcut(.defaultAction)
+                    .controlSize(.small)
             }
-        } content: {
+            .padding(.horizontal, Theme.Space.s24)
+            .padding(.vertical, Theme.Space.s16)
+            Divider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     if let notice = model.secureInputNotice {
@@ -48,12 +59,16 @@ struct SetupPage: View {
                     footer
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.horizontal, Theme.Space.s24)
+                .padding(.bottom, Theme.Space.s24)
             }
             // The checklist is empty while the first probe runs and then gains
             // eight rows at once; without an anchor the scroll view holds its
             // old offset, which is how the page came up already past Microphone.
             .defaultScrollAnchor(.top)
         }
+        .frame(minWidth: 620, idealWidth: 680, minHeight: 520, idealHeight: 680)
+        .background(Theme.surface)
     }
 
     // MARK: - banner

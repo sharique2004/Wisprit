@@ -116,18 +116,22 @@ public final class WispritWindowModel: ObservableObject {
         }
     }
 
-    /// The Hub's five pages — `docs/design/ui-redesign.md` §3.2.
+    /// Every place the window can be asked to open — `Wisprit window <page>`
+    /// parses the raw values (`WindowLaunch.parse`, which also keeps the
+    /// pre-redesign spellings working: `status → .setup`, `history → .home`).
     ///
-    /// `allCases` is the sidebar's order, and the raw values are what
-    /// `Wisprit window <page>` parses (`WindowLaunch.parse`, which also keeps
-    /// the pre-redesign spellings working: `status → .setup`, `history → .home`).
+    /// Only the first three are sidebar destinations. `setup` is a STATE, not a
+    /// place: it opens as the health sheet over whatever page is showing, and
+    /// the toolbar's status capsule is its everyday door. `settings` opens the
+    /// ⌘, Settings window (HIG: settings live in their own window, titled by
+    /// pane). Both keep their raw values so every existing route still lands.
     public enum Tab: String, Sendable, Equatable, CaseIterable, Identifiable {
         case home, dictionary, insights, setup, settings
         public var id: String { rawValue }
 
         public var title: String {
             switch self {
-            case .home: return "Home"
+            case .home: return "Dictations"
             case .dictionary: return "Dictionary"
             case .insights: return "Insights"
             case .setup: return "Setup"
@@ -137,7 +141,7 @@ public final class WispritWindowModel: ObservableObject {
 
         public var symbol: String {
             switch self {
-            case .home: return "house"
+            case .home: return "text.bubble"
             case .dictionary: return "character.book.closed"
             case .insights: return "chart.bar.xaxis"
             case .setup: return "checklist"
@@ -145,16 +149,18 @@ public final class WispritWindowModel: ObservableObject {
             }
         }
 
-        /// The two pinned to the bottom of the sidebar, under the hairline.
-        public var isPinnedToBottom: Bool {
+        /// In the sidebar list. The rest route elsewhere — see the type note.
+        public var isSidebarDestination: Bool {
             switch self {
-            case .setup, .settings: return true
-            case .home, .dictionary, .insights: return false
+            case .home, .dictionary, .insights: return true
+            case .setup, .settings: return false
             }
         }
 
-        public static var primary: [Tab] { allCases.filter { !$0.isPinnedToBottom } }
-        public static var pinned: [Tab] { allCases.filter(\.isPinnedToBottom) }
+        /// The sidebar, in order. ⌘1…⌘3 follow this order.
+        public static var primary: [Tab] { allCases.filter(\.isSidebarDestination) }
+        /// The routes that open something other than a sidebar page.
+        public static var elsewhere: [Tab] { allCases.filter { !$0.isSidebarDestination } }
     }
 
     /// The 6 pt dot the `setup` nav row carries (§3.2). Absent is a real state:
@@ -225,7 +231,17 @@ public final class WispritWindowModel: ObservableObject {
     /// second population beyond the quarantined dictionary entries.
     @Published public private(set) var learnProposals: [LearnProposalRow] = []
     @Published public var dictionarySearch = ""
-    @Published public var selectedTab: Tab = .setup
+    /// The sidebar page on screen. Only ever a sidebar destination — route
+    /// `.setup` / `.settings` through `route(to:)`, which sends them where they
+    /// live now.
+    @Published public var selectedTab: Tab = .home
+    /// The health sheet (what the Setup page became). Raised by the toolbar
+    /// capsule, by `route(to: .setup)`, and by every "something is broken"
+    /// path that used to open the Setup tab.
+    @Published public var isShowingHealth = false
+    /// Opens the ⌘, Settings window. Set by the window controller, which owns
+    /// that window; nil in tests, where routing to Settings is then a no-op.
+    public var onOpenSettings: (() -> Void)?
     /// The try-it scratch field. Held here so switching tabs does not lose it.
     @Published public var playgroundText = ""
     /// When the last full probe landed — "Checked 4 seconds ago." on the Setup
@@ -755,6 +771,10 @@ public final class WispritWindowModel: ObservableObject {
         proposals > 0 ? .attention : nil
     }
 
+    /// The sidebar's Dictionary count: everything waiting on the user's
+    /// decision. Zero shows no badge.
+    public var dictionaryReviewCount: Int { learnProposals.count }
+
     public var dictionaryBadge: SetupBadge? {
         Self.dictionaryBadge(proposals: learnProposals.count)
     }
@@ -1197,6 +1217,21 @@ public final class WispritWindowModel: ObservableObject {
         micTestPassed = false
     }
 
+    /// Send a request to where that page lives now: a sidebar page is
+    /// selected, `.setup` raises the health sheet, `.settings` opens the ⌘,
+    /// window. The health sheet never stacks on the onboarding sheet — the
+    /// wizard already IS the setup surface while it runs.
+    public func route(to tab: Tab) {
+        switch tab {
+        case .home, .dictionary, .insights:
+            selectedTab = tab
+        case .setup:
+            if !isOnboarding { isShowingHealth = true }
+        case .settings:
+            onOpenSettings?()
+        }
+    }
+
     /// True on a first run, or when a required permission has gone missing.
     public var shouldAutoOpenWindow: Bool {
         OnboardingModel.shouldAutoOpen(
@@ -1207,6 +1242,7 @@ public final class WispritWindowModel: ObservableObject {
     public func beginOnboarding(resuming: Bool = true) {
         liveTypingSettled = settings.bool(OnboardingSettings.liveTypingSettledKey, or: false)
         welcomeAcknowledged = false
+        isShowingHealth = false
         isOnboarding = true
         // Re-running the guide from the top is a request to see it work again,
         // so the try-it step and the mic test both have to be re-proved.

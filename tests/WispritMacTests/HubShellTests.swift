@@ -40,11 +40,14 @@ final class HubShellTests: XCTestCase {
 
     // MARK: - nav
 
-    func testTheSidebarHasThreePagesOverTwoPinnedOnes() {
+    /// Every route `Wisprit window <page>` accepts survives, but only three are
+    /// sidebar pages: Setup is the health sheet, Settings the ⌘, window.
+    func testTheSidebarHasThreePagesAndTwoRoutesElsewhere() {
         XCTAssertEqual(WispritWindowModel.Tab.allCases.map(\.rawValue),
                        ["home", "dictionary", "insights", "setup", "settings"])
         XCTAssertEqual(WispritWindowModel.Tab.primary, [.home, .dictionary, .insights])
-        XCTAssertEqual(WispritWindowModel.Tab.pinned, [.setup, .settings])
+        XCTAssertEqual(WispritWindowModel.Tab.elsewhere, [.setup, .settings])
+        XCTAssertEqual(WispritWindowModel.Tab.home.title, "Dictations")
     }
 
     func testEveryTabNamesAnSFSymbolAndATitle() {

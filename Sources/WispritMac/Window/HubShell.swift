@@ -3,51 +3,49 @@ import AppKit
 import SwiftUI
 import WispritMacUI
 
-/// The Hub — `docs/design/ui-redesign.md` §3.1–3.2.
+/// The Hub — a stock `NavigationSplitView` with a system toolbar.
 ///
-/// A vibrant sidebar and an inset content card on `ground`, under a transparent
-/// full-size titlebar. Three things make it that rather than a plain
-/// `NavigationSplitView`:
+/// The first Hub drew its own sidebar (an `NSVisualEffectView` slab), its own
+/// 52 pt titlebar band, and an inset content card. All three are gone, on the
+/// research in docs/design (Apple HIG + WWDC25 219/356): Liquid Glass belongs
+/// to the navigation layer, which the system draws, and macOS 27 changed that
+/// layer again (edge-to-edge sidebars, one window corner radius, a system glass
+/// slider) — a hand-drawn sidebar picks up none of it, the stock one picks up
+/// all of it, including Reduce Transparency / Increase Contrast behaviour.
 ///
-///  * The sidebar has a *pinned* bottom group (Setup · Settings) and a status
-///    footer. A `List(selection:)` can express neither without fighting it.
-///  * The nav row's selection, badge dot and pitch are all specified to the
-///    point (§3.2), and the system sidebar style overrides most of them.
-///  * The 52 pt titlebar band has to be laid out, not inherited: the window is
-///    `fullSizeContentView` with a hidden title, so nothing else reserves it.
-///
-/// What is NOT hand-rolled is the material. `NSVisualEffectView` with
-/// `.sidebar` / `.behindWindow` / `.followsWindowActiveState` is the whole
-/// native-advantage moment (§1.7) and there is no SwiftUI equivalent that
-/// blends behind the window.
+/// So: the sidebar is a `List` of the three daily destinations; page titles
+/// and page actions live in the window toolbar (bridged from SwiftUI by
+/// `MainWindowController`); the studio palette is the CONTENT layer only.
+/// Setup became the health sheet behind the toolbar's status capsule, and
+/// Settings moved to its own ⌘, window.
 struct HubShell: View {
     @ObservedObject var model: WispritWindowModel
 
     var body: some View {
-        HStack(spacing: 0) {
-            HubSidebar(model: model)
-                .frame(width: HubMetrics.sidebarWidth)
-                .background(VibrantSidebar())
-            detail
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(Theme.ground)
+        NavigationSplitView {
+            List(selection: sidebarSelection) {
+                ForEach(WispritWindowModel.Tab.primary) { tab in
+                    Label(tab.title, systemImage: tab.symbol)
+                        .badge(badgeCount(for: tab))
+                        .tag(tab)
+                }
+            }
+            .navigationSplitViewColumnWidth(min: 176, ideal: 196, max: 260)
+        } detail: {
+            page
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+                .background(Theme.surface)
+                .toolbar {
+                    ToolbarItem(placement: .primaryAction) {
+                        StatusCapsule(model: model)
+                    }
+                }
         }
-        // The titlebar band is drawn by this view, not reserved by AppKit: the
-        // sidebar material has to run behind the traffic lights, and the content
-        // card has to start below them.
-        .ignoresSafeArea(.container, edges: .top)
         .sheet(isPresented: onboardingPresented) {
             OnboardingSheet(model: model)
         }
-    }
-
-    @ViewBuilder
-    private var detail: some View {
-        VStack(spacing: 0) {
-            Color.clear.frame(height: HubMetrics.titlebarBand)
-            ContentCard {
-                page
-            }
+        .sheet(isPresented: $model.isShowingHealth) {
+            SetupPage(model: model, onDone: { model.isShowingHealth = false })
         }
     }
 
@@ -57,9 +55,22 @@ struct HubShell: View {
         case .home: HomePage(model: model)
         case .dictionary: DictionaryPage(model: model)
         case .insights: InsightsPage(model: model)
-        case .setup: SetupPage(model: model)
-        case .settings: SettingsPage(model: model)
+        // Never selected (see `route(to:)`); kept total so a stale value can
+        // never blank the window.
+        case .setup, .settings: HomePage(model: model)
         }
+    }
+
+    /// `List` wants an optional selection; nil (a click in empty sidebar
+    /// space) keeps the page that is already showing.
+    private var sidebarSelection: Binding<WispritWindowModel.Tab?> {
+        Binding(get: { model.selectedTab },
+                set: { if let tab = $0 { model.route(to: tab) } })
+    }
+
+    /// Dictionary's count of items waiting on a decision. Zero hides the badge.
+    private func badgeCount(for tab: WispritWindowModel.Tab) -> Int {
+        tab == .dictionary ? model.dictionaryReviewCount : 0
     }
 
     private var onboardingPresented: Binding<Bool> {
@@ -68,90 +79,47 @@ struct HubShell: View {
     }
 }
 
-// MARK: - metrics
+// MARK: - status capsule
 
-/// §3.2's table, in one place. These are *sizes*, not paddings — the 4 pt
-/// spacing scale in `Theme.Space` still governs everything inside a page.
-enum HubMetrics {
-    static let sidebarWidth: Double = 216
-    /// Room for the traffic lights. Sidebar content and the content card both
-    /// begin below it.
-    static let titlebarBand: Double = 52
-    /// The page header inside the card: title left, actions right.
-    static let pageHeader: Double = 52
-    static let navRowHeight: Double = 32
-    /// Row height + 4 pt gap.
-    static let navRowPitch: Double = 36
-    static let navRowInsetLeading: Double = 12
-    static let navRowInsetTrailing: Double = 10
-    static let cardInset: Double = 10
-    static let statusDot: Double = 6
-    static let badgeDot: Double = 6
-    static let footerHeight: Double = 28
-}
-
-// MARK: - sidebar
-
-private struct HubSidebar: View {
+/// The toolbar's one piece of live state, replacing the sidebar footer (the
+/// HIG: no critical information at the bottom of a sidebar). It names the
+/// microphone that will be used, so a headset that is about to dictate is
+/// visible BEFORE the key goes down, and it is the door to the health sheet.
+///
+/// The dot is `hot` only while audio is actually open (§1.6's orange rule).
+struct StatusCapsule: View {
     @ObservedObject var model: WispritWindowModel
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            Color.clear.frame(height: HubMetrics.titlebarBand)
-            navGroup(WispritWindowModel.Tab.primary)
-            Spacer(minLength: Theme.Space.s16)
-            Rectangle()
-                .fill(Theme.hairline)
-                .frame(height: 1)
-                .padding(.horizontal, Theme.Space.s12)
-                .padding(.bottom, Theme.Space.s8)
-            navGroup(WispritWindowModel.Tab.pinned)
-            footer
-        }
-    }
-
-    private func navGroup(_ tabs: [WispritWindowModel.Tab]) -> some View {
-        VStack(alignment: .leading, spacing: HubMetrics.navRowPitch - HubMetrics.navRowHeight) {
-            ForEach(tabs) { tab in
-                NavRow(tab: tab,
-                       isSelected: model.selectedTab == tab,
-                       badge: badge(for: tab)) {
-                    model.selectedTab = tab
-                }
-            }
-        }
-        .padding(.horizontal, Theme.Space.s8)
-    }
-
-    /// Which nav rows wear the 6 pt dot: Setup for a broken checklist, and —
-    /// Phase 5 — Dictionary while learn proposals await a decision.
-    private func badge(for tab: WispritWindowModel.Tab) -> WispritWindowModel.SetupBadge? {
-        switch tab {
-        case .setup: return model.setupBadge
-        case .dictionary: return model.dictionaryBadge
-        default: return nil
-        }
-    }
-
-    /// The third sanctioned orange (§1.6): the dot is `hot` only while audio is
-    /// actually open.
-    private var footer: some View {
         let status = model.sidebarStatus
-        return HStack(spacing: Theme.Space.s8) {
-            Circle()
-                .fill(color(for: status))
-                .frame(width: HubMetrics.statusDot, height: HubMetrics.statusDot)
-            Text(status.label)
-                .font(Theme.font(Theme.Role.caption))
-                .tracking(Theme.Role.caption.tracking)
-                .foregroundStyle(Theme.inkSecondary)
-            Spacer(minLength: 0)
+        Button {
+            model.route(to: .setup)
+        } label: {
+            HStack(spacing: Theme.Space.s8) {
+                Circle()
+                    .fill(color(for: status))
+                    .frame(width: 7, height: 7)
+                Text(label(for: status))
+                    .font(Theme.font(Theme.Role.caption))
+                    .foregroundStyle(status == .needsSetup ? Theme.ink : Theme.inkSecondary)
+                    .lineLimit(1)
+            }
+            .padding(.horizontal, Theme.Space.s4)
         }
-        .frame(height: HubMetrics.footerHeight)
-        .padding(.horizontal, Theme.Space.s20)
-        .padding(.bottom, Theme.Space.s8)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Wisprit is \(status.label.lowercased())")
+        .help(status == .needsSetup ? "Something needs fixing — open Setup" : "Setup and health")
+        .accessibilityLabel("Wisprit is \(status.label.lowercased()). Open setup.")
+    }
+
+    private func label(for status: WispritWindowModel.SidebarStatus) -> String {
+        switch status {
+        case .needsSetup:
+            return "Needs setup · Fix"
+        case .ready, .listening:
+            let mic = model.facts.inputDeviceName
+            return mic.isEmpty ? status.label : "\(status.label) · \(mic)"
+        case .dictationOff:
+            return status.label
+        }
     }
 
     private func color(for status: WispritWindowModel.SidebarStatus) -> Color {
@@ -164,104 +132,28 @@ private struct HubSidebar: View {
     }
 }
 
-/// One sidebar row. Selection is the single place in the app that defers to the
-/// user's macOS accent colour (§3.2) — justified there, and nowhere else.
-private struct NavRow: View {
-    let tab: WispritWindowModel.Tab
-    let isSelected: Bool
-    let badge: WispritWindowModel.SetupBadge?
-    let select: () -> Void
+// MARK: - page container
 
-    @State private var isHovering = false
-
-    var body: some View {
-        Button(action: select) {
-            HStack(spacing: Theme.Space.s8) {
-                Image(systemName: tab.symbol)
-                    .font(.system(size: 15, weight: .regular))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(isSelected ? Color.accentColor : Theme.inkSecondary)
-                    .frame(width: Theme.Space.s20, alignment: .center)
-                Text(tab.title)
-                    .font(Theme.font(Theme.Role.rowTitle))
-                    .foregroundStyle(Theme.ink)
-                Spacer(minLength: Theme.Space.s4)
-                if let badge {
-                    Circle()
-                        .fill(badge == .blocking ? Theme.critical : Theme.attention)
-                        .frame(width: HubMetrics.badgeDot, height: HubMetrics.badgeDot)
-                        .accessibilityLabel(badge == .blocking
-                                            ? "needs setup" : "needs attention")
-                }
-            }
-            .padding(.leading, HubMetrics.navRowInsetLeading)
-            .padding(.trailing, HubMetrics.navRowInsetTrailing)
-            .frame(height: HubMetrics.navRowHeight)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.control, style: .continuous)
-                    .fill(background)
-            )
-            .contentShape(Rectangle())
-        }
-        .buttonStyle(.plain)
-        .onHover { isHovering = $0 }
-        .accessibilityAddTraits(isSelected ? [.isSelected, .isButton] : .isButton)
-    }
-
-    private var background: Color {
-        if isSelected { return Color.accentColor.opacity(0.16) }
-        return isHovering ? Theme.fillHover : .clear
-    }
-}
-
-// MARK: - content card
-
-/// The inset card every page lives in: flat `surface`, one hairline, no shadow.
-/// Transcripts have to be legible on any desktop, so there is no material here
-/// and no elevation beyond the value step (§1.7).
-struct ContentCard<Content: View>: View {
-    @ViewBuilder var content: Content
-
-    var body: some View {
-        content
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            .background(
-                RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                    .fill(Theme.surface)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: Theme.Radius.card, style: .continuous)
-                    .strokeBorder(Theme.hairline, lineWidth: 1)
-            )
-            .padding(HubMetrics.cardInset)
-    }
-}
-
-/// A page inside the card: a 52 pt header (title left, actions right) over
-/// whatever the page draws, with §3.2's 24 / 20 / 24 padding.
+/// A page in the Hub. The title becomes the window title (bridged into the
+/// toolbar) and `actions` become the page's toolbar group, trailing — so the
+/// page body starts at the top of the content area instead of under a header
+/// row of its own, and an action can never be squeezed into "+ …" again.
 struct HubPage<Actions: View, Content: View>: View {
     let title: String
     @ViewBuilder var actions: Actions
     @ViewBuilder var content: Content
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(alignment: .center, spacing: Theme.Space.s12) {
-                Text(title)
-                    .font(Theme.font(Theme.Role.pageTitle))
-                    .tracking(Theme.Role.pageTitle.tracking)
-                    .foregroundStyle(Theme.ink)
-                Spacer(minLength: Theme.Space.s16)
-                actions
+        content
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+            .padding(.horizontal, Theme.Space.s24)
+            .padding(.top, Theme.Space.s16)
+            .navigationTitle(title)
+            .toolbar {
+                ToolbarItemGroup(placement: .primaryAction) {
+                    actions
+                }
             }
-            .frame(height: HubMetrics.pageHeader)
-            content
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        }
-        .padding(.horizontal, Theme.Space.s24)
-        .padding(.top, Theme.Space.s20)
-        .padding(.bottom, Theme.Space.s24)
     }
 }
 
@@ -269,24 +161,5 @@ extension HubPage where Actions == EmptyView {
     init(title: String, @ViewBuilder content: () -> Content) {
         self.init(title: title, actions: { EmptyView() }, content: content)
     }
-}
-
-// MARK: - material
-
-/// §1.7's one vibrancy site. `.behindWindow` blending is what makes the sidebar
-/// sample the desktop rather than the window, and
-/// `.followsWindowActiveState` is what dims it when Wisprit is not frontmost —
-/// the two behaviours that read as "native" and that no SwiftUI material gives
-/// you on macOS.
-private struct VibrantSidebar: NSViewRepresentable {
-    func makeNSView(context: Context) -> NSVisualEffectView {
-        let view = NSVisualEffectView()
-        view.material = .sidebar
-        view.blendingMode = .behindWindow
-        view.state = .followsWindowActiveState
-        return view
-    }
-
-    func updateNSView(_ view: NSVisualEffectView, context: Context) {}
 }
 #endif
