@@ -45,6 +45,12 @@ struct JSONObject {
     mutating func setIfAbsent(_ key: String, _ value: JSONValue) {
         if self[key] == nil { self[key] = value }
     }
+
+    /// `setIfAbsent` for every key of `other`, in its order — how a merge keeps
+    /// a field only the later copy recorded.
+    mutating func fillAbsent(from other: JSONObject) {
+        for entry in other.entries { setIfAbsent(entry.key, entry.value) }
+    }
 }
 
 // MARK: - Accessors

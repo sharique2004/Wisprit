@@ -88,6 +88,16 @@ public final class SystemLexicon: Lexicon, @unchecked Sendable {
         }
     }
 
+    /// True once the file read has finished (successfully or not). Until then
+    /// `contains` answers from the compiled-in list alone, so a caller that
+    /// shows the answer to a person (the Dictionary page's review) re-asks
+    /// once this flips.
+    public var isLoaded: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return loaded
+    }
+
     /// Test hook: true once the file read has finished (successfully or not).
     func waitUntilLoaded(timeout: TimeInterval) -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
